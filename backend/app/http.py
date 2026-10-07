@@ -1020,6 +1020,11 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
     results = await db(request).results.find(
         {"marksheet_id": sheet["_id"], "revision": revision}
     ).to_list(length=500)
+    student_ids = list({item.get("student_id") for item in results if item.get("student_id")})
+    names = {}
+    if student_ids:
+        for person in await db(request).students.find({"_id": {"$in": student_ids}}).to_list(length=len(student_ids)):
+            names[person["_id"]] = person.get("display_name") or ""
     return {
         "id": sheet["_id"],
         "status": sheet.get("status"),
@@ -1038,6 +1043,7 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
             {
                 "id": item["_id"],
                 "student_id": item.get("student_id"),
+                "display_name": names.get(item.get("student_id"), ""),
                 "status": item.get("status"),
                 "score": item.get("score"),
                 "rank": item.get("rank"),

@@ -21,7 +21,9 @@ export function SettingsPage() {
 
   return (
     <section className="panel">
+      <p className="eyebrow">Administration</p>
       <h1>Settings</h1>
+      <p>This policy is the one used for percentages, bands, and weighted totals.</p>
       {error ? <p className="error">{error}</p> : null}
       {policy ? (
         <dl>

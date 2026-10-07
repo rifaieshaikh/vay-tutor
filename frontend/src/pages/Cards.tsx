@@ -67,6 +67,7 @@ export function CardsPage({ session }: { session: Session }) {
 
   return (
     <section className="panel">
+      <p className="eyebrow">Students</p>
       <h1>Progress cards</h1>
       <p>Drafts stay off the card. Totals use the active published revision and policy version {card?.policy_version ?? 1}.</p>
       {session.actions.includes("export.pdf") ? <button type="button" onClick={() => exportCards("pdf")}>Export PDF</button> : null}

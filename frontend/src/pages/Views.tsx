@@ -77,6 +77,7 @@ export function ViewsPage() {
 
   return (
     <section className="panel">
+      <p className="eyebrow">Reporting</p>
       <h1>Academic views</h1>
       <p>Filters stay in place while you move between views. Counts are distinct students, not a sum of batches.</p>
       <div className="stack">

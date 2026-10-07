@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timezone
 from io import BytesIO
 
@@ -14,7 +15,9 @@ from app.acl import allows
 from app.errors import AppError
 from app.http import current_user, db
 from app.importing.commit import commit_import, known_sessions
-from app.importing.parse import parse_workbook
+from app.importing.corrections import parse_correction_file
+from app.importing.counts import annotate_plan
+from app.importing.parse import parse_workbook, workbook_rows
 from app.importing.plan import apply_decisions, variant_suggestions
 from app.importing.publish import (
     correct_marksheet,
@@ -23,6 +26,7 @@ from app.importing.publish import (
     submit_marksheet,
     withdraw_marksheet,
 )
+from app.security import name_key
 
 router = APIRouter(prefix="/api/v1")
 _MAX_BYTES = 25 * 1024 * 1024
@@ -76,7 +80,9 @@ async def upload_import(request: Request, file: UploadFile = File(...)) -> dict:
     if len(data) > _MAX_BYTES:
         raise AppError(422, "import.too_large", "The workbook is larger than 25 MB.")
     digest = hashlib.sha256(data).hexdigest()
-    existing = await db(request).import_jobs.find_one({"institute_id": user["institute_id"], "sha256": digest})
+    existing = await db(request).import_jobs.find_one(
+        {"institute_id": user["institute_id"], "sha256": digest, "state": {"$nin": ["committed", "cancelled"]}}
+    )
     if existing:
         return {"id": existing["_id"], "state": existing["state"], "duplicate": True}
     try:
@@ -147,15 +153,18 @@ async def get_import(request: Request, import_id: str) -> dict:
     known = await known_sessions(db(request), user["institute_id"])
     plan = apply_decisions(job["parsed"], job.get("decisions") or {}, known)
     plan["totals"].update(await _plan_totals(db(request), user["institute_id"], plan, known))
+    await annotate_plan(db(request), user["institute_id"], plan)
+    stored_rows = _stored_rows(request, job)
     return {
         "id": job["_id"],
         "state": job["state"],
         "filename": job["filename"],
-        "sheets": [_public_sheet(sheet) for sheet in plan["sheets"]],
+        "sheets": [_public_sheet(sheet, stored_rows.get(sheet["name"], [])) for sheet in plan["sheets"]],
         "blockers": plan["blockers"],
         "totals": plan["totals"],
         "variants": variant_suggestions(job["parsed"]),
         "outcomes": job.get("outcomes") or [],
+        "summary": job.get("summary"),
         "ready": plan["ready"],
     }
 
@@ -174,6 +183,9 @@ async def patch_import(request: Request, import_id: str, body: DecisionBody) -> 
         groups = {**(current.get("groups") or {}), **(choice.get("groups") or {})}
         levels = {**(current.get("levels") or {}), **(choice.get("levels") or {})}
         row_batches = {**(current.get("row_batches") or {}), **(choice.get("row_batches") or {})}
+        corrections = {**(current.get("corrections") or {}), **(choice.get("corrections") or {})}
+        names = {**(current.get("names") or {}), **(choice.get("names") or {})}
+        added = {**(current.get("added") or {}), **(choice.get("added") or {})}
         drop_rows = list(dict.fromkeys([*(current.get("drop_rows") or []), *(choice.get("drop_rows") or [])]))
         current.update(choice)
         if groups:
@@ -182,6 +194,12 @@ async def patch_import(request: Request, import_id: str, body: DecisionBody) -> 
             current["levels"] = levels
         if row_batches:
             current["row_batches"] = row_batches
+        if corrections:
+            current["corrections"] = corrections
+        if names:
+            current["names"] = names
+        if added:
+            current["added"] = added
         if drop_rows:
             current["drop_rows"] = drop_rows
         decisions["sheets"][sheet_id] = current
@@ -190,6 +208,88 @@ async def patch_import(request: Request, import_id: str, body: DecisionBody) -> 
     state = "ready" if plan["ready"] else "needs_resolution"
     await db(request).import_jobs.update_one({"_id": job["_id"]}, {"$set": {"decisions": decisions, "state": state}})
     return {"id": job["_id"], "state": state, "ready": plan["ready"], "blockers": plan["blockers"]}
+
+
+@router.post("/imports/{import_id}/corrections")
+async def upload_corrections(request: Request, import_id: str, file: UploadFile = File(...)) -> dict:
+    user = await current_user(request)
+    job = await _job(request, user, import_id)
+    if job["state"] == "committed":
+        raise AppError(422, "import.committed", "This workbook is already committed.")
+    filename = file.filename or "corrections.xlsx"
+    if not filename.lower().endswith(".xlsx"):
+        raise AppError(422, "import.file_type", "Upload an .xlsx correction file.")
+    try:
+        rows = parse_correction_file(await file.read())
+    except ValueError as exc:
+        raise AppError(422, "import.unreadable", str(exc)) from exc
+    known = await known_sessions(db(request), user["institute_id"])
+    plan = apply_decisions(job["parsed"], job.get("decisions") or {}, known)
+    decisions = job.get("decisions") or {"sheets": {}}
+    decisions.setdefault("sheets", {})
+    applied = []
+    unmatched = []
+    for row in rows:
+        sheet = next((item for item in plan["sheets"] if item["name"].strip().casefold() == row["sheet"].casefold()), None)
+        if sheet is None:
+            unmatched.append({"sheet": row["sheet"], "student": row["student"], "message": "That sheet is not in this workbook."})
+            continue
+        wanted_row = row["row"]
+        matches = []
+        for group in sheet["groups"]:
+            for student in group["students"]:
+                if wanted_row not in (None, "") and int(wanted_row) != int(student["row"]):
+                    continue
+                if name_key(row["student"]) == student["name_key"]:
+                    matches.append(student)
+        if len(matches) != 1:
+            unmatched.append({"sheet": row["sheet"], "student": row["student"], "message": "Match one student. Add the Row column when a name appears twice."})
+            continue
+        score = row["score"]
+        status = None
+        if isinstance(score, str) and score.strip().upper() in {"A", "AB"}:
+            status = "absent"
+            score = None
+        elif score in (None, ""):
+            status = "missing"
+            score = None
+        choice = decisions["sheets"].setdefault(sheet["id"], {})
+        corrections = choice.setdefault("corrections", {})
+        corrections[str(matches[0]["row"])] = {"action": "replace", "score": score, "status": status, "reason": row["reason"]}
+        applied.append({"sheet": sheet["name"], "student": matches[0]["display_name"], "row": matches[0]["row"]})
+    await db(request).import_jobs.update_one({"_id": job["_id"]}, {"$set": {"decisions": decisions}})
+    return {"applied": applied, "unmatched": unmatched}
+
+
+@router.get("/imports/{import_id}/correction-template")
+async def correction_template(request: Request, import_id: str):
+    payload = await get_import(request, import_id)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Corrections"
+    sheet.append(["Sheet", "Row", "Student", "File score", "Saved score", "Score", "Reason"])
+    for item in payload["sheets"]:
+        for group in item["groups"]:
+            for student in group["students"]:
+                if student.get("change") not in {"reject", "update"}:
+                    continue
+                sheet.append([
+                    item["name"],
+                    student["row"],
+                    student["display_name"],
+                    student.get("score"),
+                    student.get("before_score"),
+                    "",
+                    "",
+                ])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="corrections.xlsx"'},
+    )
 
 
 @router.get("/imports/{import_id}/preview")
@@ -206,7 +306,7 @@ async def validation_report(request: Request, import_id: str):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Validation"
-    sheet.append(["Sheet", "Row", "Name", "Status", "Score", "Maximum", "Percentage", "Rank", "Source rank", "Blocker"])
+    sheet.append(["Sheet", "Row", "Name", "Status", "Score", "Before", "Change", "Maximum", "Percentage", "Rank", "Source rank", "Blocker"])
     blockers = {(item.get("sheet_id"), item.get("row")): item["message"] for item in payload["blockers"]}
     for item in payload["sheets"]:
         for group in item["groups"]:
@@ -218,6 +318,8 @@ async def validation_report(request: Request, import_id: str):
                         student["display_name"],
                         student["status"],
                         student["score"],
+                        student.get("before_score"),
+                        student.get("change"),
                         group["maximum"],
                         None if student["percentage"] is None else round(student["percentage"], 2),
                         student["rank"],
@@ -235,6 +337,36 @@ async def validation_report(request: Request, import_id: str):
     )
 
 
+@router.get("/imports/{import_id}/outcome-report")
+async def outcome_report(request: Request, import_id: str):
+    user = await current_user(request)
+    if not any("export.xlsx" in grant["actions"] for grant in user["grants"]):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    job = await _job(request, user, import_id)
+    summary = job.get("summary")
+    if not summary:
+        raise AppError(422, "import.not_committed", "Commit the workbook before downloading the outcome.")
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Outcome"
+    sheet.append(["Kind", "Inserted", "Updated", "Unchanged", "Skipped", "Rejected"])
+    for kind, buckets in (summary.get("counts") or {}).items():
+        sheet.append([kind, buckets.get("insert", 0), buckets.get("update", 0), buckets.get("unchanged", 0), buckets.get("skip", 0), buckets.get("reject", 0)])
+    detail = workbook.create_sheet("Sheets")
+    detail.append(["Sheet", "Status", "Kind", "Inserted", "Updated", "Unchanged", "Skipped", "Rejected"])
+    for item in summary.get("by_sheet") or []:
+        for kind, buckets in (item.get("counts") or {}).items():
+            detail.append([item.get("name"), item.get("status"), kind, buckets.get("insert", 0), buckets.get("update", 0), buckets.get("unchanged", 0), buckets.get("skip", 0), buckets.get("reject", 0)])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="import-outcome.xlsx"'},
+    )
+
+
 @router.post("/imports/{import_id}/commit")
 async def commit_import_route(request: Request, import_id: str) -> dict:
     user = await current_user(request)
@@ -243,7 +375,11 @@ async def commit_import_route(request: Request, import_id: str) -> dict:
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
     if job["state"] == "committed":
         return {"id": job["_id"], "state": "committed", "outcomes": job.get("outcomes") or []}
-    result = await commit_import(db(request), request.app.state.client, job, user)
+    if job["state"] == "cancelled":
+        raise AppError(422, "import.cancelled", "This import was cancelled.")
+    raw = await request.body()
+    confirm_updates = bool(json.loads(raw).get("confirm_updates")) if raw else False
+    result = await commit_import(db(request), request.app.state.client, job, user, confirm_updates=confirm_updates)
     return {"id": job["_id"], **result}
 
 
@@ -272,6 +408,7 @@ async def list_imports(request: Request) -> dict:
                 "state": job.get("state"),
                 "created_at": job.get("created_at").isoformat() if job.get("created_at") else None,
                 "outcomes": job.get("outcomes") or [],
+                "summary": job.get("summary"),
             }
         )
     return {"items": items}
@@ -536,6 +673,8 @@ async def _plan_totals(database, institute_id: str, plan: dict, known: dict) -> 
             if group["interpretation"] == "skip_duplicate":
                 continue
             for student in group["students"]:
+                if not str(student.get("display_name") or "").strip():
+                    continue
                 sessions = seen.get(student["name_key"], [])
                 if student.get("batch_session") in sessions:
                     reuse += 1
@@ -591,7 +730,20 @@ async def _editable(request: Request, marksheet_id: str, action: str) -> tuple[d
     return user, sheet
 
 
-def _public_sheet(sheet: dict) -> dict:
+def _stored_rows(request: Request, job: dict) -> dict:
+    file_id = job.get("file_id")
+    if not file_id:
+        return {}
+    path = request.app.state.settings.data_dir / "files" / f"{file_id}.xlsx"
+    if not path.exists():
+        return {}
+    try:
+        return workbook_rows(path.read_bytes())
+    except ValueError:
+        return {}
+
+
+def _public_sheet(sheet: dict, rows: list | None = None) -> dict:
     return {
         "id": sheet["id"],
         "name": sheet["name"],
@@ -606,8 +758,10 @@ def _public_sheet(sheet: dict) -> dict:
         "heading_conflict": sheet["heading_conflict"],
         "heading_acknowledged": sheet["heading_acknowledged"],
         "exam_date": sheet["exam_date"],
+        "rows": rows or [],
         "attempt": sheet["attempt"],
         "exam_type": sheet["exam_type"],
+        "planned": sheet.get("planned"),
         "groups": [
             {
                 "id": group["id"],

@@ -76,6 +76,7 @@ export function AccessPage() {
 
   return (
     <section className="panel">
+      <p className="eyebrow">Administration</p>
       <h1>Users and access</h1>
       <p>A grant is one role plus one scope. It does not combine with a different branch or subject.</p>
       {error ? <p className="error">{error}</p> : null}

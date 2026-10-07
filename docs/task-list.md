@@ -2,7 +2,7 @@
 
 Date: 7 October 2026 · Baseline: [Product requirements v1.1](product-requirements.md) · M0: [Approved decisions](m0-decisions.md) · M1: [Architecture](m1-architecture.md)
 
-This is a planned backlog, not authorization to implement. M0, M1, and M2 are complete. Later tasks are open. Each checkbox is a deliverable with an acceptance condition. Owner labels identify responsibilities, not assigned people. Estimates and dates follow product decisions and platform feasibility. All milestones, including desktop and cloud delivery, are required for release 1.
+This is a delivery backlog. Existing M0–M4 tasks retain their recorded completion status. M4-Modernization, M5 and M6 tasks are open. Each checkbox is a deliverable with an acceptance condition. Owner labels identify responsibilities, not assigned people. Estimates and dates follow product decisions and platform feasibility. All milestones, including modernization, desktop and cloud delivery, are required for release 1. This update adds planned work; it does not start implementation.
 
 ## M0 — Product decisions and workflow design
 
@@ -90,9 +90,27 @@ Dependencies: published results from M3; DEC-05; UX-02. Owners: Backend, Fronten
 
 Milestone exit: met on 7 October 2026. Cards, exports, and all six academic views reconcile to the active revision and the approved calculation examples. Pilot academic sign-off remains M6.
 
+## M4-Modernization — Application UI and import experience
+
+Dependencies: M3 and existing M4 functionality. Owners: Design, Frontend, Backend, Academic, QA. **Must finish before M5 begins.** Existing completed M4 tasks remain complete; this milestone improves their application experience and verifies the revised import workflow.
+
+- [x] **MOD-01 — Review the application experience.** Inspect navigation, imports, marksheets, students, progress cards, all six academic views, user/access management, audit and settings. Document usability gaps and prioritize improvements. **Done when:** every existing area has a reviewed improvement list, including first use, routine use, errors and restricted access.
+- [x] **MOD-02 — Establish consistent UI foundations.** Define typography, spacing, colors, form controls, tables, cards, dialogs, status labels and responsive navigation; apply shared components across existing screens. **Done when:** screens follow a consistent visual system, actions are clear and content remains readable without clipped controls or labels.
+- [x] **MOD-03 — Improve navigation and page workflows.** Make Import Marklist prominent; improve context selectors, breadcrumbs, filtering, search, pagination and clear next actions throughout the application. **Done when:** users can move from import to marksheet review, academic views and student cards while preserving relevant context; permission-aware navigation remains correct.
+- [x] **MOD-04 — Build a guided Excel import wizard.** Provide visible steps: select file and levels → choose sheets → resolve detected context/students → preview changes → confirm import → results. Support back/next, retained selections, workbook defaults, per-sheet overrides and inline exception resolution. **Done when:** an unambiguous workbook can be imported without separate setup forms, and users can return to earlier steps without losing valid work. Reference: IMP-01–09, PRD IMP-01–12.
+- [x] **MOD-05 — Show marksheet data before adding it.** Present a searchable/paginated preview of selected sheets, student identities, score groups, marks/maxima, statuses, calculated values and academic context. Label each proposed entity/result as new, existing unchanged, or an update; show before/after values for updates and display warnings/blockers with source locations. **Done when:** users can inspect every selected sheet and proposed change before confirming, and preview/back/cancel creates no academic records or results. Reference: PRD IMP-07/08, AT-18.
+- [x] **MOD-06 — Show planned insert and update counts.** Add workbook and per-sheet summaries for records to insert, update, reuse unchanged, skip or reject, separated by academic details, students, enrollments and marks/results. Count unique canonical records so shared details and repeated sheet references are not inflated. **Done when:** the preview clearly states how many will be inserted and updated, distinguishes unchanged reuse from updates, and refreshes counts after selection or mapping changes.
+- [x] **MOD-07 — Confirm updates safely.** Require explicit confirmation before changing existing records; keep duplicate skip/revision behavior and require the existing correction permission/reason for published results. Revalidate data and permissions at commit; if concurrent changes alter the previewed plan, present an updated preview before proceeding. **Done when:** selecting Import cannot silently overwrite existing results, expand scope or apply a stale create/update plan. Reference: MRK-03, ACL-03, PRD IMP-08/09/11.
+- [x] **MOD-08 — Show actual import outcomes.** Provide progress and a completion summary with actual inserted, updated, unchanged, skipped, rejected and failed counts, grouped by record type and sheet, plus links to affected marksheets and a downloadable outcome report. Persist the summary in import history. **Done when:** counts reflect committed changes rather than planned changes, partial failures identify successful/failed sheets, and retries neither double count nor report rolled-back records as inserted. Imported drafts remain separate from publication. Reference: IMP-08/09, PRD IMP-08–10.
+- [x] **MOD-09 — Improve reporting and administration screens.** Refine marksheet review/revision history, student cards, dashboard charts/tables, user grants, audit and settings using the shared UI. Add readable summaries, clear scope/policy labels and useful empty/loading/error states. **Done when:** all existing application areas identified in MOD-01 are addressed or explicitly resolved in the reviewed scope, with no loss of calculations, provenance or ACL behavior.
+- [x] **MOD-10 — Validate responsive and accessible use.** Verify desktop browser/client layouts and browser use on phones, iPads and tablets; improve keyboard focus, labels, contrast, chart alternatives and long-table navigation. **Done when:** the wizard and principal application journeys work at agreed screen sizes and meet the agreed accessibility targets without obscured actions.
+- [ ] **MOD-11 — Accept modernization before M5.** Review the revised UI with academic/admin users and verify the sample files, first import, repeated unchanged import, authorized updates, mixed sheets, cancellation, failures, retries and scoped users. **Done when:** all 29 sample sheets can be previewed; planned/actual insert-update counts reconcile; no preview writes, unauthorized changes or duplicate results occur; modernization acceptance is recorded before M5 starts.
+
+Milestone exit: consistent application UI, accepted guided Excel wizard, inspectable preview, reconciled planned/actual inserted and updated counts, and verified responsive/access-controlled workflows. M5 is blocked until MOD-01–11 are complete.
+
 ## M5 — Desktop distribution and cloud operations
 
-Dependencies: ARC-05/06; platform foundations from M2. Packaging/cloud foundations can start during M2–M4; final validation requires M4. Owners: Release, Operations, Backend, QA.
+Dependencies: ARC-05/06; platform foundations from M2; existing M4 and **M4-Modernization completion**. M5 work starts only after the modernization milestone exit is met. Owners: Release, Operations, Backend, QA.
 
 - [ ] **DSK-01 — Build desktop client runtime.** Package shared React UI, authenticated endpoint configuration, health/connectivity messages and server-version checks. **Done when:** it connects to cloud/local server without bundling MongoDB or accepting offline writes. Reference: PLT-04.
 - [ ] **DSK-02 — Build full application runtime.** Bundle and manage FastAPI, MongoDB, jobs and private files; handle startup/shutdown, permissions, port conflicts and diagnostics. **Done when:** full academic workflows work offline on the host. Reference: PLT-02/03.
@@ -110,7 +128,7 @@ Milestone exit: production-ready installers and cloud deployment, with proven re
 
 ## M6 — Acceptance, pilot and launch
 
-Dependencies: M3–M5 completion. Owners: QA, Academic, Product, Operations.
+Dependencies: M3–M5 completion, including M4-Modernization. Owners: QA, Academic, Product, Operations.
 
 - [ ] **QA-04 — Complete access-control acceptance.** Run AT-09–11/19 through UI and direct APIs, including hidden aggregates, source files, queued exports and privilege delegation. **Done when:** no unresolved scope leakage or privilege escalation remains.
 - [ ] **QA-05 — Validate scale and resilience.** Exercise agreed 10-branch/10,000-student/1-million-result dataset, import load targets, concurrent retries and service interruptions. **Done when:** confirmed performance limits pass or product explicitly renegotiates targets before release. Reference: PRD §11.
@@ -123,7 +141,7 @@ Dependencies: M3–M5 completion. Owners: QA, Academic, Product, Operations.
 ## Planning and completion rules
 
 - Confirm decisions before dependent implementation; do not invent missing academic policies.
-- Build one complete import-to-published-card path before broadening views, while starting desktop/cloud feasibility early.
+- Build one complete import-to-published-card path before broadening views. Complete M4-Modernization before starting M5; existing M1 feasibility decisions remain inputs.
 - Keep automatic academic/student creation inside the import workflow. No separate setup sequence or manual marksheet creation belongs in this release.
 - Every engineering task includes relevant authorization, audit, error handling and meaningful verification for its affected behavior.
 - Do not mark a milestone complete while a required desktop variant, academic view or deployment mode remains deferred.

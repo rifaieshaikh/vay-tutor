@@ -48,7 +48,7 @@ export function Shell({
       <div className="frame">
         <nav className={open ? "nav open" : "nav"} aria-label="Primary">
           {visible.map((link) => (
-            <NavLink key={link.to} to={link.to} end={link.to === "/"} onClick={() => setOpen(false)}>
+            <NavLink key={link.to} to={link.to} end={link.to === "/"} className={link.to === "/import" ? "import-link" : undefined} onClick={() => setOpen(false)}>
               {link.label}
             </NavLink>
           ))}

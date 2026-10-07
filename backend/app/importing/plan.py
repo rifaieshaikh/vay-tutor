@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.importing.parse import parse_batches
+from app.security import name_key
 
 
 def apply_decisions(parsed: dict, decisions: dict, known: dict[str, list[str]]) -> dict:
@@ -45,6 +46,9 @@ def _apply_sheet(source: dict, choice: dict, known: dict[str, list[str]], defaul
             known,
             choice.get("row_batches") or {},
             set(choice.get("drop_rows") or []),
+            choice.get("corrections") or {},
+            choice.get("names") or {},
+            choice.get("added") or {},
         )
         groups.append(applied)
         if included:
@@ -108,6 +112,9 @@ def _apply_group(
     known: dict[str, list[str]],
     row_batches: dict,
     drop_rows: set,
+    corrections: dict | None = None,
+    names: dict | None = None,
+    added: dict | None = None,
 ) -> dict:
     interpretation = choice.get("interpretation", group["interpretation"])
     confirmed = bool(choice.get("confirmed", group["confirmed"]))
@@ -127,10 +134,16 @@ def _apply_group(
     sessions = [item["session_key"] for item in batches]
     students = []
     seen: dict[str, int] = {}
-    for student in group["students"]:
+    for student in [*group["students"], *_added_students(group, added or {})]:
         if student["row"] in drop_rows:
             continue
         item = dict(student)
+        _apply_name(item, names or {})
+        _apply_correction(item, group, corrections or {})
+        if not str(item.get("display_name") or "").strip():
+            students.append(item)
+            continue
+        item["enrolled_batches"] = list(dict.fromkeys(known.get(item["name_key"], [])))
         item["batch_session"] = _row_batch(item, sessions, known, row_batches)
         if item["name_key"] in seen and interpretation != "skip_duplicate":
             blockers.append(
@@ -152,6 +165,15 @@ def _apply_group(
                     "message": f"{item['display_name']} on {sheet['name']} row {item['row']} is outside 0 to {group['maximum']}.",
                 }
             )
+        if item["status"] == "scored" and item.get("score") is not None and (item["score"] < 0 or item["score"] > group["maximum"]):
+            blockers.append(
+                {
+                    "code": "import.invalid_mark",
+                    "sheet_id": sheet["id"],
+                    "row": item["row"],
+                    "message": f"{item['display_name']} on {sheet['name']} row {item['row']} is outside 0 to {group['maximum']}.",
+                }
+            )
         if interpretation != "skip_duplicate" and len(sessions) > 1 and not item["batch_session"]:
             blockers.append(
                 {
@@ -159,7 +181,7 @@ def _apply_group(
                     "sheet_id": sheet["id"],
                     "row": item["row"],
                     "name_key": item["name_key"],
-                    "message": f"Choose September 2026 or January 2027 for {item['display_name']} on {sheet['name']}.",
+                    "message": f"Choose {' or '.join(batch['label'] for batch in batches)} for {item['display_name']} on {sheet['name']}.",
                 }
             )
         students.append(item)
@@ -174,6 +196,70 @@ def _apply_group(
         "students": students,
         "blockers": blockers,
     }
+
+
+def _added_students(group: dict, added: dict) -> list[dict]:
+    rows = []
+    for key, extra in added.items():
+        try:
+            row = int(key)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(extra, dict):
+            continue
+        name = " ".join(str(extra.get("name") or "").split())
+        rows.append(
+            {
+                "row": row,
+                "column": group["column"],
+                "display_name": name,
+                "name_key": name_key(name) if name else "",
+                "status": "missing",
+                "score": None,
+                "maximum": group["maximum"],
+                "percentage": None,
+                "band": None,
+                "source_rank": None,
+                "batch_session": None,
+                "added": True,
+            }
+        )
+    return rows
+
+
+def _apply_name(item: dict, names: dict) -> None:
+    override = names.get(str(item["row"])) or names.get(item["row"])
+    if not isinstance(override, str) or not override.strip():
+        return
+    item["display_name"] = " ".join(override.split())
+    item["name_key"] = name_key(item["display_name"])
+
+
+def _apply_correction(item: dict, group: dict, corrections: dict) -> None:
+    override = (
+        corrections.get(f"{group['id']}:{item['row']}")
+        or corrections.get(str(item["row"]))
+        or corrections.get(item["row"])
+        or {}
+    )
+    action = override.get("action")
+    if action == "keep":
+        item["correction"] = "keep"
+        return
+    if "score" not in override and override.get("status") not in {"absent", "missing", "scored"}:
+        return
+    status = override.get("status")
+    score = override.get("score")
+    if status in {"absent", "missing"} or score in {"A", "AB", "a", "ab"}:
+        item["status"] = "absent" if status == "absent" or score in {"A", "AB", "a", "ab"} else "missing"
+        item["score"] = None
+        item["percentage"] = None
+    elif score is not None and score != "":
+        item["status"] = "scored"
+        item["score"] = float(score)
+        item["percentage"] = (float(score) / group["maximum"] * 100) if group["maximum"] else None
+    item["correction"] = "replace"
+    item["correction_reason"] = str(override.get("reason") or "")
 
 
 def _group_message(sheet: dict, group: dict) -> str:
@@ -192,7 +278,8 @@ def _row_batch(student: dict, sessions: list[str], known: dict[str, list[str]], 
     if len(sessions) == 1:
         return sessions[0]
     if len(sessions) > 1:
-        matches = [key for key in known.get(student["name_key"], []) if key in sessions]
+        enrolled = list(dict.fromkeys(known.get(student["name_key"], [])))
+        matches = [key for key in enrolled if key in sessions]
         if len(matches) == 1:
             return matches[0]
     return None
@@ -213,7 +300,7 @@ def _totals(sheets: list[dict]) -> dict:
         for group in sheet["groups"]:
             if group["interpretation"] == "skip_duplicate":
                 continue
-            students += len(group["students"])
+            students += sum(1 for item in group["students"] if str(item.get("display_name") or "").strip())
     return {"sheets": len(sheets), "included": len(included), "skipped": len(skipped), "result_rows": students}
 
 

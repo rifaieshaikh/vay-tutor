@@ -4,10 +4,10 @@ export function OverviewPage({ canImport }: { canImport: boolean }) {
   return (
     <section className="panel">
       <p className="eyebrow">Overview</p>
-      <h1>No academic records yet</h1>
+      <h1>Start with a marklist</h1>
       <p>
-        Import a marklist to create the branch, course, batch, subjects, and students. Nothing has to be
-        entered before that.
+        Import a workbook to create the branch, course, batch, subjects, and students. The wizard shows
+        what will be inserted or updated before anything is saved. Nothing has to be entered before that.
       </p>
       {canImport ? (
         <Link className="button" to="/import">

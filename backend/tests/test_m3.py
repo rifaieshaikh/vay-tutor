@@ -1,8 +1,10 @@
+from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
 
 from app.importing.parse import parse_workbook
 from app.main import create_app
@@ -80,7 +82,8 @@ def test_accounting_import_commits_drafts_and_publishes_dated_sheet(client):
         "/api/v1/imports",
         files={"file": ("ACCOUNTANCY  RANK LIST.xlsx", workbook("ACCOUNTANCY  RANK LIST.xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
     )
-    assert again.json()["duplicate"] is True
+    assert again.json()["duplicate"] is False
+    assert again.json()["id"] != uploaded.json()["id"]
     marksheets = client.get("/api/v1/marksheets").json()["items"]
     brs = next(item for item in marksheets if item["source_sheet"] == "BRS")
     published = client.post(f"/api/v1/marksheets/{brs['id']}/publish")
@@ -237,3 +240,209 @@ def test_selected_level_history_revision_and_catalog(client):
         json={"source_id": students[0]["id"], "target_id": students[1]["id"]},
     )
     assert refused.status_code == 422
+
+
+def test_every_sample_sheet_can_be_previewed(client):
+    bootstrap(client)
+    expected = {
+        "ACCOUNTANCY  RANK LIST.xlsx": 8,
+        "ECONOMICS  RANK LIST -.xlsx": 5,
+        "LAW .xlsx": 6,
+        "QT.xlsx": 10,
+    }
+    seen = 0
+    for filename, count in expected.items():
+        uploaded = client.post(
+            "/api/v1/imports",
+            files={"file": (filename, workbook(filename), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        )
+        assert uploaded.status_code == 200, uploaded.text
+        preview = client.get(f"/api/v1/imports/{uploaded.json()['id']}")
+        assert preview.status_code == 200, preview.text
+        body = preview.json()
+        assert len(body["sheets"]) == count
+        assert "planned" in body["totals"]
+        assert client.get("/api/v1/catalog").json()["students"] == []
+        seen += count
+    assert seen == 29
+
+
+def test_repeated_import_previews_counts_and_confirms_draft_updates(client):
+    bootstrap(client)
+    uploaded = client.post(
+        "/api/v1/imports",
+        files={"file": ("ACCOUNTANCY  RANK LIST.xlsx", workbook("ACCOUNTANCY  RANK LIST.xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    import_id = uploaded.json()["id"]
+    preview = client.get(f"/api/v1/imports/{import_id}").json()
+    assert preview["totals"]["planned"]["results"]["insert"] > 0
+    assert preview["totals"]["planned"]["results"]["update"] == 0
+    assert client.get("/api/v1/catalog").json()["students"] == []
+    committed = client.post(f"/api/v1/imports/{import_id}/commit")
+    assert committed.status_code == 200, committed.text
+    assert committed.json()["summary"]["counts"]["results"]["insert"] > 0
+    before = len(client.get("/api/v1/marksheets").json()["items"])
+    students_before = len(client.get("/api/v1/catalog").json()["students"])
+    again = client.post(
+        "/api/v1/imports",
+        files={"file": ("ACCOUNTANCY  RANK LIST.xlsx", workbook("ACCOUNTANCY  RANK LIST.xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    repeated = client.get(f"/api/v1/imports/{again.json()['id']}").json()
+    assert repeated["totals"]["planned"]["results"]["insert"] == 0
+    assert repeated["totals"]["planned"]["results"]["unchanged"] > 0
+    assert repeated["totals"]["updates"] == 0
+    second = client.post(f"/api/v1/imports/{again.json()['id']}/commit")
+    assert second.status_code == 200, second.text
+    assert second.json()["summary"]["counts"]["results"]["insert"] == 0
+    assert len(client.get("/api/v1/marksheets").json()["items"]) == before
+    assert len(client.get("/api/v1/catalog").json()["students"]) == students_before
+    detail = client.get(f"/api/v1/marksheets/{client.get('/api/v1/marksheets').json()['items'][0]['id']}").json()
+    target = next(item for item in detail["results"] if item["score"] not in (None, 1))
+    changed = client.patch(
+        f"/api/v1/marksheets/{detail['id']}/results/{target['id']}",
+        json={"score": 1, "edit_version": detail["edit_version"]},
+    )
+    assert changed.status_code == 200, changed.text
+    third = client.post(
+        "/api/v1/imports",
+        files={"file": ("ACCOUNTANCY  RANK LIST.xlsx", workbook("ACCOUNTANCY  RANK LIST.xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    updated = client.get(f"/api/v1/imports/{third.json()['id']}").json()
+    assert updated["totals"]["updates"] >= 1
+    denied = client.post(f"/api/v1/imports/{third.json()['id']}/commit")
+    assert denied.status_code == 422
+    assert denied.json()["error"]["code"] == "import.confirm_updates"
+    restored = client.post(f"/api/v1/imports/{third.json()['id']}/commit", json={"confirm_updates": True})
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["summary"]["counts"]["results"]["update"] >= 1
+    after = client.get(f"/api/v1/marksheets/{detail['id']}").json()
+    assert next(item for item in after["results"] if item["id"] == target["id"])["score"] != 1
+
+
+def test_published_score_can_be_corrected_from_the_preview_or_a_file(client):
+    bootstrap(client)
+    uploaded = client.post(
+        "/api/v1/imports",
+        files={"file": ("ACCOUNTANCY  RANK LIST.xlsx", workbook("ACCOUNTANCY  RANK LIST.xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert client.post(f"/api/v1/imports/{uploaded.json()['id']}/commit").status_code == 200
+    marksheets = client.get("/api/v1/marksheets").json()["items"]
+    brs = next(item for item in marksheets if item["source_sheet"] == "BRS")
+    assert client.post(f"/api/v1/marksheets/{brs['id']}/publish").status_code == 200
+    detail = client.get(f"/api/v1/marksheets/{brs['id']}").json()
+    target = next(item for item in detail["results"] if item["status"] == "scored" and item["score"] != 1)
+    original = target["score"]
+    corrected = client.post(
+        f"/api/v1/marksheets/{brs['id']}/correct",
+        json={"reason": "Temporary change", "edit_version": detail["edit_version"], "changes": [{"result_id": target["id"], "score": 1}]},
+    )
+    assert corrected.status_code == 200, corrected.text
+    again = client.post(
+        "/api/v1/imports",
+        files={"file": ("ACCOUNTANCY  RANK LIST.xlsx", workbook("ACCOUNTANCY  RANK LIST.xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    preview = client.get(f"/api/v1/imports/{again.json()['id']}").json()
+    assert preview["ready"] is False
+    assert any(item["code"] == "import.correction_needed" for item in preview["blockers"])
+    assert client.post(f"/api/v1/imports/{again.json()['id']}/commit").status_code == 422
+    problem = next(
+        student
+        for sheet in preview["sheets"] if sheet["name"] == "BRS"
+        for group in sheet["groups"]
+        for student in group["students"]
+        if student.get("change") == "reject" and student["display_name"] == target["display_name"]
+    )
+    book = Workbook()
+    grid = book.active
+    grid.append(["Sheet", "Row", "Student", "Score", "Reason"])
+    grid.append(["BRS", problem["row"], problem["display_name"], original, "Restore the marklist score"])
+    buffer = BytesIO()
+    book.save(buffer)
+    applied = client.post(
+        f"/api/v1/imports/{again.json()['id']}/corrections",
+        files={"file": ("corrections.xlsx", buffer.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["applied"]
+    fixed = client.get(f"/api/v1/imports/{again.json()['id']}").json()
+    assert fixed["ready"] is True
+    assert fixed["totals"]["updates"] >= 1
+    finished = client.post(f"/api/v1/imports/{again.json()['id']}/commit", json={"confirm_updates": True})
+    assert finished.status_code == 200, finished.text
+    restored = client.get(f"/api/v1/marksheets/{brs['id']}").json()
+    assert next(item for item in restored["results"] if item["display_name"] == target["display_name"])["score"] == original
+
+
+def test_modernization_acceptance_covers_preview_counts_cancel_and_scope(client):
+    bootstrap(client)
+    uploaded = client.post(
+        "/api/v1/imports",
+        files={"file": ("QT.xlsx", workbook("QT.xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    import_id = uploaded.json()["id"]
+    preview = client.get(f"/api/v1/imports/{import_id}").json()
+    assert len(preview["sheets"]) == 10
+    assert preview["ready"] is False
+    assert any(len(sheet["batches"]) > 1 for sheet in preview["sheets"])
+    assert client.get("/api/v1/catalog").json()["students"] == []
+    blocked = client.post(f"/api/v1/imports/{import_id}/commit")
+    assert blocked.status_code == 422
+    assert client.get("/api/v1/catalog").json()["students"] == []
+    cancelled = client.post(f"/api/v1/imports/{import_id}/cancel")
+    assert cancelled.status_code == 200
+    assert client.post(f"/api/v1/imports/{import_id}/commit").status_code == 422
+    assert client.get("/api/v1/imports").json()["items"][0]["state"] == "cancelled"
+    assert client.get("/api/v1/catalog").json()["students"] == []
+
+    retry = client.post(
+        "/api/v1/imports",
+        files={"file": ("QT.xlsx", workbook("QT.xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    retry_id = retry.json()["id"]
+    ready = client.get(f"/api/v1/imports/{retry_id}").json()
+    patched = client.patch(f"/api/v1/imports/{retry_id}", json=_resolve(ready))
+    assert patched.json()["ready"] is True
+    planned = client.get(f"/api/v1/imports/{retry_id}").json()["totals"]["planned"]["results"]
+    committed = client.post(f"/api/v1/imports/{retry_id}/commit")
+    assert committed.status_code == 200, committed.text
+    actual = committed.json()["summary"]["counts"]["results"]
+    assert actual["insert"] == planned["insert"]
+    assert actual["update"] == planned["update"] == 0
+    marksheets = len(client.get("/api/v1/marksheets").json()["items"])
+    students = len(client.get("/api/v1/catalog").json()["students"])
+    again = client.post(
+        "/api/v1/imports",
+        files={"file": ("QT.xlsx", workbook("QT.xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    repeated = client.get(f"/api/v1/imports/{again.json()['id']}").json()
+    if not repeated["ready"]:
+        client.patch(f"/api/v1/imports/{again.json()['id']}", json=_resolve(repeated))
+        repeated = client.get(f"/api/v1/imports/{again.json()['id']}").json()
+    assert repeated["totals"]["planned"]["results"]["insert"] == 0
+    second = client.post(f"/api/v1/imports/{again.json()['id']}/commit", json={"confirm_updates": True})
+    assert second.status_code == 200, second.text
+    assert second.json()["summary"]["counts"]["results"]["insert"] == 0
+    assert len(client.get("/api/v1/marksheets").json()["items"]) == marksheets
+    assert len(client.get("/api/v1/catalog").json()["students"]) == students
+
+    created = client.post(
+        "/api/v1/users",
+        json={
+            "name": "Viewer",
+            "email": "viewer@iam.test",
+            "password": "correct-horse",
+            "role": "viewer",
+            "scope": {},
+            "acknowledge_scope": True,
+        },
+    )
+    assert created.status_code == 200, created.text
+    assert client.post("/api/v1/auth/logout").status_code == 200
+    signed_in = client.post("/api/v1/auth/login", json={"email": "viewer@iam.test", "password": "correct-horse"})
+    assert signed_in.status_code == 200, signed_in.text
+    forbidden = client.post(
+        "/api/v1/imports",
+        files={"file": ("QT.xlsx", workbook("QT.xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert forbidden.status_code == 403
+    assert client.post(f"/api/v1/imports/{retry_id}/commit").status_code == 403

@@ -18,6 +18,7 @@ type Marksheet = {
 };
 type Result = {
   id: string;
+  display_name?: string;
   status: string;
   score: number | null;
   rank: number | null;
@@ -115,7 +116,7 @@ export function MarksheetsPage() {
     }
   }
 
-  async function correctPublished(event: FormEvent<HTMLFormElement>, sheet: Detail) {
+  async function correctPublished(event: FormEvent<HTMLFormElement>, sheet: Detail, result: Result) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     setError("");
@@ -125,7 +126,7 @@ export function MarksheetsPage() {
         body: JSON.stringify({
           reason: form.get("reason"),
           edit_version: sheet.edit_version,
-          changes: [{ result_id: form.get("result_id"), score: Number(form.get("score")) }],
+          changes: [{ result_id: result.id, score: Number(form.get("score")) }],
         }),
       });
       setMessage("A new revision is active. The previous score is kept.");
@@ -154,8 +155,17 @@ export function MarksheetsPage() {
 
   return (
     <section className="panel">
+      <p className="eyebrow">After import</p>
       <h1>Marksheets</h1>
-      <p>There is no separate way to create a marksheet. Drafts stay out of progress cards until they are published.</p>
+      <p>There is no separate way to create a marksheet. Drafts stay out of progress cards until they are published. <a href="/views">Open academic views</a> after publication.</p>
+      <label>
+        Search
+        <input value={filters.q || ""} onChange={(event) => {
+          const next = { ...filters, q: event.target.value };
+          setFilters(next);
+          load(next);
+        }} placeholder="Title or source sheet" />
+      </label>
       <form className="stack" onSubmit={(event) => { event.preventDefault(); load(); }}>
         {FILTERS.map((filter) => (
           <label key={filter.key}>
@@ -212,16 +222,23 @@ export function MarksheetsPage() {
           ) : null}
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Row</th><th>Status</th><th>Score</th><th>Previous</th><th>%</th><th>Rank</th></tr></thead>
+              <thead><tr><th>Student</th><th>Row</th><th>Status</th><th>Score</th><th>Previous</th><th>%</th><th>Rank</th></tr></thead>
               <tbody>
                 {detail.results.map((result) => (
                   <tr key={result.id}>
+                    <td>{result.display_name || "Student"}</td>
                     <td>{result.source?.row}</td>
                     <td>{result.status}</td>
                     <td>
                       {detail.status === "draft" ? (
-                        <form onSubmit={(event) => correctDraft(event, detail, result)}>
-                          <input name="score" type="number" step="0.25" defaultValue={result.score ?? ""} />
+                        <form className="inline-correct" onSubmit={(event) => correctDraft(event, detail, result)}>
+                          <input name="score" type="number" step="0.25" defaultValue={result.score ?? ""} aria-label={`Score for ${result.display_name || "student"}`} />
+                          <button type="submit">Save</button>
+                        </form>
+                      ) : detail.status === "published" ? (
+                        <form className="inline-correct" onSubmit={(event) => correctPublished(event, detail, result)}>
+                          <input name="score" type="number" step="0.25" defaultValue={result.score ?? ""} aria-label={`Correct score for ${result.display_name || "student"}`} />
+                          <input name="reason" placeholder="Reason" required aria-label={`Reason for ${result.display_name || "student"}`} />
                           <button type="submit">Save</button>
                         </form>
                       ) : result.score ?? "—"}
@@ -237,20 +254,6 @@ export function MarksheetsPage() {
           {detail.status !== "published" && detail.status !== "withdrawn" ? <button type="button" onClick={() => publish(detail)}>Publish</button> : null}
           {detail.status === "published" ? (
             <>
-              <form onSubmit={(event) => correctPublished(event, detail)} className="stack">
-                <h3>Correct a published score</h3>
-                <label>
-                  Result
-                  <select name="result_id" required>
-                    {detail.results.map((result) => (
-                      <option key={result.id} value={result.id}>Row {result.source?.row} · {result.score ?? "missing"}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>New score<input name="score" type="number" step="0.25" required /></label>
-                <label>Reason<input name="reason" required /></label>
-                <button type="submit">Save revision</button>
-              </form>
               <form onSubmit={(event) => withdraw(event, detail)}>
                 <label>Withdrawal reason<input name="reason" required /></label>
                 <button type="submit">Withdraw</button>

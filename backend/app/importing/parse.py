@@ -34,6 +34,19 @@ def parse_workbook(data: bytes, filename: str) -> dict:
     return {"filename": filename, "sheets": sheets}
 
 
+def workbook_rows(data: bytes) -> dict[str, list[dict]]:
+    """Every non-empty row, with the role the opening lines play."""
+    try:
+        workbook = load_workbook(BytesIO(data), data_only=False, read_only=False)
+    except Exception as exc:
+        raise ValueError(f"The workbook could not be read: {exc}") from exc
+    found = {}
+    for sheet_name in workbook.sheetnames:
+        found[sheet_name] = _source_rows(_grid(workbook[sheet_name]))
+    workbook.close()
+    return found
+
+
 def parse_batches(text: str) -> list[dict]:
     found = []
     seen = set()
@@ -97,6 +110,53 @@ def _parse_sheet(worksheet, position: int) -> dict:
         "groups": groups,
         "included": True,
     }
+
+
+def _source_rows(rows: list[list]) -> list[dict]:
+    header_index = _header_row(rows)
+    found = []
+    for index, row in enumerate(rows):
+        cells = [_cell_text(cell) for cell in row]
+        while cells and not cells[-1]:
+            cells.pop()
+        if not any(cells):
+            continue
+        found.append({"row": index + 1, "cells": cells, "role": _row_role(row, cells, index, header_index)})
+    return found
+
+
+def _row_role(row: list, cells: list[str], index: int, header_index: int | None) -> str:
+    if header_index is not None and index == header_index:
+        return "header"
+    if header_index is not None and index > header_index:
+        name = row[1] if len(row) > 1 else None
+        if isinstance(name, str) and name.strip() and not _is_legend(name):
+            return "student"
+        return "legend"
+    text = _first_text(row).upper()
+    if "IAM" in text:
+        return "branch"
+    if "FOUNDATION" in text or text.startswith("CA "):
+        return "course"
+    if "PAPER" in text:
+        return "paper"
+    if "SERIES" in text:
+        return "series"
+    if text:
+        return "title"
+    return "note"
+
+
+def _cell_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
 
 
 def _grid(worksheet) -> list[list]:

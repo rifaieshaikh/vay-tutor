@@ -15,7 +15,9 @@ export function AuditPage() {
 
   return (
     <section className="panel">
+      <p className="eyebrow">Administration</p>
       <h1>Audit</h1>
+      <p>Events stay in the order they were recorded. Import, publication, correction, and export actions are listed here.</p>
       {error ? <p className="error">{error}</p> : null}
       {items.length === 0 ? <p>No audit events are visible.</p> : null}
       <ul className="people">

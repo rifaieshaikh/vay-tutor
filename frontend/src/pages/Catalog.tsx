@@ -93,7 +93,8 @@ export function CatalogPage() {
   }
 
   return (
-    <section className="panel">
+    <section className="panel wide">
+      <p className="eyebrow">Academic records</p>
       <h1>Catalog</h1>
       <p>Imported records can be renamed or archived. Nothing here is deleted.</p>
       {error ? <p className="error">{error}</p> : null}
