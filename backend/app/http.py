@@ -727,10 +727,28 @@ async def active_policy(request: Request) -> dict:
 @router.get("/context/options")
 async def context_options(request: Request, dimension: str, q: str = "") -> dict:
     user = await current_user(request)
-    collection_name = {"branch": "branches", "course": "courses", "subject": "subjects"}.get(dimension)
+    collection_name = {
+        "branch": "branches",
+        "course": "courses",
+        "subject": "subjects",
+        "batch": "batches",
+        "paper": "papers",
+    }.get(dimension)
+    if dimension == "exam_type":
+        return {"items": [
+            {"id": "unit", "label": "Unit", "parents": {}},
+            {"id": "part", "label": "Part", "parents": {}},
+            {"id": "chapter", "label": "Chapter", "parents": {}},
+        ]}
     if collection_name is None:
         raise AppError(422, "context.unknown", "Choose a known context level.")
-    field = {"branch": "branch_id", "course": "course_id", "subject": "subject_id"}[dimension]
+    field = {
+        "branch": "branch_id",
+        "course": "course_id",
+        "subject": "subject_id",
+        "batch": "batch_id",
+        "paper": "paper_id",
+    }[dimension]
     clause = mongo_clause(
         user["grants"],
         "dashboard.view",
@@ -745,7 +763,11 @@ async def context_options(request: Request, dimension: str, q: str = "") -> dict
     if q:
         query["name_key"] = {"$regex": name_key(q)}
     rows = await db(request)[collection_name].find(query).limit(50).to_list(length=50)
-    return {"items": [{"id": row["_id"], "label": row["name"], "parents": {}} for row in rows]}
+    items = []
+    for row in rows:
+        label = row.get("name") or (f"Paper {row['number']}" if row.get("number") is not None else row["_id"])
+        items.append({"id": row["_id"], "label": label, "parents": {}})
+    return {"items": items}
 
 
 @router.get("/views/{level}")
@@ -852,6 +874,8 @@ async def student_card(request: Request, student_id: str) -> dict:
             "subject_id": result.get("subject_id"),
             "paper_id": result.get("paper_id"),
         }
+        if result.get("active") is False:
+            continue
         if allows(user["grants"], "progress_card.view", resource):
             shown.append(
                 {
@@ -882,7 +906,38 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
     resource = _sheet_resource(sheet)
     if not allows(user["grants"], "marksheet.view", resource):
         raise AppError(404, "not_found", "That record was not found.")
-    return {"id": sheet["_id"], "status": sheet.get("status"), "subject_id": sheet.get("subject_id")}
+    revision = sheet.get("active_revision") or sheet.get("revision") or 1
+    results = await db(request).results.find(
+        {"marksheet_id": sheet["_id"], "revision": revision}
+    ).to_list(length=500)
+    return {
+        "id": sheet["_id"],
+        "status": sheet.get("status"),
+        "subject_id": sheet.get("subject_id"),
+        "title": sheet.get("title"),
+        "exam_date": sheet.get("exam_date"),
+        "maximum": sheet.get("maximum"),
+        "source_file": sheet.get("source_file"),
+        "source_sheet": sheet.get("source_sheet"),
+        "revision": revision,
+        "edit_version": sheet.get("edit_version", 0),
+        "file_id": sheet.get("file_id"),
+        "uploader_id": sheet.get("uploader_id"),
+        "reviewer_id": sheet.get("reviewer_id"),
+        "results": [
+            {
+                "id": item["_id"],
+                "student_id": item.get("student_id"),
+                "status": item.get("status"),
+                "score": item.get("score"),
+                "rank": item.get("rank"),
+                "percentage": item.get("percentage"),
+                "previous_score": item.get("previous_score"),
+                "source": item.get("source"),
+            }
+            for item in results
+        ],
+    }
 
 
 @router.post("/marksheets/{marksheet_id}/publish")
@@ -895,7 +950,11 @@ async def publish_marksheet(request: Request, marksheet_id: str) -> dict:
         raise AppError(404, "not_found", "That record was not found.")
     if not allows(user["grants"], "marksheet.publish", _sheet_resource(sheet)):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
-    raise AppError(422, "marksheet.not_ready", "Publication is available after a marklist is imported.")
+    if not sheet.get("assessment_id"):
+        raise AppError(422, "marksheet.not_ready", "Publication is available after a marklist is imported.")
+    from app.importing.publish import publish_revision
+
+    return await publish_revision(db(request), request.app.state.client, user, sheet)
 
 
 @router.post("/imports/commit")
@@ -980,6 +1039,10 @@ async def download_file(request: Request, file_id: str):
     )
     if file_doc is None:
         raise AppError(404, "not_found", "That record was not found.")
+    if file_doc.get("kind") == "source_xlsx":
+        if not any("marksheet.view" in grant["actions"] for grant in user["grants"]):
+            raise AppError(404, "not_found", "That record was not found.")
+        return FileResponse(file_doc["path"], filename=file_doc.get("filename") or "marklist.xlsx")
     action = "export.pdf" if file_doc["kind"] == "report_pdf" else "export.xlsx"
     scope = file_doc.get("scope") or {}
     if not allows(user["grants"], action, scope):

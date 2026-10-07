@@ -13,6 +13,7 @@ from app.config import load_settings
 from app.db import connect, ensure_schema
 from app.errors import AppError, app_error_handler, error_body
 from app.http import router
+from app.importing.routes import router as import_router
 from app.jobs import process_due_jobs
 
 log = logging.getLogger("vay")
@@ -73,6 +74,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(router)
+    app.include_router(import_router)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):

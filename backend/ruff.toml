@@ -6,3 +6,4 @@ select = ["E", "F", "I", "W"]
 
 [lint.per-file-ignores]
 "tests/**" = ["E501"]
+"app/importing/**" = ["E501"]

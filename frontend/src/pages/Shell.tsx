@@ -8,7 +8,7 @@ const LINKS = [
   { to: "/marksheets", label: "Marksheets", action: "marksheet.view" },
   { to: "/cards", label: "Progress Cards", action: "progress_card.view" },
   { to: "/views", label: "Academic Views", action: "dashboard.view" },
-  { to: "/students", label: "Students", action: "student.lookup" },
+  { to: "/students", label: "Catalog", action: "student.lookup" },
   { to: "/access", label: "Users and Access", action: "user.manage" },
   { to: "/audit", label: "Audit", action: "audit.view" },
   { to: "/settings", label: "Settings", action: "dashboard.view" },

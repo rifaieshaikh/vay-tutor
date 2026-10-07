@@ -3,9 +3,11 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { api, Health, Session } from "./api";
 import { AccessPage } from "./pages/Access";
 import { AuditPage } from "./pages/Audit";
+import { CatalogPage } from "./pages/Catalog";
 import { ImportPage } from "./pages/Import";
 import { LoginPage } from "./pages/Login";
 import { OverviewPage } from "./pages/Overview";
+import { MarksheetsPage } from "./pages/Marksheets";
 import { PlaceholderPage } from "./pages/Placeholder";
 import { SettingsPage } from "./pages/Settings";
 import { SetupPage } from "./pages/Setup";
@@ -57,10 +59,10 @@ export function App() {
       <Routes>
         <Route path="/" element={<OverviewPage canImport={can("marksheet.upload")} />} />
         <Route path="/import" element={can("marksheet.upload") ? <ImportPage /> : <Navigate to="/" replace />} />
-        <Route path="/marksheets" element={can("marksheet.view") ? <PlaceholderPage title="Marksheets" body="Published and draft marksheets will appear here after the first import." /> : <Navigate to="/" replace />} />
+        <Route path="/marksheets" element={can("marksheet.view") ? <MarksheetsPage /> : <Navigate to="/" replace />} />
         <Route path="/cards" element={can("progress_card.view") ? <PlaceholderPage title="Progress cards" body="Student cards appear after results are published." /> : <Navigate to="/" replace />} />
         <Route path="/views" element={can("dashboard.view") ? <PlaceholderPage title="Academic views" body="Institute, branch, course, batch, subject, and paper views use the same filters once results are published." /> : <Navigate to="/" replace />} />
-        <Route path="/students" element={can("student.lookup") ? <PlaceholderPage title="Students" body="Students are created from marklists. The list is empty until the first import." /> : <Navigate to="/" replace />} />
+        <Route path="/students" element={can("student.lookup") ? <CatalogPage /> : <Navigate to="/" replace />} />
         <Route path="/access" element={can("user.manage") ? <AccessPage /> : <Navigate to="/" replace />} />
         <Route path="/audit" element={can("audit.view") ? <AuditPage /> : <Navigate to="/" replace />} />
         <Route path="/settings" element={can("dashboard.view") ? <SettingsPage /> : <Navigate to="/" replace />} />
