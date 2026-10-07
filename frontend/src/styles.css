@@ -1,0 +1,114 @@
+:root {
+  color: #1c2430;
+  background: #f4f1ea;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  line-height: 1.5;
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; }
+
+button, .button, input, select {
+  font: inherit;
+}
+
+button, .button {
+  background: #0f6e6b;
+  color: white;
+  border: 0;
+  border-radius: 8px;
+  padding: 0.7rem 1rem;
+  text-decoration: none;
+  display: inline-block;
+}
+
+button:disabled { opacity: 0.7; }
+
+.text-button, .menu {
+  background: transparent;
+  color: #1c2430;
+  border: 1px solid #c9c2b4;
+}
+
+.app { min-height: 100vh; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.8rem 1rem;
+  background: white;
+  border-bottom: 1px solid #e4ddd0;
+}
+
+.eyebrow { margin: 0; color: #5d6b66; font-size: 0.8rem; letter-spacing: 0.04em; text-transform: uppercase; }
+
+.frame { display: block; }
+
+.nav {
+  display: none;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.75rem;
+  background: white;
+  border-bottom: 1px solid #e4ddd0;
+}
+
+.nav.open { display: flex; }
+
+.nav a {
+  color: #1c2430;
+  text-decoration: none;
+  padding: 0.7rem 0.8rem;
+  border-radius: 8px;
+}
+
+.nav a.active { background: #e7f3f2; color: #0f6e6b; }
+
+main { padding: 1rem; }
+
+.panel {
+  background: white;
+  border-radius: 12px;
+  padding: 1.25rem;
+  max-width: 46rem;
+}
+
+.narrow { margin: 2rem auto; }
+
+label { display: grid; gap: 0.35rem; margin: 0.8rem 0; }
+
+input, select {
+  border: 1px solid #c9c2b4;
+  border-radius: 8px;
+  padding: 0.7rem;
+  width: 100%;
+}
+
+.error { color: #8d2f2f; }
+.ok { color: #0f6e6b; }
+.status { padding: 2rem; }
+
+.codes, .people, .steps { padding-left: 1.2rem; }
+.people { list-style: none; padding: 0; }
+.people li {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.7rem 0;
+  border-bottom: 1px solid #eee7dc;
+}
+
+dl div { margin: 0.8rem 0; }
+dt { color: #5d6b66; }
+dd { margin: 0; }
+
+@media (min-width: 900px) {
+  .menu { display: none; }
+  .frame { display: grid; grid-template-columns: 16rem 1fr; min-height: calc(100vh - 4.2rem); }
+  .nav { display: flex; border-right: 1px solid #e4ddd0; border-bottom: 0; }
+  main { padding: 1.5rem; }
+}

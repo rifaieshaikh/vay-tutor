@@ -1,0 +1,10 @@
+fastapi==0.115.12
+uvicorn==0.34.2
+motor==3.6.1
+pymongo==4.9.2
+python-multipart==0.0.20
+httpx==0.28.1
+pytest==8.3.5
+ruff==0.11.12
+pyotp==2.9.0
+eval_type_backport==0.2.2

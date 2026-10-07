@@ -1,0 +1,998 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from bson import ObjectId
+from fastapi import APIRouter, Request
+from pydantic import BaseModel, Field
+from pymongo.errors import DuplicateKeyError
+
+from app.acl import (
+    ACTIONS,
+    ROLE_TEMPLATES,
+    actions_for,
+    allows,
+    clean_scope,
+    contained_actions,
+    describe_scope,
+    mongo_clause,
+)
+from app.errors import AppError
+from app.jobs import enqueue, process_due_jobs
+from app.security import (
+    LOGIN_WINDOW_MINUTES,
+    MAX_LOGIN_FAILURES,
+    SESSION_COOKIE,
+    SESSION_HOURS,
+    hash_password,
+    hash_token,
+    name_key,
+    new_token,
+    new_totp_secret,
+    recovery_codes,
+    totp_uri,
+    verify_password,
+    verify_totp,
+)
+
+router = APIRouter(prefix="/api/v1")
+
+
+class BootstrapBody(BaseModel):
+    institute_name: str = Field(min_length=1)
+    institute_code: str = Field(min_length=1)
+    admin_name: str = Field(min_length=1)
+    admin_email: str = Field(min_length=3)
+    admin_password: str = Field(min_length=10)
+
+
+class LoginBody(BaseModel):
+    email: str
+    password: str
+    totp: str | None = None
+
+
+class RecoveryBody(BaseModel):
+    email: str
+    recovery_code: str
+    new_password: str = Field(min_length=10)
+
+
+class PasswordBody(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=10)
+
+
+class UserBody(BaseModel):
+    name: str = Field(min_length=1)
+    email: str = Field(min_length=3)
+    password: str = Field(min_length=10)
+    role: str
+    scope: dict[str, Any] = Field(default_factory=dict)
+    acknowledge_scope: bool = False
+
+
+class UserPatch(BaseModel):
+    active: bool | None = None
+
+
+class GrantBody(BaseModel):
+    user_id: str
+    role: str
+    scope: dict[str, Any] = Field(default_factory=dict)
+    acknowledge_scope: bool = False
+
+
+class RoleBody(BaseModel):
+    name: str = Field(min_length=1)
+    actions: list[str]
+
+
+class ScopeBody(BaseModel):
+    scope: dict[str, Any] = Field(default_factory=dict)
+
+
+class ImportCommitBody(BaseModel):
+    sheets: list[dict[str, Any]]
+
+
+class ReportBody(BaseModel):
+    format: str
+    scope: dict[str, Any] = Field(default_factory=dict)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def new_id() -> str:
+    return str(ObjectId())
+
+
+def db(request: Request):
+    return request.app.state.db
+
+
+def settings(request: Request):
+    return request.app.state.settings
+
+
+async def grants_for(request: Request, user_id: str) -> list[dict]:
+    return await db(request).grants.find({"user_id": user_id}).to_list(length=500)
+
+
+async def current_user(request: Request) -> dict:
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        raise AppError(401, "auth.required", "Sign in to continue.")
+    session = await db(request).sessions.find_one(
+        {"token_hash": hash_token(token), "expires_at": {"$gt": _now()}}
+    )
+    if session is None:
+        raise AppError(401, "auth.required", "Sign in to continue.")
+    user = await db(request).users.find_one({"_id": session["user_id"], "active": True})
+    if user is None or user.get("session_version") != session.get("session_version"):
+        raise AppError(401, "auth.revoked", "This session is no longer valid.")
+    user["grants"] = await grants_for(request, user["_id"])
+    return user
+
+
+def require(user: dict, action: str, resource: dict) -> None:
+    if allows(user["grants"], action, resource):
+        return
+    if any(scope_might_hide(user["grants"], resource) for _ in [0]):
+        raise AppError(404, "not_found", "That record was not found.")
+    raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+
+
+def scope_might_hide(grants: list[dict], resource: dict) -> bool:
+    visible_actions = (
+        "dashboard.view",
+        "marksheet.view",
+        "student.lookup",
+        "student.manage",
+        "progress_card.view",
+        "audit.view",
+    )
+    return not any(allows(grants, action, resource) for action in visible_actions)
+
+
+def institute_resource(user: dict) -> dict:
+    return {"institute_id": user["institute_id"]}
+
+
+async def write_audit(request: Request, actor: dict, action: str, before, after, scope) -> None:
+    await db(request).audit_events.insert_one(
+        {
+            "_id": new_id(),
+            "institute_id": actor["institute_id"],
+            "actor_id": actor["_id"],
+            "action": action,
+            "at": _now(),
+            "before": before,
+            "after": after,
+            "scope": scope,
+        }
+    )
+
+
+async def bump_session(request: Request, user_id: str) -> None:
+    await db(request).users.update_one({"_id": user_id}, {"$inc": {"session_version": 1}})
+    await db(request).sessions.delete_many({"user_id": user_id})
+
+
+def set_session_cookie(request: Request, response, token: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        httponly=True,
+        secure=settings(request).cookie_secure,
+        samesite="lax",
+        path="/",
+        max_age=SESSION_HOURS * 3600,
+    )
+
+
+async def open_session(request: Request, user: dict, response) -> None:
+    token = new_token()
+    await db(request).sessions.insert_one(
+        {
+            "_id": new_id(),
+            "token_hash": hash_token(token),
+            "user_id": user["_id"],
+            "session_version": user["session_version"],
+            "expires_at": _now() + timedelta(hours=SESSION_HOURS),
+        }
+    )
+    set_session_cookie(request, response, token)
+
+
+def public_user(user: dict) -> dict:
+    return {
+        "id": user["_id"],
+        "name": user["name"],
+        "email": user["email"],
+        "active": user["active"],
+    }
+
+
+async def public_institute(request: Request, institute_id: str) -> dict:
+    institute = await db(request).institutes.find_one({"_id": institute_id})
+    return {"id": institute["_id"], "name": institute["name"], "code": institute["code"]}
+
+
+def _role_actions(role: dict) -> list[str]:
+    unknown = [action for action in role["actions"] if action not in ACTIONS]
+    if unknown:
+        raise AppError(422, "role.unknown_action", "That role includes an unknown action.")
+    return list(role["actions"])
+
+
+async def _role(request: Request, institute_id: str, role_name: str) -> dict:
+    role = await db(request).roles.find_one(
+        {"institute_id": institute_id, "name_key": name_key(role_name)}
+    )
+    if role is None:
+        raise AppError(422, "role.unknown", "Choose a role that exists.")
+    return role
+
+
+def _guard_delegate(actor: dict, scope: dict, actions: list[str], acknowledge: bool) -> str:
+    held = contained_actions(actor["grants"], scope)
+    if "grant.manage" not in held:
+        raise AppError(403, "auth.forbidden", "You cannot assign access outside your own scope.")
+    missing = [action for action in actions if action not in held]
+    if missing:
+        raise AppError(403, "auth.forbidden", "You cannot grant an action you do not have.")
+    consequence = describe_scope(scope)
+    open_scope = any(not scope.get(field) for field in (
+        "branch_id", "course_id", "batch_id", "subject_id", "paper_id"
+    ))
+    if open_scope and not acknowledge:
+        raise AppError(
+            422,
+            "grant.acknowledge_scope",
+            consequence,
+            consequence=consequence,
+        )
+    return consequence
+
+
+async def institute_admin_ids(request: Request, institute_id: str) -> set[str]:
+    rows = await db(request).grants.find(
+        {
+            "institute_id": institute_id,
+            "actions": "grant.manage",
+            "scope.branch_id": None,
+        }
+    ).to_list(length=500)
+    if not rows:
+        return set()
+    users = await db(request).users.find(
+        {"_id": {"$in": [row["user_id"] for row in rows]}, "active": True}
+    ).to_list(length=500)
+    return {user["_id"] for user in users}
+
+
+async def _ensure_admin_remains(request: Request, institute_id: str, removed_user: str | None) -> None:
+    admins = await institute_admin_ids(request, institute_id)
+    if removed_user:
+        admins.discard(removed_user)
+    if not admins:
+        raise AppError(422, "admin.last", "The institute must keep one active administrator.")
+
+
+@router.get("/health")
+async def health(request: Request) -> dict:
+    database = "ok"
+    try:
+        await db(request).command("ping")
+    except Exception:
+        database = "down"
+    data_dir = settings(request).data_dir
+    data_dir.mkdir(parents=True, exist_ok=True)
+    disk = "ok" if data_dir.exists() else "down"
+    bootstrapped = await db(request).institutes.count_documents({}) > 0
+    return {
+        "api": "ok",
+        "database": database,
+        "worker": "ok" if settings(request).worker_enabled else "standby",
+        "disk": disk,
+        "bootstrapped": bootstrapped,
+        "deployment_mode": settings(request).deployment_mode,
+    }
+
+
+@router.get("/compatibility")
+async def compatibility(client: str = "1.0.0") -> dict:
+    major = client.split(".", 1)[0]
+    if major != "1":
+        return {
+            "status": "upgrade_required",
+            "message": "This client cannot use this server. Install a compatible version.",
+        }
+    return {"status": "compatible", "message": "This client can use this server."}
+
+
+@router.post("/bootstrap")
+async def bootstrap(request: Request, body: BootstrapBody):
+    from fastapi.responses import JSONResponse
+
+    if await db(request).institutes.count_documents({}):
+        raise AppError(409, "bootstrap.closed", "This server already has an institute.")
+    institute_id = new_id()
+    user_id = new_id()
+    codes = recovery_codes()
+    secret = new_totp_secret() if settings(request).deployment_mode == "cloud" else None
+    try:
+        async with await request.app.state.client.start_session() as session:
+            async with session.start_transaction():
+                await db(request).institutes.insert_one(
+                    {
+                        "_id": institute_id,
+                        "name": body.institute_name.strip(),
+                        "code": body.institute_code.strip(),
+                    },
+                    session=session,
+                )
+                for role_name, actions in ROLE_TEMPLATES.items():
+                    await db(request).roles.insert_one(
+                        {
+                            "_id": new_id(),
+                            "institute_id": institute_id,
+                            "name": role_name,
+                            "name_key": name_key(role_name),
+                            "actions": list(actions),
+                        },
+                        session=session,
+                    )
+                await db(request).policies.insert_one(
+                    {
+                        "_id": new_id(),
+                        "institute_id": institute_id,
+                        "version": 1,
+                        "bands": {"danger_below": 40, "safe_above": 60},
+                        "ranking": "dense",
+                        "aggregate": "maximum-marks-weighted",
+                        "attempt": "latest-by-date",
+                        "passing_threshold": None,
+                        "self_publication": False,
+                    },
+                    session=session,
+                )
+                await db(request).users.insert_one(
+                    {
+                        "_id": user_id,
+                        "institute_id": institute_id,
+                        "name": body.admin_name.strip(),
+                        "email": body.admin_email.strip(),
+                        "email_key": name_key(body.admin_email),
+                        "password_hash": hash_password(body.admin_password),
+                        "recovery_hashes": [hash_token(code) for code in codes],
+                        "totp_secret": secret,
+                        "active": True,
+                        "session_version": 1,
+                    },
+                    session=session,
+                )
+                await db(request).grants.insert_one(
+                    {
+                        "_id": new_id(),
+                        "institute_id": institute_id,
+                        "user_id": user_id,
+                        "role": "institute_admin",
+                        "actions": list(ACTIONS),
+                        "scope": clean_scope({}, institute_id),
+                    },
+                    session=session,
+                )
+    except DuplicateKeyError:
+        raise AppError(409, "bootstrap.closed", "This server already has an institute.") from None
+    user = await db(request).users.find_one({"_id": user_id})
+    payload = {
+        "institute": await public_institute(request, institute_id),
+        "user": public_user(user),
+        "recovery_codes": codes,
+    }
+    if secret:
+        payload["totp_uri"] = totp_uri(secret, user["email"])
+    response = JSONResponse(payload)
+    await open_session(request, user, response)
+    await write_audit(
+        request,
+        user,
+        "institute.bootstrap",
+        None,
+        {"institute_id": institute_id},
+        {"institute_id": institute_id},
+    )
+    return response
+
+
+@router.post("/auth/login")
+async def login(request: Request, body: LoginBody):
+    from fastapi.responses import JSONResponse
+
+    email_key = name_key(body.email)
+    window_start = _now() - timedelta(minutes=LOGIN_WINDOW_MINUTES)
+    failures = await db(request).login_attempts.count_documents(
+        {"email_key": email_key, "at": {"$gt": window_start}}
+    )
+    if failures >= MAX_LOGIN_FAILURES:
+        raise AppError(429, "auth.rate_limited", "Too many sign-in attempts. Try again later.")
+    user = await db(request).users.find_one({"email_key": email_key, "active": True})
+    if user is None or not verify_password(body.password, user["password_hash"]):
+        await db(request).login_attempts.insert_one({"email_key": email_key, "at": _now()})
+        raise AppError(401, "auth.invalid", "The email or password is not correct.")
+    grants = await grants_for(request, user["_id"])
+    needs_totp = settings(request).deployment_mode == "cloud" and allows(
+        grants, "grant.manage", {"institute_id": user["institute_id"]}
+    )
+    if needs_totp and not verify_totp(user.get("totp_secret") or "", body.totp or ""):
+        raise AppError(401, "auth.totp_required", "Enter the current authentication code.")
+    await db(request).login_attempts.delete_many({"email_key": email_key})
+    response = JSONResponse(
+        {"user": public_user(user), "institute": await public_institute(request, user["institute_id"])}
+    )
+    await open_session(request, user, response)
+    return response
+
+
+@router.post("/auth/logout")
+async def logout(request: Request):
+    from fastapi.responses import JSONResponse
+
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        await db(request).sessions.delete_one({"token_hash": hash_token(token)})
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
+
+
+@router.get("/auth/session")
+async def session(request: Request) -> dict:
+    user = await current_user(request)
+    return {
+        "user": public_user(user),
+        "institute": await public_institute(request, user["institute_id"]),
+        "actions": actions_for(user["grants"]),
+        "deployment_mode": settings(request).deployment_mode,
+    }
+
+
+@router.post("/auth/password")
+async def change_password(request: Request, body: PasswordBody) -> dict:
+    user = await current_user(request)
+    if not verify_password(body.current_password, user["password_hash"]):
+        raise AppError(401, "auth.invalid", "The email or password is not correct.")
+    await db(request).users.update_one(
+        {"_id": user["_id"]}, {"$set": {"password_hash": hash_password(body.new_password)}}
+    )
+    await bump_session(request, user["_id"])
+    return {"ok": True}
+
+
+@router.post("/auth/recovery/redeem")
+async def redeem(request: Request, body: RecoveryBody):
+    from fastapi.responses import JSONResponse
+
+    user = await db(request).users.find_one({"email_key": name_key(body.email), "active": True})
+    code_hash = hash_token(body.recovery_code.strip().upper())
+    if user is None or code_hash not in user.get("recovery_hashes", []):
+        raise AppError(401, "auth.invalid", "The email or password is not correct.")
+    remaining = [item for item in user["recovery_hashes"] if item != code_hash]
+    await db(request).users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"password_hash": hash_password(body.new_password), "recovery_hashes": remaining}},
+    )
+    await db(request).login_attempts.delete_many({"email_key": name_key(body.email)})
+    await bump_session(request, user["_id"])
+    fresh = await db(request).users.find_one({"_id": user["_id"]})
+    response = JSONResponse({"user": public_user(fresh)})
+    await open_session(request, fresh, response)
+    return response
+
+
+@router.get("/roles")
+async def list_roles(request: Request) -> dict:
+    user = await current_user(request)
+    require(user, "grant.manage", institute_resource(user))
+    roles = await db(request).roles.find({"institute_id": user["institute_id"]}).to_list(length=100)
+    return {
+        "items": [
+            {"id": role["_id"], "name": role["name"], "actions": role["actions"]} for role in roles
+        ]
+    }
+
+
+@router.post("/roles")
+async def create_role(request: Request, body: RoleBody) -> dict:
+    user = await current_user(request)
+    require(user, "grant.manage", institute_resource(user))
+    unknown = [action for action in body.actions if action not in ACTIONS]
+    if unknown:
+        raise AppError(422, "role.unknown_action", "That role includes an unknown action.")
+    held = contained_actions(user["grants"], institute_resource(user))
+    if any(action not in held for action in body.actions):
+        raise AppError(403, "auth.forbidden", "You cannot grant an action you do not have.")
+    document = {
+        "_id": new_id(),
+        "institute_id": user["institute_id"],
+        "name": body.name.strip(),
+        "name_key": name_key(body.name),
+        "actions": body.actions,
+    }
+    try:
+        await db(request).roles.insert_one(document)
+    except DuplicateKeyError:
+        raise AppError(409, "role.exists", "A role with that name already exists.") from None
+    await write_audit(request, user, "role.create", None, {"name": document["name"]}, institute_resource(user))
+    return {"id": document["_id"], "name": document["name"], "actions": document["actions"]}
+
+
+@router.get("/users")
+async def list_users(request: Request) -> dict:
+    user = await current_user(request)
+    if not any("user.manage" in grant["actions"] for grant in user["grants"]):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    require(user, "user.manage", institute_resource(user))
+    users = await db(request).users.find({"institute_id": user["institute_id"]}).to_list(length=500)
+    return {"items": [public_user(item) for item in users]}
+
+
+@router.post("/users")
+async def create_user(request: Request, body: UserBody) -> dict:
+    actor = await current_user(request)
+    require(actor, "user.manage", institute_resource(actor))
+    role = await _role(request, actor["institute_id"], body.role)
+    scope = clean_scope(body.scope, actor["institute_id"])
+    consequence = _guard_delegate(actor, scope, _role_actions(role), body.acknowledge_scope)
+    user_id = new_id()
+    try:
+        await db(request).users.insert_one(
+            {
+                "_id": user_id,
+                "institute_id": actor["institute_id"],
+                "name": body.name.strip(),
+                "email": body.email.strip(),
+                "email_key": name_key(body.email),
+                "password_hash": hash_password(body.password),
+                "recovery_hashes": [],
+                "totp_secret": None,
+                "active": True,
+                "session_version": 1,
+            }
+        )
+    except DuplicateKeyError:
+        raise AppError(409, "user.exists", "A user with that email already exists.") from None
+    grant = {
+        "_id": new_id(),
+        "institute_id": actor["institute_id"],
+        "user_id": user_id,
+        "role": role["name"],
+        "role_id": role["_id"],
+        "actions": list(role["actions"]),
+        "scope": scope,
+    }
+    await db(request).grants.insert_one(grant)
+    await write_audit(request, actor, "user.create", None, {"user_id": user_id, "role": role["name"]}, scope)
+    created = await db(request).users.find_one({"_id": user_id})
+    return {"user": public_user(created), "consequence": consequence}
+
+
+@router.patch("/users/{user_id}")
+async def patch_user(request: Request, user_id: str, body: UserPatch) -> dict:
+    actor = await current_user(request)
+    require(actor, "user.manage", institute_resource(actor))
+    target = await db(request).users.find_one(
+        {"_id": user_id, "institute_id": actor["institute_id"]}
+    )
+    if target is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    if body.active is False:
+        await _ensure_admin_remains(request, actor["institute_id"], user_id)
+        await db(request).users.update_one({"_id": user_id}, {"$set": {"active": False}})
+        await bump_session(request, user_id)
+        await write_audit(
+            request, actor, "user.deactivate", {"active": True}, {"active": False}, institute_resource(actor)
+        )
+    elif body.active is True:
+        await db(request).users.update_one({"_id": user_id}, {"$set": {"active": True}})
+        await write_audit(
+            request, actor, "user.activate", {"active": False}, {"active": True}, institute_resource(actor)
+        )
+    updated = await db(request).users.find_one({"_id": user_id})
+    return public_user(updated)
+
+
+@router.post("/grants")
+async def create_grant(request: Request, body: GrantBody) -> dict:
+    actor = await current_user(request)
+    target = await db(request).users.find_one(
+        {"_id": body.user_id, "institute_id": actor["institute_id"]}
+    )
+    if target is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    role = await _role(request, actor["institute_id"], body.role)
+    scope = clean_scope(body.scope, actor["institute_id"])
+    consequence = _guard_delegate(actor, scope, _role_actions(role), body.acknowledge_scope)
+    grant = {
+        "_id": new_id(),
+        "institute_id": actor["institute_id"],
+        "user_id": target["_id"],
+        "role": role["name"],
+        "role_id": role["_id"],
+        "actions": list(role["actions"]),
+        "scope": scope,
+    }
+    await db(request).grants.insert_one(grant)
+    await bump_session(request, target["_id"])
+    await write_audit(request, actor, "grant.create", None, {"role": role["name"], "user_id": target["_id"]}, scope)
+    return {"id": grant["_id"], "consequence": consequence}
+
+
+@router.delete("/grants/{grant_id}")
+async def delete_grant(request: Request, grant_id: str) -> dict:
+    actor = await current_user(request)
+    grant = await db(request).grants.find_one(
+        {"_id": grant_id, "institute_id": actor["institute_id"]}
+    )
+    if grant is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    if not allows(actor["grants"], "grant.manage", grant["scope"]):
+        raise AppError(403, "auth.forbidden", "You cannot assign access outside your own scope.")
+    if "grant.manage" in grant["actions"] and not grant["scope"].get("branch_id"):
+        other = await db(request).grants.count_documents(
+            {
+                "user_id": grant["user_id"],
+                "actions": "grant.manage",
+                "scope.branch_id": None,
+                "_id": {"$ne": grant_id},
+            }
+        )
+        if other == 0:
+            await _ensure_admin_remains(request, actor["institute_id"], grant["user_id"])
+    await db(request).grants.delete_one({"_id": grant_id})
+    await bump_session(request, grant["user_id"])
+    await write_audit(request, actor, "grant.delete", {"id": grant_id, "role": grant["role"]}, None, grant["scope"])
+    return {"ok": True}
+
+
+@router.get("/users/{user_id}/effective-access")
+async def effective_access(request: Request, user_id: str) -> dict:
+    actor = await current_user(request)
+    require(actor, "grant.manage", institute_resource(actor))
+    target = await db(request).users.find_one(
+        {"_id": user_id, "institute_id": actor["institute_id"]}
+    )
+    if target is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    rows = await grants_for(request, target["_id"])
+    return {
+        "user": public_user(target),
+        "grants": [
+            {
+                "id": row["_id"],
+                "role": row.get("role"),
+                "actions": row["actions"],
+                "scope": row["scope"],
+                "consequence": describe_scope(row["scope"]),
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.get("/audit")
+async def list_audit(request: Request) -> dict:
+    user = await current_user(request)
+    require(user, "audit.view", institute_resource(user))
+    events = (
+        await db(request)
+        .audit_events.find({"institute_id": user["institute_id"]})
+        .sort("at", -1)
+        .to_list(length=100)
+    )
+    return {
+        "items": [
+            {
+                "id": event["_id"],
+                "action": event["action"],
+                "at": event["at"].isoformat(),
+                "actor_id": event["actor_id"],
+                "before": event.get("before"),
+                "after": event.get("after"),
+                "scope": event.get("scope"),
+            }
+            for event in events
+        ]
+    }
+
+
+@router.get("/policies/active")
+async def active_policy(request: Request) -> dict:
+    user = await current_user(request)
+    require(user, "dashboard.view", institute_resource(user))
+    policy = await db(request).policies.find_one(
+        {"institute_id": user["institute_id"]}, sort=[("version", -1)]
+    )
+    if policy is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    policy["id"] = policy.pop("_id")
+    return policy
+
+
+@router.get("/context/options")
+async def context_options(request: Request, dimension: str, q: str = "") -> dict:
+    user = await current_user(request)
+    collection_name = {"branch": "branches", "course": "courses", "subject": "subjects"}.get(dimension)
+    if collection_name is None:
+        raise AppError(422, "context.unknown", "Choose a known context level.")
+    field = {"branch": "branch_id", "course": "course_id", "subject": "subject_id"}[dimension]
+    clause = mongo_clause(
+        user["grants"],
+        "dashboard.view",
+        {"institute_id": "institute_id", field: "_id"},
+    )
+    upload_clause = mongo_clause(
+        user["grants"],
+        "marksheet.upload",
+        {"institute_id": "institute_id", field: "_id"},
+    )
+    query = {"institute_id": user["institute_id"], "$or": [clause, upload_clause]}
+    if q:
+        query["name_key"] = {"$regex": name_key(q)}
+    rows = await db(request)[collection_name].find(query).limit(50).to_list(length=50)
+    return {"items": [{"id": row["_id"], "label": row["name"], "parents": {}} for row in rows]}
+
+
+@router.get("/views/{level}")
+async def view(request: Request, level: str) -> dict:
+    user = await current_user(request)
+    if level not in {"institute", "branch", "course", "batch", "subject", "paper"}:
+        raise AppError(404, "not_found", "That record was not found.")
+    if not any("dashboard.view" in grant["actions"] for grant in user["grants"]):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    branch_clause = mongo_clause(
+        user["grants"], "dashboard.view", {"institute_id": "institute_id", "branch_id": "_id"}
+    )
+    branches = await db(request).branches.count_documents(
+        {"institute_id": user["institute_id"], **_and(branch_clause)}
+    )
+    enrollment_clause = mongo_clause(
+        user["grants"],
+        "dashboard.view",
+        {
+            "institute_id": "institute_id",
+            "branch_id": "branch_id",
+            "course_id": "course_id",
+            "batch_id": "batch_id",
+        },
+    )
+    enrollment_query = {"institute_id": user["institute_id"], **_and(enrollment_clause)}
+    enrollments = await db(request).enrollments.count_documents(enrollment_query)
+    student_ids = await db(request).enrollments.distinct("student_id", enrollment_query)
+    return {
+        "level": level,
+        "branches": branches,
+        "students": len(student_ids),
+        "enrollments": enrollments,
+        "roster_confirmed": False,
+        "policy_version": 1,
+    }
+
+
+def _and(clause: dict) -> dict:
+    if "$or" in clause or clause == {"_id": {"$exists": False}}:
+        return clause
+    return clause
+
+
+@router.get("/students")
+async def list_students(request: Request) -> dict:
+    user = await current_user(request)
+    clause = mongo_clause(
+        user["grants"],
+        "student.lookup",
+        {
+            "institute_id": "institute_id",
+            "branch_id": "branch_id",
+            "course_id": "course_id",
+            "batch_id": "batch_id",
+        },
+    )
+    if not any("student.lookup" in grant["actions"] for grant in user["grants"]):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    enrollment_query = {"institute_id": user["institute_id"], **clause}
+    enrollments = await db(request).enrollments.find(enrollment_query).to_list(length=200)
+    student_ids = list({item["student_id"] for item in enrollments})
+    students = await db(request).students.find({"_id": {"$in": student_ids}}).to_list(length=200)
+    manage = allows(user["grants"], "student.manage", institute_resource(user))
+    items = []
+    for student in students:
+        item = {"id": student["_id"], "student_code": student["student_code"], "display_name": student["display_name"]}
+        if manage:
+            item["name_key"] = student.get("name_key")
+        items.append(item)
+    return {"items": items}
+
+
+@router.get("/students/{student_id}/card")
+async def student_card(request: Request, student_id: str) -> dict:
+    user = await current_user(request)
+    student = await db(request).students.find_one(
+        {"_id": student_id, "institute_id": user["institute_id"]}
+    )
+    if student is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    enrollments = await db(request).enrollments.find({"student_id": student_id}).to_list(length=50)
+    visible = False
+    for enrollment in enrollments:
+        resource = {
+            "institute_id": enrollment["institute_id"],
+            "branch_id": enrollment["branch_id"],
+            "course_id": enrollment["course_id"],
+            "batch_id": enrollment["batch_id"],
+        }
+        if allows(user["grants"], "progress_card.view", resource, resource_fields_only=True):
+            visible = True
+    if not visible:
+        raise AppError(404, "not_found", "That record was not found.")
+    results = await db(request).results.find({"student_id": student_id}).to_list(length=500)
+    shown = []
+    hidden = False
+    for result in results:
+        resource = {
+            "institute_id": result["institute_id"],
+            "branch_id": result["branch_id"],
+            "course_id": result["course_id"],
+            "batch_id": result.get("batch_id"),
+            "subject_id": result.get("subject_id"),
+            "paper_id": result.get("paper_id"),
+        }
+        if allows(user["grants"], "progress_card.view", resource):
+            shown.append(
+                {
+                    "id": result["_id"],
+                    "subject_id": result.get("subject_id"),
+                    "status": result.get("status"),
+                    "score": result.get("score"),
+                }
+            )
+        else:
+            hidden = True
+    return {
+        "student_code": student["student_code"],
+        "display_name": student["display_name"],
+        "partial": hidden,
+        "results": shown,
+    }
+
+
+@router.get("/marksheets/{marksheet_id}")
+async def get_marksheet(request: Request, marksheet_id: str) -> dict:
+    user = await current_user(request)
+    sheet = await db(request).marksheets.find_one(
+        {"_id": marksheet_id, "institute_id": user["institute_id"]}
+    )
+    if sheet is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    resource = _sheet_resource(sheet)
+    if not allows(user["grants"], "marksheet.view", resource):
+        raise AppError(404, "not_found", "That record was not found.")
+    return {"id": sheet["_id"], "status": sheet.get("status"), "subject_id": sheet.get("subject_id")}
+
+
+@router.post("/marksheets/{marksheet_id}/publish")
+async def publish_marksheet(request: Request, marksheet_id: str) -> dict:
+    user = await current_user(request)
+    sheet = await db(request).marksheets.find_one(
+        {"_id": marksheet_id, "institute_id": user["institute_id"]}
+    )
+    if sheet is None or not allows(user["grants"], "marksheet.view", _sheet_resource(sheet)):
+        raise AppError(404, "not_found", "That record was not found.")
+    if not allows(user["grants"], "marksheet.publish", _sheet_resource(sheet)):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    raise AppError(422, "marksheet.not_ready", "Publication is available after a marklist is imported.")
+
+
+@router.post("/imports/commit")
+async def commit_import(request: Request, body: ImportCommitBody) -> dict:
+    user = await current_user(request)
+    for sheet in body.sheets:
+        if sheet.get("skipped"):
+            continue
+        scope = clean_scope(sheet.get("scope"), user["institute_id"])
+        if not allows(user["grants"], "marksheet.upload", scope):
+            raise AppError(
+                403,
+                "auth.forbidden",
+                "You do not have permission to import that sheet.",
+                sheet=sheet.get("name"),
+            )
+        dimension = sheet.get("create")
+        if dimension:
+            from app.acl import CREATE_ACTION
+
+            action = CREATE_ACTION[dimension]
+            if not allows(user["grants"], action, scope):
+                raise AppError(
+                    403,
+                    "auth.forbidden",
+                    "You do not have permission to create that record.",
+                    dimension=dimension,
+                )
+    raise AppError(422, "import.not_ready", "Workbook import is the next milestone.")
+
+
+@router.post("/reports/cards")
+async def queue_cards(request: Request, body: ReportBody) -> dict:
+    user = await current_user(request)
+    if body.format not in {"pdf", "xlsx"}:
+        raise AppError(422, "report.format", "Choose a PDF or spreadsheet export.")
+    action = "export.pdf" if body.format == "pdf" else "export.xlsx"
+    scope = clean_scope(body.scope, user["institute_id"])
+    if not allows(user["grants"], "progress_card.view", scope) or not allows(user["grants"], action, scope):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    key = request.headers.get("Idempotency-Key")
+    job = await enqueue(
+        db(request),
+        kind="report_pdf" if body.format == "pdf" else "report_xlsx",
+        actor=user,
+        payload={"scope": scope},
+        idempotency_key=key,
+    )
+    await write_audit(request, user, "export.queue", None, {"job_id": job["_id"]}, scope)
+    return {"id": job["_id"], "state": job["state"]}
+
+
+@router.get("/jobs/{job_id}")
+async def get_job(request: Request, job_id: str) -> dict:
+    user = await current_user(request)
+    job = await db(request).jobs.find_one({"_id": job_id, "actor_id": user["_id"]})
+    if job is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    return {
+        "id": job["_id"],
+        "state": job["state"],
+        "last_error": job.get("last_error"),
+        "file_id": job.get("file_id"),
+    }
+
+
+@router.post("/jobs/process")
+async def process_jobs(request: Request) -> dict:
+    user = await current_user(request)
+    require(user, "backup.admin", institute_resource(user))
+    count = await process_due_jobs(db(request), settings(request).data_dir)
+    return {"processed": count}
+
+
+@router.get("/files/{file_id}")
+async def download_file(request: Request, file_id: str):
+    from fastapi.responses import FileResponse
+
+    user = await current_user(request)
+    file_doc = await db(request).files.find_one(
+        {"_id": file_id, "institute_id": user["institute_id"]}
+    )
+    if file_doc is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    action = "export.pdf" if file_doc["kind"] == "report_pdf" else "export.xlsx"
+    scope = file_doc.get("scope") or {}
+    if not allows(user["grants"], action, scope):
+        raise AppError(404, "not_found", "That record was not found.")
+    return FileResponse(file_doc["path"], filename="export.txt")
+
+
+def _sheet_resource(sheet: dict) -> dict:
+    return {
+        "institute_id": sheet["institute_id"],
+        "branch_id": sheet.get("branch_id"),
+        "course_id": sheet.get("course_id"),
+        "batch_id": sheet.get("batch_id"),
+        "subject_id": sheet.get("subject_id"),
+        "paper_id": sheet.get("paper_id"),
+    }
