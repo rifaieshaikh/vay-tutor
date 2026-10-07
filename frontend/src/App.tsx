@@ -4,11 +4,12 @@ import { api, Health, Session } from "./api";
 import { AccessPage } from "./pages/Access";
 import { AuditPage } from "./pages/Audit";
 import { CatalogPage } from "./pages/Catalog";
+import { CardsPage } from "./pages/Cards";
 import { ImportPage } from "./pages/Import";
+import { ViewsPage } from "./pages/Views";
 import { LoginPage } from "./pages/Login";
 import { OverviewPage } from "./pages/Overview";
 import { MarksheetsPage } from "./pages/Marksheets";
-import { PlaceholderPage } from "./pages/Placeholder";
 import { SettingsPage } from "./pages/Settings";
 import { SetupPage } from "./pages/Setup";
 import { Shell } from "./pages/Shell";
@@ -60,8 +61,8 @@ export function App() {
         <Route path="/" element={<OverviewPage canImport={can("marksheet.upload")} />} />
         <Route path="/import" element={can("marksheet.upload") ? <ImportPage /> : <Navigate to="/" replace />} />
         <Route path="/marksheets" element={can("marksheet.view") ? <MarksheetsPage /> : <Navigate to="/" replace />} />
-        <Route path="/cards" element={can("progress_card.view") ? <PlaceholderPage title="Progress cards" body="Student cards appear after results are published." /> : <Navigate to="/" replace />} />
-        <Route path="/views" element={can("dashboard.view") ? <PlaceholderPage title="Academic views" body="Institute, branch, course, batch, subject, and paper views use the same filters once results are published." /> : <Navigate to="/" replace />} />
+        <Route path="/cards" element={can("progress_card.view") ? <CardsPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/views" element={can("dashboard.view") ? <ViewsPage /> : <Navigate to="/" replace />} />
         <Route path="/students" element={can("student.lookup") ? <CatalogPage /> : <Navigate to="/" replace />} />
         <Route path="/access" element={can("user.manage") ? <AccessPage /> : <Navigate to="/" replace />} />
         <Route path="/audit" element={can("audit.view") ? <AuditPage /> : <Navigate to="/" replace />} />

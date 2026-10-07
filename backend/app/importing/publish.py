@@ -27,6 +27,8 @@ async def publish_revision(db, client, user: dict, sheet: dict) -> dict:
     if sheet.get("status") not in {"draft", "submitted"}:
         raise AppError(422, "marksheet.state", "Only a draft or submitted marksheet can be published.")
     revision = sheet.get("revision") or 1
+    policy = await db.policies.find_one({"institute_id": user["institute_id"]}, sort=[("version", -1)])
+    policy_version = policy.get("version", 1) if policy else 1
     async with await client.start_session() as session:
         async with session.start_transaction():
             await db.results.update_many(
@@ -41,7 +43,7 @@ async def publish_revision(db, client, user: dict, sheet: dict) -> dict:
             )
             await db.marksheets.update_one(
                 {"_id": sheet["_id"]},
-                {"$set": {"status": "published", "active_revision": revision, "reviewer_id": user["_id"], "published_at": _now()}},
+                {"$set": {"status": "published", "active_revision": revision, "reviewer_id": user["_id"], "published_at": _now(), "policy_version": policy_version}},
                 session=session,
             )
     await _audit(db, user, "marksheet.publish", {"marksheet_id": sheet["_id"], "revision": revision})

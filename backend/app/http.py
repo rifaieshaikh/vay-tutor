@@ -771,18 +771,39 @@ async def context_options(request: Request, dimension: str, q: str = "") -> dict
 
 
 @router.get("/views/{level}")
-async def view(request: Request, level: str) -> dict:
+async def view(
+    request: Request,
+    level: str,
+    branch_id: str = "",
+    course_id: str = "",
+    batch_id: str = "",
+    subject_id: str = "",
+    paper_id: str = "",
+    exam_type: str = "",
+    exam_date: str = "",
+    page: int = 1,
+) -> dict:
     user = await current_user(request)
     if level not in {"institute", "branch", "course", "batch", "subject", "paper"}:
         raise AppError(404, "not_found", "That record was not found.")
     if not any("dashboard.view" in grant["actions"] for grant in user["grants"]):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    filters = {
+        "branch_id": branch_id,
+        "course_id": course_id,
+        "batch_id": batch_id,
+        "subject_id": subject_id,
+        "paper_id": paper_id,
+        "exam_type": exam_type,
+        "exam_date": exam_date,
+    }
     branch_clause = mongo_clause(
         user["grants"], "dashboard.view", {"institute_id": "institute_id", "branch_id": "_id"}
     )
-    branches = await db(request).branches.count_documents(
-        {"institute_id": user["institute_id"], **_and(branch_clause)}
-    )
+    branch_query = {"institute_id": user["institute_id"], **_and(branch_clause)}
+    if branch_id:
+        branch_query["_id"] = branch_id
+    branches = await db(request).branches.count_documents(branch_query)
     enrollment_clause = mongo_clause(
         user["grants"],
         "dashboard.view",
@@ -794,16 +815,86 @@ async def view(request: Request, level: str) -> dict:
         },
     )
     enrollment_query = {"institute_id": user["institute_id"], **_and(enrollment_clause)}
-    enrollments = await db(request).enrollments.count_documents(enrollment_query)
-    student_ids = await db(request).enrollments.distinct("student_id", enrollment_query)
+    for field in ("branch_id", "course_id", "batch_id"):
+        if filters[field]:
+            enrollment_query[field] = filters[field]
+    enrollment_rows = await db(request).enrollments.find(enrollment_query).to_list(length=5000)
+    student_ids = {item["student_id"] for item in enrollment_rows}
+    from app.calculating import aggregate
+    from app.reporting import attention, authorized, hydrate, matches, names_for, policy_for, rank_page, view_sections
+
+    policy = await policy_for(db(request), user["institute_id"])
+    stored = await db(request).results.find(
+        {"institute_id": user["institute_id"], "active": {"$ne": False}}
+    ).to_list(length=5000)
+    rows = [row for row in await hydrate(db(request), stored) if row.get("published") and matches(row, filters)]
+    rows = authorized(rows, user["grants"], "dashboard.view")
+    summary = aggregate(rows, policy)
+    summary["participation"] = None
+    confirmed = await _roster_confirmed(request, user["institute_id"], filters, enrollment_rows)
+    if confirmed and summary["expected"]:
+        summary["participation"] = round(summary["scored"] / summary["expected"], 4)
+    stamped = [row.get("policy_version") for row in rows]
+    pending = any(item not in {None, policy.get("version")} for item in stamped)
+    pending = pending or any(item is None for item in stamped)
+    names = await names_for(db(request), rows)
     return {
         "level": level,
         "branches": branches,
         "students": len(student_ids),
-        "enrollments": enrollments,
-        "roster_confirmed": False,
-        "policy_version": 1,
+        "enrollments": len(enrollment_rows),
+        "roster_confirmed": confirmed,
+        "membership_label": "students listed in imported marklists",
+        "policy_version": policy.get("version", 1),
+        "policy_label": policy.get("aggregate") or "maximum-marks-weighted",
+        "pending_recalculation": pending,
+        "sample_size": summary["scored"],
+        "performance": summary,
+        "sections": view_sections(level, rows, enrollment_rows, names),
+        "attention": attention(rows, policy),
+        "ranks": rank_page(rows, page),
+        "empty": not rows,
+        "filters": {key: value for key, value in filters.items() if value},
     }
+
+
+async def _roster_confirmed(request: Request, institute_id: str, filters: dict, enrollments: list[dict]) -> bool:
+    if filters.get("batch_id"):
+        batch_ids = {filters["batch_id"]}
+    else:
+        batch_ids = {item["batch_id"] for item in enrollments if item.get("batch_id")}
+    if not batch_ids:
+        return False
+    confirmed = await db(request).rosters.distinct(
+        "batch_id",
+        {"institute_id": institute_id, "batch_id": {"$in": list(batch_ids)}},
+    )
+    return set(confirmed) == batch_ids
+
+
+@router.post("/rosters/confirm")
+async def confirm_roster(request: Request) -> dict:
+    user = await current_user(request)
+    body = await request.json()
+    batch_id = str(body.get("batch_id") or "")
+    batch = await db(request).batches.find_one({"_id": batch_id, "institute_id": user["institute_id"]})
+    if batch is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    resource = {
+        "institute_id": user["institute_id"],
+        "branch_id": batch.get("branch_id"),
+        "course_id": batch.get("course_id"),
+        "batch_id": batch_id,
+    }
+    if not allows(user["grants"], "catalog.manage", resource):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    listed = await db(request).enrollments.find({"batch_id": batch_id}).to_list(length=5000)
+    await db(request).rosters.update_one(
+        {"institute_id": user["institute_id"], "batch_id": batch_id},
+        {"$set": {"student_ids": [item["student_id"] for item in listed], "confirmed_by": user["_id"]}},
+        upsert=True,
+    )
+    return {"batch_id": batch_id, "listed": len(listed), "roster_confirmed": True}
 
 
 def _and(clause: dict) -> dict:
@@ -862,10 +953,15 @@ async def student_card(request: Request, student_id: str) -> dict:
             visible = True
     if not visible:
         raise AppError(404, "not_found", "That record was not found.")
-    results = await db(request).results.find({"student_id": student_id}).to_list(length=500)
-    shown = []
+    results = await db(request).results.find({"student_id": student_id, "active": {"$ne": False}}).to_list(length=500)
+    from app.calculating import aggregate
+    from app.reporting import comparisons, hydrate, policy_for, present, ranks_for
+
+    policy = await policy_for(db(request), user["institute_id"])
+    hydrated = await hydrate(db(request), results)
+    shown_rows = []
     hidden = False
-    for result in results:
+    for result in hydrated:
         resource = {
             "institute_id": result["institute_id"],
             "branch_id": result["branch_id"],
@@ -874,24 +970,38 @@ async def student_card(request: Request, student_id: str) -> dict:
             "subject_id": result.get("subject_id"),
             "paper_id": result.get("paper_id"),
         }
-        if result.get("active") is False:
-            continue
         if allows(user["grants"], "progress_card.view", resource):
-            shown.append(
-                {
-                    "id": result["_id"],
-                    "subject_id": result.get("subject_id"),
-                    "status": result.get("status"),
-                    "score": result.get("score"),
-                }
-            )
+            shown_rows.append(result)
         else:
             hidden = True
+    siblings = {}
+    if not hidden:
+        sheet_ids = list({row.get("marksheet_id") for row in shown_rows if row.get("marksheet_id")})
+        if sheet_ids:
+            found = await db(request).results.find(
+                {"marksheet_id": {"$in": sheet_ids}, "active": {"$ne": False}}
+            ).to_list(length=5000)
+            cohort = await hydrate(db(request), found)
+            for row in cohort:
+                siblings.setdefault(row.get("marksheet_id"), []).append(row)
+    presented = []
+    for row in shown_rows:
+        rank = batch_rank = None
+        if not hidden:
+            rank, batch_rank = ranks_for(row, siblings.get(row.get("marksheet_id"), [row]))
+        presented.append(present(row, policy, rank, batch_rank))
+    summary = aggregate(shown_rows, policy)
     return {
         "student_code": student["student_code"],
         "display_name": student["display_name"],
         "partial": hidden,
-        "results": shown,
+        "coverage_note": "Authorized subjects only." if hidden else None,
+        "membership_label": "students listed in imported marklists",
+        "policy_version": policy.get("version", 1),
+        "performance": summary,
+        "retests": comparisons(shown_rows),
+        "enrollments": [{"id": item["_id"], "batch_id": item["batch_id"]} for item in enrollments],
+        "results": presented,
     }
 
 
@@ -1047,7 +1157,7 @@ async def download_file(request: Request, file_id: str):
     scope = file_doc.get("scope") or {}
     if not allows(user["grants"], action, scope):
         raise AppError(404, "not_found", "That record was not found.")
-    return FileResponse(file_doc["path"], filename="export.txt")
+    return FileResponse(file_doc["path"], filename=file_doc.get("filename") or "export.txt")
 
 
 def _sheet_resource(sheet: dict) -> dict:

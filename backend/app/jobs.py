@@ -8,9 +8,15 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.acl import allows
-from app.security import hash_token
 
 log = logging.getLogger("vay.jobs")
+
+
+def _in_scope(row: dict, scope: dict) -> bool:
+    for field in ("branch_id", "course_id", "batch_id", "subject_id", "paper_id"):
+        if scope.get(field) and row.get(field) != scope[field]:
+            return False
+    return True
 
 
 def _now() -> datetime:
@@ -98,9 +104,49 @@ async def _run(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
         return
     target = data_dir / "files"
     target.mkdir(parents=True, exist_ok=True)
+    from app.reporting import authorized, export_bytes, file_digest, hydrate, policy_for
+
+    policy = await policy_for(db, job["institute_id"])
+    stored = await db.results.find({"institute_id": job["institute_id"], "active": {"$ne": False}}).to_list(length=5000)
+    rows = [
+        row for row in authorized(await hydrate(db, stored), grants, "progress_card.view")
+        if _in_scope(row, resource)
+    ]
+    lines = [
+        f"Policy version {policy.get('version', 1)}",
+        policy.get("aggregate") or "maximum-marks-weighted",
+        "Authorized subjects only. Drafts are excluded.",
+        "One active revision is included.",
+    ]
+    scope = resource or {}
+    for field, value in scope.items():
+        if value and field != "institute_id":
+            lines.append(f"{field}: {value}")
+    if not any(field != "institute_id" and value for field, value in scope.items()):
+        lines.append("Scope: this institute")
+    student_ids = list({row.get("student_id") for row in rows if row.get("student_id")})
+    people = {}
+    if student_ids:
+        for student in await db.students.find({"_id": {"$in": student_ids}}).to_list(length=len(student_ids)):
+            people[student["_id"]] = f"{student.get('display_name')} ({student.get('student_code')})"
+    for row in rows:
+        if not row.get("published"):
+            continue
+        previous = row.get("previous_score")
+        earlier = f" previous {previous}" if previous is not None else ""
+        who = people.get(row.get("student_id"), "Student")
+        if row.get("status") == "scored":
+            mark = f"scored {row.get('score')}/{row.get('maximum')}"
+        else:
+            mark = row.get("status") or "unscored"
+        lines.append(
+            f"{who} - {row.get('title') or 'Result'} revision {row.get('revision') or 1} "
+            f"{mark}{earlier} {row.get('exam_date') or 'undated'}"
+        )
+    payload, filename = export_bytes(job["kind"], lines)
     partial = target / f"{job['_id']}.partial"
     final = target / f"{job['_id']}.bin"
-    partial.write_text("progress card export\n", encoding="utf-8")
+    partial.write_bytes(payload)
     user = await db.users.find_one({"_id": job["actor_id"]})
     grants = await db.grants.find({"user_id": job["actor_id"]}).to_list(length=500)
     if (
@@ -131,7 +177,8 @@ async def _run(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
         "session_version": job["session_version"],
         "scope": resource,
         "path": str(final),
-        "sha256": hash_token(final.read_text(encoding="utf-8")),
+        "filename": filename,
+        "sha256": file_digest(final.read_bytes()),
         "created_at": _now(),
     }
     await db.files.insert_one(file_doc)
