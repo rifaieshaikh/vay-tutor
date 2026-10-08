@@ -19,6 +19,59 @@ def _in_scope(row: dict, scope: dict) -> bool:
     return True
 
 
+def _card_permitted(grants: list[dict], action: str, scope: dict, enrollments: list[dict]) -> bool:
+    for enrollment in enrollments:
+        if scope.get("branch_id") and scope["branch_id"] != enrollment.get("branch_id"):
+            continue
+        if scope.get("course_id") and scope["course_id"] != enrollment.get("course_id"):
+            continue
+        if scope.get("batch_id") and scope["batch_id"] != enrollment.get("batch_id"):
+            continue
+        resource = {
+            "institute_id": enrollment.get("institute_id"),
+            "branch_id": enrollment.get("branch_id"),
+            "course_id": enrollment.get("course_id"),
+            "batch_id": enrollment.get("batch_id"),
+            "subject_id": scope.get("subject_id"),
+            "paper_id": scope.get("paper_id"),
+        }
+        named = bool(scope.get("subject_id") or scope.get("paper_id"))
+        if allows(grants, "progress_card.view", resource, not named) and allows(grants, action, resource, not named):
+            return True
+    return False
+
+
+async def _export_allowed(db: AsyncIOMotorDatabase, job: dict, user: dict | None, grants: list[dict], action: str, resource: dict) -> bool:
+    if user is None or not user.get("active") or user.get("session_version") != job["session_version"]:
+        return False
+    card = job["payload"].get("card") or {}
+    if card.get("student_id"):
+        enrollments = await db.enrollments.find(
+            {"student_id": card["student_id"], "institute_id": job["institute_id"]}
+        ).to_list(length=50)
+        return _card_permitted(grants, action, resource, enrollments)
+    return allows(grants, action, resource) and allows(grants, "progress_card.view", resource)
+
+
+def _matches_card(row: dict, card: dict) -> bool:
+    student_id = card.get("student_id")
+    if student_id and row.get("student_id") != student_id:
+        return False
+    exam_date = str(row.get("exam_date") or "")
+    start = str(card.get("exam_date_from") or "")
+    end = str(card.get("exam_date_to") or "")
+    if start and exam_date < start:
+        return False
+    if end and (not exam_date or exam_date > end):
+        return False
+    if card.get("exam_type") and row.get("exam_type") != card["exam_type"]:
+        return False
+    attempt = card.get("attempt")
+    if attempt in {"original", "retest"} and (row.get("attempt_kind") or "original") != attempt:
+        return False
+    return True
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -83,14 +136,7 @@ async def _run(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
     grants = await db.grants.find({"user_id": job["actor_id"]}).to_list(length=500)
     action = "export.pdf" if job["kind"] == "report_pdf" else "export.xlsx"
     resource = job["payload"].get("scope", {})
-    revoked = (
-        user is None
-        or not user.get("active")
-        or user.get("session_version") != job["session_version"]
-        or not allows(grants, action, resource)
-        or not allows(grants, "progress_card.view", resource)
-    )
-    if revoked:
+    if not await _export_allowed(db, job, user, grants, action, resource):
         await db.jobs.update_one(
             {"_id": job["_id"]},
             {
@@ -108,20 +154,32 @@ async def _run(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
 
     policy = await policy_for(db, job["institute_id"])
     stored = await db.results.find({"institute_id": job["institute_id"], "active": {"$ne": False}}).to_list(length=5000)
+    card = job["payload"].get("card") or {}
     rows = [
         row for row in authorized(await hydrate(db, stored), grants, "progress_card.view")
-        if _in_scope(row, resource)
+        if _in_scope(row, resource) and _matches_card(row, card)
     ]
     lines = [
         f"Policy version {policy.get('version', 1)}",
         policy.get("aggregate") or "maximum-marks-weighted",
         "Authorized subjects only. Drafts are excluded.",
         "One active revision is included.",
+        "The total uses the latest published attempt, weighted by each maximum.",
     ]
     scope = resource or {}
     for field, value in scope.items():
         if value and field != "institute_id":
             lines.append(f"{field}: {value}")
+    if card.get("student_id"):
+        lines.append(f"student_id: {card['student_id']}")
+    if card.get("exam_date_from"):
+        lines.append(f"exam_date_from: {card['exam_date_from']}")
+    if card.get("exam_date_to"):
+        lines.append(f"exam_date_to: {card['exam_date_to']}")
+    if card.get("exam_type"):
+        lines.append(f"exam_type: {card['exam_type']}")
+    if card.get("attempt"):
+        lines.append(f"attempt: {card['attempt']}")
     if not any(field != "institute_id" and value for field, value in scope.items()):
         lines.append("Scope: this institute")
     student_ids = list({row.get("student_id") for row in rows if row.get("student_id")})
@@ -149,12 +207,7 @@ async def _run(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
     partial.write_bytes(payload)
     user = await db.users.find_one({"_id": job["actor_id"]})
     grants = await db.grants.find({"user_id": job["actor_id"]}).to_list(length=500)
-    if (
-        user is None
-        or not user.get("active")
-        or user.get("session_version") != job["session_version"]
-        or not allows(grants, action, resource)
-    ):
+    if not await _export_allowed(db, job, user, grants, action, resource):
         partial.unlink(missing_ok=True)
         await db.jobs.update_one(
             {"_id": job["_id"]},
@@ -187,3 +240,24 @@ async def _run(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
         {"$set": {"state": "succeeded", "lease_until": None, "file_id": file_doc["_id"]}},
     )
     log.info("job %s finished", job["_id"])
+
+
+async def run_actor_job(db: AsyncIOMotorDatabase, data_dir: Path, job_id: str, actor_id: str) -> dict | None:
+    now = _now()
+    job = await db.jobs.find_one_and_update(
+        {"_id": job_id, "actor_id": actor_id, "state": "queued"},
+        {"$set": {"state": "leased", "lease_until": now + timedelta(minutes=2)}, "$inc": {"attempts": 1}},
+    )
+    if job is None:
+        return await db.jobs.find_one({"_id": job_id, "actor_id": actor_id})
+    job["attempts"] = job.get("attempts", 0) + 1
+    job["state"] = "leased"
+    try:
+        await _run(db, data_dir, job)
+    except Exception:
+        log.exception("job %s failed", job_id)
+        await db.jobs.update_one(
+            {"_id": job_id},
+            {"$set": {"state": "failed", "lease_until": None, "last_error": "The export could not be finished."}},
+        )
+    return await db.jobs.find_one({"_id": job_id, "actor_id": actor_id})

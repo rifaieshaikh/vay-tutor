@@ -65,19 +65,22 @@ def present(row: dict, policy: dict, rank: int | None, batch_rank: int | None) -
         "exam_type": row.get("exam_type"),
         "attempt": row.get("attempt_kind") or "original",
         "assessment_id": row.get("assessment_id"),
+        "marksheet_id": row.get("marksheet_id"),
         "included_in_total": row.get("counts_in_aggregate") is not False,
     }
 
 
-def comparisons(rows: list[dict]) -> list[dict]:
+def comparisons(rows: list[dict], outside: list[dict] | None = None) -> list[dict]:
+    outside = outside or []
+    included = {row["id"] for row in rows}
     grouped: dict[str, list[dict]] = {}
-    for row in rows:
+    for row in list(rows) + list(outside):
         key = row.get("assessment_id") or row["id"]
         grouped.setdefault(key, []).append(row)
     items = []
     for group in grouped.values():
         ordered = sorted(group, key=lambda item: (str(item.get("exam_date") or ""), item.get("revision") or 0))
-        if len(ordered) < 2:
+        if len(ordered) < 2 or ordered[-1]["id"] not in included:
             continue
         items.append(
             {
@@ -85,6 +88,7 @@ def comparisons(rows: list[dict]) -> list[dict]:
                 "original_percentage": display_percentage(percentage(ordered[0].get("score"), ordered[0].get("maximum"))),
                 "latest_percentage": display_percentage(percentage(ordered[-1].get("score"), ordered[-1].get("maximum"))),
                 "change": percentage_change(ordered[0], ordered[-1]),
+                "baseline_outside_period": ordered[0]["id"] not in included,
             }
         )
     return items
@@ -105,12 +109,20 @@ def matches(row: dict, filters: dict) -> bool:
     for field in ("branch_id", "course_id", "batch_id", "subject_id", "paper_id", "exam_type"):
         if filters.get(field) and row.get(field) != filters[field]:
             return False
-    if filters.get("exam_date") and str(row.get("exam_date") or "") != filters["exam_date"]:
+    exam_date = str(row.get("exam_date") or "")
+    if filters.get("exam_date") and exam_date != filters["exam_date"]:
+        return False
+    if filters.get("exam_date_from") and exam_date < filters["exam_date_from"]:
+        return False
+    if filters.get("exam_date_to") and (not exam_date or exam_date > filters["exam_date_to"]):
+        return False
+    attempt = filters.get("attempt")
+    if attempt in {"original", "retest"} and (row.get("attempt_kind") or "original") != attempt:
         return False
     return True
 
 
-def view_sections(level: str, rows: list[dict], enrollments: list[dict], names: dict[str, str]) -> list[dict]:
+def view_sections(level: str, rows: list[dict], enrollments: list[dict], names: dict[str, str], policy: dict | None = None) -> list[dict]:
     key = {
         "institute": "branch_id",
         "branch": "course_id",
@@ -125,7 +137,7 @@ def view_sections(level: str, rows: list[dict], enrollments: list[dict], names: 
     sections = []
     for section_id, section_rows in grouped.items():
         people = {row.get("student_id") for row in section_rows if row.get("student_id")}
-        summary = aggregate(section_rows)
+        summary = aggregate(section_rows, policy)
         sections.append(
             {
                 "id": section_id,
@@ -135,6 +147,9 @@ def view_sections(level: str, rows: list[dict], enrollments: list[dict], names: 
                 "percentage": summary["percentage"],
                 "band": summary["band"],
                 "coverage": f"{summary['scored']}/{summary['expected']}" if summary["expected"] else "0/0",
+                "missing": summary["missing"],
+                "absent": summary["absent"],
+                "marksheet_ids": sorted({row["marksheet_id"] for row in section_rows if row.get("marksheet_id")}),
             }
         )
     if level == "batch":
@@ -178,6 +193,107 @@ def authorized(rows: list[dict], grants: list[dict], action: str) -> list[dict]:
     return visible
 
 
+def participation_summary(rows: list[dict], eligible_by_batch: dict[str, set[str]]) -> dict:
+    """One opportunity per confirmed eligible student and assessment. Exemptions stay out of the denominator."""
+    cohorts: dict[tuple, dict] = {}
+    for row in selected_attempts(rows):
+        batch_id = row.get("batch_id") or ""
+        if batch_id not in eligible_by_batch:
+            continue
+        assessment = row.get("assessment_id") or row.get("marksheet_id") or row.get("id")
+        cohorts.setdefault((assessment, batch_id), {})[row.get("student_id")] = row.get("status")
+    scored = missing = absent = exempt = 0
+    for (_assessment, batch_id), statuses in cohorts.items():
+        for student_id in eligible_by_batch[batch_id]:
+            status = statuses.get(student_id)
+            if status == "exempt":
+                exempt += 1
+            elif status == "scored":
+                scored += 1
+            elif status == "absent":
+                absent += 1
+            else:
+                missing += 1
+    expected = scored + missing + absent
+    ratio = round(scored / expected, 4) if expected else None
+    return {
+        "participation": ratio,
+        "participation_scored": scored,
+        "participation_expected": expected,
+        "participation_missing": missing,
+        "participation_absent": absent,
+        "participation_exempt": exempt,
+        "participation_basis": "confirmed eligible students for each assessment in this report",
+    }
+
+
+SECTION_FIELD = {
+    "institute": "course_id",
+    "branch": "course_id",
+    "course": "batch_id",
+    "batch": "subject_id",
+    "subject": "paper_id",
+    "paper": "assessment_id",
+}
+
+
+def _ranked_students(by_student: dict[str, list[dict]], policy: dict, limit: int) -> tuple[list[dict], int]:
+    items = []
+    for student_id, student_rows in by_student.items():
+        if not student_id:
+            continue
+        summary = aggregate(student_rows, policy)
+        if summary["band"] != "safe":
+            continue
+        items.append(
+            {
+                "student_id": student_id,
+                "percentage": summary["percentage"],
+                "band": summary["band"],
+                "scored": summary["scored"],
+                "expected": summary["expected"],
+            }
+        )
+    items.sort(key=lambda item: (-item["percentage"], item["student_id"]))
+    return items[:limit], len(items)
+
+
+def student_boards(level: str, rows: list[dict], policy: dict, names: dict[str, str], limit: int = 20, attention_page: int = 1) -> dict:
+    """Highest students, and danger results grouped by the next academic step."""
+    field = SECTION_FIELD[level]
+    chosen = selected_attempts(rows)
+    grouped: dict[str, dict[str, list[dict]]] = {}
+    section_of = {row.get("id"): (row.get(field) or "") for row in rows}
+    for row in chosen:
+        section = section_of.get(row.get("id"), "")
+        grouped.setdefault(section, {}).setdefault(row.get("student_id") or "", []).append(row)
+    danger_by_section: dict[str, list[dict]] = {}
+    for item in attention(rows, policy):
+        danger_by_section.setdefault(section_of.get(item["id"], ""), []).append(item)
+    boards = []
+    for section_id in set(grouped) | set(danger_by_section):
+        shown, total = _ranked_students(grouped.get(section_id, {}), policy, limit)
+        danger_items = danger_by_section.get(section_id, [])
+        pages = max(1, (len(danger_items) + limit - 1) // limit) if danger_items else 1
+        current = min(max(attention_page, 1), pages)
+        boards.append(
+            {
+                "id": section_id,
+                "label": names.get(section_id) or section_id or "Unassigned",
+                "top_students": shown,
+                "top_student_count": total,
+                "attention": danger_items,
+                "attention_result_count": len(danger_items),
+                "attention_student_count": len({item.get("student_id") for item in danger_items if item.get("student_id")}),
+                "attention_page": current,
+                "attention_pages": pages,
+            }
+        )
+    boards = [item for item in boards if item["top_student_count"] or item["attention_result_count"]]
+    boards.sort(key=lambda item: item["label"])
+    return {"top_students": [], "top_student_count": 0, "boards": boards}
+
+
 def attention(rows: list[dict], policy: dict) -> list[dict]:
     items = []
     for row in rows:
@@ -185,16 +301,22 @@ def attention(rows: list[dict], policy: dict) -> list[dict]:
             continue
         exact = percentage(row.get("score"), row.get("maximum"))
         label = band(exact, policy)
-        if label == "danger":
-            items.append(
-                {
-                    "id": row["id"],
-                    "title": row.get("title"),
-                    "percentage": display_percentage(exact),
-                    "band": label,
-                }
-            )
-    return items[:20]
+        if label != "danger":
+            continue
+        items.append(
+            {
+                "id": row["id"],
+                "student_id": row.get("student_id"),
+                "title": row.get("title"),
+                "score": row.get("score"),
+                "maximum": row.get("maximum"),
+                "percentage": display_percentage(exact),
+                "band": label,
+                "marksheet_id": row.get("marksheet_id"),
+            }
+        )
+    items.sort(key=lambda item: (item["percentage"] is None, item["percentage"] if item["percentage"] is not None else 0, item.get("title") or ""))
+    return items
 
 
 def rank_page(rows: list[dict], page: int, size: int = 20) -> dict:

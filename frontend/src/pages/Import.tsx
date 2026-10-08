@@ -1,5 +1,5 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 
 type Student = {
@@ -377,6 +377,9 @@ const GROUP_CHOICES = [
 ] as const;
 
 export function ImportPage() {
+  const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const fromList = useRef(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [message, setMessage] = useState("");
@@ -400,9 +403,26 @@ export function ImportPage() {
   }, []);
 
   useEffect(() => {
+    if (params.get("new") !== "1") return;
+    fromList.current = true;
+    setPreview(null);
+    setStep(0);
+    setError("");
+    setOpen(true);
+    const next = new URLSearchParams(params);
+    next.delete("new");
+    setParams(next, { replace: true });
+  }, [params, setParams]);
+
+  function closeWizard() {
+    setOpen(false);
+    if (fromList.current) navigate("/marksheets");
+  }
+
+  useEffect(() => {
     if (!open) return;
     function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") closeWizard();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -526,6 +546,7 @@ export function ImportPage() {
     setPreview(null);
     setMessage("Import cancelled. It remains in the history.");
     await loadHistory();
+    if (fromList.current) navigate("/marksheets");
   }
 
   const activeSheet = preview?.sheets.find((sheet) => sheet.id === sheetId) || preview?.sheets[0];
@@ -578,7 +599,7 @@ export function ImportPage() {
           <div className={preview && (step === 2 || step === 3) ? "modal sheet-view" : "modal"} role="dialog" aria-modal="true" aria-labelledby="import-title">
             <div className="modal-head">
               <h2 id="import-title">{preview?.filename || "Import marklist"}</h2>
-              <button type="button" className="text-button" onClick={() => setOpen(false)}>Close</button>
+              <button type="button" className="text-button" onClick={closeWizard}>Close</button>
             </div>
             <ol className="wizard">
               {STEPS.map((label, index) => (
@@ -738,7 +759,7 @@ export function ImportPage() {
                 </ul>
                 {preview.state === "committed" ? <p><a href={`/api/v1/imports/${preview.id}/outcome-report`}>Download outcome report</a></p> : null}
                 <p><Link to="/marksheets">Review the draft marksheets</Link></p>
-                <button type="button" onClick={() => setOpen(false)}>Close</button>
+                <button type="button" onClick={closeWizard}>Close</button>
               </>
             ) : null}
           </div>

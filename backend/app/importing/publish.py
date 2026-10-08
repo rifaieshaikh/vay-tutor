@@ -101,9 +101,15 @@ async def correct_marksheet(db, client, user: dict, sheet: dict, reason: str, ch
                 target = by_id.get(change["result_id"])
                 if target is None:
                     raise AppError(404, "not_found", "That result was not found.")
+                status = change.get("status", target.get("status"))
+                score = change.get("score", target.get("score"))
+                if status in {"absent", "missing"}:
+                    score = None
+                elif status == "scored" and score is None:
+                    raise AppError(422, "import.invalid_mark", "Enter a score, or mark the row missing or absent.")
                 await db.results.update_one(
                     {"marksheet_id": sheet["_id"], "revision": revision, "previous_result_id": change["result_id"]},
-                    {"$set": {"score": change.get("score", target.get("score")), "status": change.get("status", target.get("status"))}},
+                    {"$set": {"score": score, "status": status}},
                     session=session,
                 )
             await db.marksheets.update_one(

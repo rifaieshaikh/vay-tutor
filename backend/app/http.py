@@ -686,15 +686,40 @@ async def effective_access(request: Request, user_id: str) -> dict:
 
 
 @router.get("/audit")
-async def list_audit(request: Request) -> dict:
+async def list_audit(request: Request, q: str = "", action: str = "", on: str = "", page: int = 0) -> dict:
     user = await current_user(request)
     require(user, "audit.view", institute_resource(user))
+    query: dict = {"institute_id": user["institute_id"]}
+    if action:
+        query["action"] = action
     events = (
         await db(request)
-        .audit_events.find({"institute_id": user["institute_id"]})
+        .audit_events.find(query)
         .sort("at", -1)
-        .to_list(length=100)
+        .to_list(length=500)
     )
+    actor_names: dict[str, str] = {}
+    for event in events:
+        actor_id = event.get("actor_id")
+        if actor_id and actor_id not in actor_names:
+            person = await db(request).users.find_one({"_id": actor_id})
+            actor_names[actor_id] = person["name"] if person else ""
+    if q:
+        needle = q.casefold()
+        events = [
+            event
+            for event in events
+            if needle in event["action"].casefold()
+            or needle in str(event.get("actor_id") or "").casefold()
+            or needle in actor_names.get(event.get("actor_id"), "").casefold()
+        ]
+    if on:
+        events = [event for event in events if event["at"].date().isoformat() == on]
+    total = len(events)
+    current = page or 1
+    if page:
+        events = events[(page - 1) * 25 : page * 25]
+    pages = max(1, (total + 24) // 25)
     return {
         "items": [
             {
@@ -702,12 +727,17 @@ async def list_audit(request: Request) -> dict:
                 "action": event["action"],
                 "at": event["at"].isoformat(),
                 "actor_id": event["actor_id"],
+                "actor_name": actor_names.get(event.get("actor_id"), ""),
                 "before": event.get("before"),
                 "after": event.get("after"),
+                "context": event.get("context"),
                 "scope": event.get("scope"),
             }
             for event in events
-        ]
+        ],
+        "total": total,
+        "page": current,
+        "pages": pages,
     }
 
 
@@ -762,11 +792,24 @@ async def context_options(request: Request, dimension: str, q: str = "") -> dict
     query = {"institute_id": user["institute_id"], "$or": [clause, upload_clause]}
     if q:
         query["name_key"] = {"$regex": name_key(q)}
-    rows = await db(request)[collection_name].find(query).limit(50).to_list(length=50)
+    rows = await db(request)[collection_name].find(query).limit(200).to_list(length=200)
+    offerings = await db(request).offerings.find({"institute_id": user["institute_id"]}).to_list(length=200)
+    branches_for_course: dict[str, list[str]] = {}
+    for offering in offerings:
+        branches_for_course.setdefault(offering["course_id"], []).append(offering["branch_id"])
+    subject_course = {
+        item["_id"]: item.get("course_id")
+        for item in await db(request).subjects.find({"institute_id": user["institute_id"]}).to_list(length=200)
+    }
     items = []
     for row in rows:
         label = row.get("name") or (f"Paper {row['number']}" if row.get("number") is not None else row["_id"])
-        items.append({"id": row["_id"], "label": label, "parents": {}})
+        parents = {key: row[key] for key in ("branch_id", "course_id", "subject_id") if row.get(key)}
+        if dimension == "course":
+            parents["branch_ids"] = branches_for_course.get(row["_id"], [])
+        if dimension == "paper" and row.get("subject_id"):
+            parents["course_id"] = subject_course.get(row["subject_id"])
+        items.append({"id": row["_id"], "label": label, "parents": parents})
     return {"items": items}
 
 
@@ -781,13 +824,18 @@ async def view(
     paper_id: str = "",
     exam_type: str = "",
     exam_date: str = "",
+    exam_date_from: str = "",
+    exam_date_to: str = "",
+    attempt: str = "",
     page: int = 1,
+    attention_page: int = 1,
 ) -> dict:
     user = await current_user(request)
     if level not in {"institute", "branch", "course", "batch", "subject", "paper"}:
         raise AppError(404, "not_found", "That record was not found.")
     if not any("dashboard.view" in grant["actions"] for grant in user["grants"]):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    start, end = _period(exam_date_from, exam_date_to)
     filters = {
         "branch_id": branch_id,
         "course_id": course_id,
@@ -796,6 +844,9 @@ async def view(
         "paper_id": paper_id,
         "exam_type": exam_type,
         "exam_date": exam_date,
+        "exam_date_from": start,
+        "exam_date_to": end,
+        "attempt": attempt if attempt in {"original", "retest"} else "",
     }
     branch_clause = mongo_clause(
         user["grants"], "dashboard.view", {"institute_id": "institute_id", "branch_id": "_id"}
@@ -818,30 +869,87 @@ async def view(
     for field in ("branch_id", "course_id", "batch_id"):
         if filters[field]:
             enrollment_query[field] = filters[field]
-    enrollment_rows = await db(request).enrollments.find(enrollment_query).to_list(length=5000)
+    enrollment_rows = await _every(db(request).enrollments.find(enrollment_query))
     student_ids = {item["student_id"] for item in enrollment_rows}
     from app.calculating import aggregate
-    from app.reporting import attention, authorized, hydrate, matches, names_for, policy_for, rank_page, view_sections
+    from app.reporting import (
+        attention,
+        authorized,
+        hydrate,
+        matches,
+        names_for,
+        participation_summary,
+        policy_for,
+        rank_page,
+        student_boards,
+        view_sections,
+    )
 
     policy = await policy_for(db(request), user["institute_id"])
-    stored = await db(request).results.find(
-        {"institute_id": user["institute_id"], "active": {"$ne": False}}
-    ).to_list(length=5000)
+    result_clause = mongo_clause(
+        user["grants"],
+        "dashboard.view",
+        {
+            "institute_id": "institute_id",
+            "branch_id": "branch_id",
+            "course_id": "course_id",
+            "batch_id": "batch_id",
+            "subject_id": "subject_id",
+            "paper_id": "paper_id",
+        },
+    )
+    result_query = {"institute_id": user["institute_id"], "active": {"$ne": False}, **_and(result_clause)}
+    for field in ("branch_id", "course_id", "batch_id", "subject_id", "paper_id"):
+        if filters.get(field):
+            result_query[field] = filters[field]
+    stored = await _every(db(request).results.find(result_query))
     rows = [row for row in await hydrate(db(request), stored) if row.get("published") and matches(row, filters)]
     rows = authorized(rows, user["grants"], "dashboard.view")
+    academic_fields = ("subject_id", "paper_id", "exam_type", "exam_date", "exam_date_from", "exam_date_to", "attempt")
+    academic = any(filters.get(field) for field in academic_fields)
+    if academic:
+        matched_students = {row.get("student_id") for row in rows if row.get("student_id")}
+        enrollment_rows = [item for item in enrollment_rows if item.get("student_id") in matched_students]
+        student_count = len(matched_students)
+    else:
+        student_count = len(student_ids)
     summary = aggregate(rows, policy)
     summary["participation"] = None
-    confirmed = await _roster_confirmed(request, user["institute_id"], filters, enrollment_rows)
-    if confirmed and summary["expected"]:
-        summary["participation"] = round(summary["scored"] / summary["expected"], 4)
-    stamped = [row.get("policy_version") for row in rows]
-    pending = any(item not in {None, policy.get("version")} for item in stamped)
-    pending = pending or any(item is None for item in stamped)
+    confirmed, eligible = await _eligible_rosters(request, user["institute_id"], rows)
+    if confirmed:
+        summary.update(participation_summary(rows, eligible))
+    current_policy = policy.get("version")
+    published_versions = (row.get("policy_version") for row in rows)
+    pending = any(item is not None and item != current_policy for item in published_versions)
     names = await names_for(db(request), rows)
+    boards = student_boards(level, rows, policy, names, attention_page=attention_page)
+    danger = attention(rows, policy)
+    attention_students = {item.get("student_id") for item in danger if item.get("student_id")}
+    attention_size = 20
+    attention_pages = max(1, (len(danger) + attention_size - 1) // attention_size) if danger else 1
+    current_attention = min(max(attention_page, 1), attention_pages)
+    shown_attention = danger[(current_attention - 1) * attention_size : current_attention * attention_size]
+    named_rows = list(shown_attention) + list(boards["top_students"])
+    for group in boards["boards"]:
+        named_rows.extend(group["top_students"])
+        named_rows.extend(group["attention"])
+    attention_ids = list({item.get("student_id") for item in named_rows if item.get("student_id")})
+    student_names = {}
+    student_codes = {}
+    if attention_ids:
+        query = {"_id": {"$in": attention_ids}}
+        projection = {"display_name": 1, "student_code": 1}
+        found = await db(request).students.find(query, projection).to_list(length=len(attention_ids))
+        for person in found:
+            student_names[person["_id"]] = person.get("display_name") or ""
+            student_codes[person["_id"]] = person.get("student_code") or ""
+    for item in named_rows:
+        item["student_name"] = student_names.get(item.get("student_id"), "")
+        item["student_code"] = student_codes.get(item.get("student_id"), "")
     return {
         "level": level,
         "branches": branches,
-        "students": len(student_ids),
+        "students": student_count,
         "enrollments": len(enrollment_rows),
         "roster_confirmed": confirmed,
         "membership_label": "students listed in imported marklists",
@@ -850,26 +958,36 @@ async def view(
         "pending_recalculation": pending,
         "sample_size": summary["scored"],
         "performance": summary,
-        "sections": view_sections(level, rows, enrollment_rows, names),
-        "attention": attention(rows, policy),
+        "sections": view_sections(level, rows, enrollment_rows, names, policy),
+        "top_students": boards["top_students"],
+        "top_student_count": boards["top_student_count"],
+        "boards": boards["boards"],
+        "attention": shown_attention,
+        "attention_count": len(danger),
+        "attention_result_count": len(danger),
+        "attention_student_count": len(attention_students),
+        "attention_sample_count": len(shown_attention),
+        "attention_page": current_attention,
+        "attention_pages": attention_pages,
         "ranks": rank_page(rows, page),
         "empty": not rows,
         "filters": {key: value for key, value in filters.items() if value},
     }
 
 
-async def _roster_confirmed(request: Request, institute_id: str, filters: dict, enrollments: list[dict]) -> bool:
-    if filters.get("batch_id"):
-        batch_ids = {filters["batch_id"]}
-    else:
-        batch_ids = {item["batch_id"] for item in enrollments if item.get("batch_id")}
+async def _every(cursor) -> list:
+    return [item async for item in cursor]
+
+
+async def _eligible_rosters(request: Request, institute_id: str, rows: list[dict]) -> tuple[bool, dict]:
+    batch_ids = {row.get("batch_id") for row in rows if row.get("batch_id")}
     if not batch_ids:
-        return False
-    confirmed = await db(request).rosters.distinct(
-        "batch_id",
-        {"institute_id": institute_id, "batch_id": {"$in": list(batch_ids)}},
+        return False, {}
+    stored = await _every(
+        db(request).rosters.find({"institute_id": institute_id, "batch_id": {"$in": list(batch_ids)}})
     )
-    return set(confirmed) == batch_ids
+    eligible = {item["batch_id"]: set(item.get("student_ids") or []) for item in stored}
+    return batch_ids <= set(eligible), eligible
 
 
 @router.post("/rosters/confirm")
@@ -888,7 +1006,7 @@ async def confirm_roster(request: Request) -> dict:
     }
     if not allows(user["grants"], "catalog.manage", resource):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
-    listed = await db(request).enrollments.find({"batch_id": batch_id}).to_list(length=5000)
+    listed = await _every(db(request).enrollments.find({"batch_id": batch_id}))
     await db(request).rosters.update_one(
         {"institute_id": user["institute_id"], "batch_id": batch_id},
         {"$set": {"student_ids": [item["student_id"] for item in listed], "confirmed_by": user["_id"]}},
@@ -904,7 +1022,22 @@ def _and(clause: dict) -> dict:
 
 
 @router.get("/students")
-async def list_students(request: Request) -> dict:
+async def list_students(
+    request: Request,
+    q: str = "",
+    branch_id: str = "",
+    course_id: str = "",
+    batch_id: str = "",
+    subject_id: str = "",
+    paper_id: str = "",
+    exam_type: str = "",
+    exam_date_from: str = "",
+    exam_date_to: str = "",
+    attempt: str = "",
+    sort: str = "name",
+    page: int = 0,
+    page_size: int = 8,
+) -> dict:
     user = await current_user(request)
     clause = mongo_clause(
         user["grants"],
@@ -918,22 +1051,216 @@ async def list_students(request: Request) -> dict:
     )
     if not any("student.lookup" in grant["actions"] for grant in user["grants"]):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
-    enrollment_query = {"institute_id": user["institute_id"], **clause}
-    enrollments = await db(request).enrollments.find(enrollment_query).to_list(length=200)
+    enrollment_query: dict = {"institute_id": user["institute_id"], **clause}
+    for field, value in (("branch_id", branch_id), ("course_id", course_id), ("batch_id", batch_id)):
+        if value:
+            enrollment_query[field] = value
+    enrollments = await db(request).enrollments.find(enrollment_query).to_list(length=1000)
     student_ids = list({item["student_id"] for item in enrollments})
-    students = await db(request).students.find({"_id": {"$in": student_ids}}).to_list(length=200)
+    filters = _report_filters(
+        branch_id, course_id, batch_id, subject_id, paper_id, exam_type, exam_date_from, exam_date_to, attempt,
+    )
+    academic_fields = ("subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt")
+    academic = any(filters.get(field) for field in academic_fields)
+    students = []
+    if student_ids:
+        students = await db(request).students.find({"_id": {"$in": student_ids}}).to_list(length=len(student_ids))
+    needle = q.casefold().strip()
+    if needle:
+        students = [
+            student for student in students
+            if needle in f"{student.get('student_code', '')} {student.get('display_name', '')}".casefold()
+        ]
+    from app.calculating import aggregate
+    from app.reporting import hydrate, matches, policy_for
+
+    policy = await policy_for(db(request), user["institute_id"])
+    grouped: dict[str, list] = {}
+    if student_ids:
+        found = await db(request).results.find(
+            {"institute_id": user["institute_id"], "active": {"$ne": False}, "student_id": {"$in": student_ids}}
+        ).to_list(length=5000)
+        for row in await hydrate(db(request), found):
+            resource = {
+                "institute_id": row.get("institute_id"),
+                "branch_id": row.get("branch_id"),
+                "course_id": row.get("course_id"),
+                "batch_id": row.get("batch_id"),
+                "subject_id": row.get("subject_id"),
+                "paper_id": row.get("paper_id"),
+            }
+            if not allows(user["grants"], "progress_card.view", resource) or not matches(row, filters):
+                continue
+            grouped.setdefault(row.get("student_id"), []).append(row)
     manage = allows(user["grants"], "student.manage", institute_resource(user))
     items = []
+    included_rows: list = []
     for student in students:
-        item = {"id": student["_id"], "student_code": student["student_code"], "display_name": student["display_name"]}
+        rows = grouped.get(student["_id"], [])
+        if academic and not rows:
+            continue
+        summary = aggregate(rows, policy)
+        latest = max((str(row.get("exam_date") or "") for row in rows), default="")
+        item = {
+            "id": student["_id"],
+            "student_code": student["student_code"],
+            "display_name": student["display_name"],
+            "performance": {
+                "percentage": summary["percentage"],
+                "scored": summary["scored"],
+                "expected": summary["expected"],
+                "missing": summary["missing"],
+                "absent": summary["absent"],
+                "band": summary["band"],
+            },
+            "latest_exam_date": latest or None,
+            "empty_reason": None if rows else "unpublished",
+        }
         if manage:
             item["name_key"] = student.get("name_key")
         items.append(item)
-    return {"items": items}
+        included_rows.extend(rows)
+    report = aggregate(included_rows, policy)
+    summary = {
+        "percentage": report["percentage"],
+        "scored": report["scored"],
+        "expected": report["expected"],
+        "missing": report["missing"],
+        "absent": report["absent"],
+        "band": report["band"],
+        "students": len(items),
+        "with_results": sum(1 for item in items if item["empty_reason"] is None),
+    }
+    total = len(items)
+    current = page or 1
+    size = min(max(page_size, 1), 50)
+    if page:
+        items.sort(key=lambda item: _student_sort_key(item, sort))
+        offset = (current - 1) * size
+        items = items[offset:offset + size]
+    pages = max(1, (total + size - 1) // size) if total else 1
+    return {"items": items, "total": total, "page": current if page else 0, "pages": pages, "summary": summary}
+
+
+def _optional_date(value: str | None) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if len(text) != 10 or text[4] != "-" or text[7] != "-":
+        raise AppError(422, "report.period", "Use a real exam date.")
+    return text
+
+
+def _period(exam_date_from: str | None, exam_date_to: str | None) -> tuple[str, str]:
+    start = _optional_date(exam_date_from)
+    end = _optional_date(exam_date_to)
+    if start and end and start > end:
+        raise AppError(422, "report.period", "The start date must be on or before the end date.")
+    return start, end
+
+
+def _student_sort_key(item: dict, sort: str):
+    name = str(item.get("display_name") or "").casefold()
+    code = str(item.get("student_code") or "")
+    if sort == "percentage":
+        percentage = (item.get("performance") or {}).get("percentage")
+        return (percentage is None, -(percentage if percentage is not None else 0), name, code)
+    if sort == "exam_date":
+        latest = str(item.get("latest_exam_date") or "")
+        return (latest == "", "".join(chr(255 - ord(char)) for char in latest), name, code)
+    return (name, code)
+
+
+def _report_filters(
+    branch_id: str = "",
+    course_id: str = "",
+    batch_id: str = "",
+    subject_id: str = "",
+    paper_id: str = "",
+    exam_type: str = "",
+    exam_date_from: str = "",
+    exam_date_to: str = "",
+    attempt: str = "",
+) -> dict:
+    start, end = _period(exam_date_from, exam_date_to)
+    return {
+        key: value
+        for key, value in {
+            "branch_id": branch_id,
+            "course_id": course_id,
+            "batch_id": batch_id,
+            "subject_id": subject_id,
+            "paper_id": paper_id,
+            "exam_type": exam_type,
+            "exam_date_from": start,
+            "exam_date_to": end,
+            "attempt": attempt if attempt in {"original", "retest"} else "",
+        }.items()
+        if value
+    }
+
+
+def _card_context(raw: dict | None) -> dict:
+    raw = raw or {}
+    card: dict[str, str] = {}
+    student_id = str(raw.get("student_id") or "").strip()
+    if student_id:
+        card["student_id"] = student_id
+    start, end = _period(
+        None if raw.get("exam_date_from") is None else str(raw.get("exam_date_from")),
+        None if raw.get("exam_date_to") is None else str(raw.get("exam_date_to")),
+    )
+    if start:
+        card["exam_date_from"] = start
+    if end:
+        card["exam_date_to"] = end
+    attempt = str(raw.get("attempt") or "")
+    if attempt in {"original", "retest"}:
+        card["attempt"] = attempt
+    exam_type = str(raw.get("exam_type") or "").strip()
+    if exam_type:
+        card["exam_type"] = exam_type
+    return card
+
+
+def _export_covers_student(user: dict, enrollments: list[dict], scope: dict, action: str) -> bool:
+    for enrollment in enrollments:
+        if scope.get("branch_id") and scope["branch_id"] != enrollment.get("branch_id"):
+            continue
+        if scope.get("course_id") and scope["course_id"] != enrollment.get("course_id"):
+            continue
+        if scope.get("batch_id") and scope["batch_id"] != enrollment.get("batch_id"):
+            continue
+        resource = {
+            "institute_id": enrollment["institute_id"],
+            "branch_id": enrollment.get("branch_id"),
+            "course_id": enrollment.get("course_id"),
+            "batch_id": enrollment.get("batch_id"),
+            "subject_id": scope.get("subject_id"),
+            "paper_id": scope.get("paper_id"),
+        }
+        named = bool(scope.get("subject_id") or scope.get("paper_id"))
+        view = allows(user["grants"], "progress_card.view", resource, not named)
+        export = allows(user["grants"], action, resource, not named)
+        if view and export:
+            return True
+    return False
 
 
 @router.get("/students/{student_id}/card")
-async def student_card(request: Request, student_id: str) -> dict:
+async def student_card(
+    request: Request,
+    student_id: str,
+    branch_id: str = "",
+    course_id: str = "",
+    batch_id: str = "",
+    subject_id: str = "",
+    paper_id: str = "",
+    exam_type: str = "",
+    exam_date_from: str = "",
+    exam_date_to: str = "",
+    attempt: str = "",
+) -> dict:
     user = await current_user(request)
     student = await db(request).students.find_one(
         {"_id": student_id, "institute_id": user["institute_id"]}
@@ -955,7 +1282,7 @@ async def student_card(request: Request, student_id: str) -> dict:
         raise AppError(404, "not_found", "That record was not found.")
     results = await db(request).results.find({"student_id": student_id, "active": {"$ne": False}}).to_list(length=500)
     from app.calculating import aggregate
-    from app.reporting import comparisons, hydrate, policy_for, present, ranks_for
+    from app.reporting import comparisons, hydrate, matches, policy_for, present, ranks_for
 
     policy = await policy_for(db(request), user["institute_id"])
     hydrated = await hydrate(db(request), results)
@@ -984,23 +1311,80 @@ async def student_card(request: Request, student_id: str) -> dict:
             cohort = await hydrate(db(request), found)
             for row in cohort:
                 siblings.setdefault(row.get("marksheet_id"), []).append(row)
+    start_filters = _report_filters(
+        branch_id, course_id, batch_id, subject_id, paper_id, exam_type, exam_date_from, exam_date_to, attempt,
+    )
+    card_filters = start_filters
+    start = card_filters.get("exam_date_from") or ""
+    end = card_filters.get("exam_date_to") or ""
+    enrolled = [
+        item for item in enrollments
+        if all(
+            not card_filters.get(field) or item.get(field) == card_filters[field]
+            for field in ("branch_id", "course_id", "batch_id")
+        )
+    ]
+    context_selected = any(card_filters.get(field) for field in ("branch_id", "course_id", "batch_id"))
+    if context_selected and not enrolled:
+        selected = []
+        empty_reason = "enrollment"
+    else:
+        selected = [row for row in shown_rows if matches(row, card_filters)]
+        if not shown_rows and hidden:
+            empty_reason = "restricted"
+        elif not shown_rows:
+            empty_reason = "unpublished"
+        elif not selected:
+            empty_reason = "filters"
+        else:
+            empty_reason = None
     presented = []
-    for row in shown_rows:
+    for row in selected:
         rank = batch_rank = None
         if not hidden:
             rank, batch_rank = ranks_for(row, siblings.get(row.get("marksheet_id"), [row]))
         presented.append(present(row, policy, rank, batch_rank))
-    summary = aggregate(shown_rows, policy)
+    summary = aggregate(selected, policy)
+    grouped: dict[tuple, list] = {}
+    for row in selected:
+        grouped.setdefault((row.get("subject_id") or "", row.get("paper_id") or ""), []).append(row)
+    subjects = [
+        {"subject_id": key[0] or None, "paper_id": key[1] or None, **aggregate(rows, policy)}
+        for key, rows in grouped.items()
+    ]
+    outside = []
+    if empty_reason != "enrollment" and (start or end):
+        undated = {key: value for key, value in card_filters.items() if key not in {"exam_date_from", "exam_date_to"}}
+        outside = [row for row in shown_rows if matches(row, undated) and not matches(row, card_filters)]
+    facet_batches = {item.get("batch_id") for item in enrollments if item.get("batch_id")}
+    facet_batches.update(row.get("batch_id") for row in shown_rows if row.get("batch_id"))
     return {
         "student_code": student["student_code"],
         "display_name": student["display_name"],
         "partial": hidden,
         "coverage_note": "Authorized subjects only." if hidden else None,
+        "empty_reason": empty_reason,
         "membership_label": "students listed in imported marklists",
         "policy_version": policy.get("version", 1),
         "performance": summary,
-        "retests": comparisons(shown_rows),
-        "enrollments": [{"id": item["_id"], "batch_id": item["batch_id"]} for item in enrollments],
+        "subjects": subjects,
+        "retests": comparisons(selected, outside),
+        "filters": card_filters,
+        "result_count": len(presented),
+        "facets": {
+            "batch_ids": sorted(facet_batches),
+            "subject_ids": sorted({row.get("subject_id") for row in shown_rows if row.get("subject_id")}),
+            "paper_ids": sorted({row.get("paper_id") for row in shown_rows if row.get("paper_id")}),
+        },
+        "enrollments": [
+            {
+                "id": item["_id"],
+                "batch_id": item["batch_id"],
+                "branch_id": item.get("branch_id"),
+                "course_id": item.get("course_id"),
+            }
+            for item in enrollments
+        ],
         "results": presented,
     }
 
@@ -1022,15 +1406,35 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
     ).to_list(length=500)
     student_ids = list({item.get("student_id") for item in results if item.get("student_id")})
     names = {}
+    codes = {}
     if student_ids:
         for person in await db(request).students.find({"_id": {"$in": student_ids}}).to_list(length=len(student_ids)):
             names[person["_id"]] = person.get("display_name") or ""
+            codes[person["_id"]] = person.get("student_code") or ""
+    available = []
+    if sheet.get("status") in {"draft", "submitted"}:
+        batch_ids = sheet.get("batch_ids") or []
+        enrolled = await db(request).enrollments.find({"batch_id": {"$in": batch_ids}}).to_list(length=500)
+        waiting = [item["student_id"] for item in enrolled if item["student_id"] not in set(student_ids)]
+        if waiting:
+            for person in await db(request).students.find({"_id": {"$in": waiting}}).to_list(length=len(waiting)):
+                available.append({
+                    "id": person["_id"],
+                    "display_name": person.get("display_name") or "",
+                    "student_code": person.get("student_code") or "",
+                })
     return {
         "id": sheet["_id"],
         "status": sheet.get("status"),
+        "branch_id": sheet.get("branch_id"),
+        "course_id": sheet.get("course_id"),
         "subject_id": sheet.get("subject_id"),
+        "paper_id": sheet.get("paper_id"),
+        "batch_ids": sheet.get("batch_ids") or [],
+        "attempt_kind": sheet.get("attempt_kind") or "original",
         "title": sheet.get("title"),
         "exam_date": sheet.get("exam_date"),
+        "exam_type": sheet.get("exam_type"),
         "maximum": sheet.get("maximum"),
         "source_file": sheet.get("source_file"),
         "source_sheet": sheet.get("source_sheet"),
@@ -1039,11 +1443,13 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
         "file_id": sheet.get("file_id"),
         "uploader_id": sheet.get("uploader_id"),
         "reviewer_id": sheet.get("reviewer_id"),
+        "available_students": available,
         "results": [
             {
                 "id": item["_id"],
                 "student_id": item.get("student_id"),
                 "display_name": names.get(item.get("student_id"), ""),
+                "student_code": codes.get(item.get("student_id"), ""),
                 "status": item.get("status"),
                 "score": item.get("score"),
                 "rank": item.get("rank"),
@@ -1109,14 +1515,24 @@ async def queue_cards(request: Request, body: ReportBody) -> dict:
         raise AppError(422, "report.format", "Choose a PDF or spreadsheet export.")
     action = "export.pdf" if body.format == "pdf" else "export.xlsx"
     scope = clean_scope(body.scope, user["institute_id"])
-    if not allows(user["grants"], "progress_card.view", scope) or not allows(user["grants"], action, scope):
+    card = _card_context(body.scope)
+    if card.get("student_id"):
+        student = await db(request).students.find_one(
+            {"_id": card["student_id"], "institute_id": user["institute_id"]}
+        )
+        if student is None:
+            raise AppError(404, "not_found", "That record was not found.")
+        enrollments = await db(request).enrollments.find({"student_id": student["_id"]}).to_list(length=50)
+        if not _export_covers_student(user, enrollments, scope, action):
+            raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    elif not allows(user["grants"], "progress_card.view", scope) or not allows(user["grants"], action, scope):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
     key = request.headers.get("Idempotency-Key")
     job = await enqueue(
         db(request),
         kind="report_pdf" if body.format == "pdf" else "report_xlsx",
         actor=user,
-        payload={"scope": scope},
+        payload={"scope": scope, "card": card},
         idempotency_key=key,
     )
     await write_audit(request, user, "export.queue", None, {"job_id": job["_id"]}, scope)
@@ -1127,6 +1543,22 @@ async def queue_cards(request: Request, body: ReportBody) -> dict:
 async def get_job(request: Request, job_id: str) -> dict:
     user = await current_user(request)
     job = await db(request).jobs.find_one({"_id": job_id, "actor_id": user["_id"]})
+    if job is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    return {
+        "id": job["_id"],
+        "state": job["state"],
+        "last_error": job.get("last_error"),
+        "file_id": job.get("file_id"),
+    }
+
+
+@router.post("/jobs/{job_id}/run")
+async def run_job(request: Request, job_id: str) -> dict:
+    user = await current_user(request)
+    from app.jobs import run_actor_job
+
+    job = await run_actor_job(db(request), settings(request).data_dir, job_id, user["_id"])
     if job is None:
         raise AppError(404, "not_found", "That record was not found.")
     return {

@@ -64,6 +64,25 @@ class MarksheetPatch(BaseModel):
     exam_date: str | None = None
 
 
+class MarksheetCreate(BaseModel):
+    title: str = Field(min_length=1)
+    branch_id: str
+    course_id: str
+    batch_id: str
+    subject_id: str
+    paper_id: str
+    exam_type: str
+    maximum: float = Field(gt=0)
+    exam_date: str | None = None
+    attempt: str = "original"
+
+
+class ResultCreate(BaseModel):
+    student_id: str
+    status: str = "missing"
+    score: float | None = None
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -414,6 +433,176 @@ async def list_imports(request: Request) -> dict:
     return {"items": items}
 
 
+@router.post("/marksheets")
+async def create_marksheet(request: Request, body: MarksheetCreate) -> dict:
+    user = await current_user(request)
+    if body.exam_type not in {"unit", "part", "chapter"}:
+        raise AppError(422, "marksheet.exam_type", "Choose unit, part, or chapter.")
+    if body.attempt not in {"original", "retest"}:
+        raise AppError(422, "marksheet.attempt", "Choose an original attempt or a retest.")
+    database = db(request)
+    institute_id = user["institute_id"]
+    branch = await database.branches.find_one({"_id": body.branch_id, "institute_id": institute_id})
+    course = await database.courses.find_one({"_id": body.course_id, "institute_id": institute_id})
+    batch = await database.batches.find_one({"_id": body.batch_id, "institute_id": institute_id})
+    subject = await database.subjects.find_one({"_id": body.subject_id, "institute_id": institute_id})
+    paper = await database.papers.find_one({"_id": body.paper_id, "institute_id": institute_id})
+    if not all((branch, course, batch, subject, paper)):
+        raise AppError(404, "not_found", "That academic record was not found.")
+    if batch.get("course_id") != course["_id"] or subject.get("course_id") != course["_id"] or paper.get("subject_id") != subject["_id"]:
+        raise AppError(422, "marksheet.context", "That batch, subject, and paper do not belong to the same course.")
+    if batch.get("branch_id") and batch.get("branch_id") != branch["_id"]:
+        raise AppError(422, "marksheet.context", "That batch does not belong to the chosen branch.")
+    offering = await database.offerings.find_one({"institute_id": institute_id, "branch_id": branch["_id"], "course_id": course["_id"]})
+    if offering is None:
+        raise AppError(422, "marksheet.context", "That branch does not offer the chosen course.")
+    resource = {
+        "institute_id": institute_id,
+        "branch_id": branch["_id"],
+        "course_id": course["_id"],
+        "batch_id": batch["_id"],
+        "subject_id": subject["_id"],
+        "paper_id": paper["_id"],
+    }
+    if not allows(user["grants"], "marksheet.upload", resource):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    title = body.title.strip()
+    identity = "|".join(("manual", name_key(title), body.exam_type, body.attempt, batch["_id"], paper["_id"]))
+    existing = await database.assessments.find_one({"institute_id": institute_id, "identity_key": identity})
+    if existing:
+        found = await database.marksheets.find_one({"assessment_id": existing["_id"], "institute_id": institute_id})
+        raise AppError(409, "marksheet.exists", "A marksheet with that title already exists for this batch.", id=found["_id"] if found else None)
+    sheet_id = str(ObjectId())
+    assessment_id = str(ObjectId())
+    attempt_id = str(ObjectId())
+    client = request.app.state.client
+    async with await client.start_session() as session:
+        async with session.start_transaction():
+            await database.assessments.insert_one(
+                {
+                    "_id": assessment_id,
+                    "institute_id": institute_id,
+                    "identity_key": identity,
+                    "title": title,
+                    "title_key": name_key(title),
+                    "exam_type": body.exam_type,
+                    "format": "manual",
+                    "subject_id": subject["_id"],
+                    "paper_id": paper["_id"],
+                    "branch_id": branch["_id"],
+                    "course_id": course["_id"],
+                    "batch_ids": [batch["_id"]],
+                    "exam_date": body.exam_date,
+                    "maximum": body.maximum,
+                },
+                session=session,
+            )
+            await database.attempts.insert_one(
+                {
+                    "_id": attempt_id,
+                    "institute_id": institute_id,
+                    "assessment_id": assessment_id,
+                    "kind": body.attempt,
+                    "maximum": body.maximum,
+                },
+                session=session,
+            )
+            await database.marksheets.insert_one(
+                {
+                    "_id": sheet_id,
+                    "institute_id": institute_id,
+                    "assessment_id": assessment_id,
+                    "attempt_id": attempt_id,
+                    "cohort_key": batch["_id"],
+                    "branch_id": branch["_id"],
+                    "course_id": course["_id"],
+                    "subject_id": subject["_id"],
+                    "paper_id": paper["_id"],
+                    "batch_ids": [batch["_id"]],
+                    "title": title,
+                    "maximum": body.maximum,
+                    "exam_type": body.exam_type,
+                    "exam_date": body.exam_date,
+                    "status": "draft",
+                    "revision": 1,
+                    "active_revision": None,
+                    "source_sheet": "Entered here",
+                    "uploader_id": user["_id"],
+                    "edit_version": 0,
+                    "attempt_kind": body.attempt,
+                },
+                session=session,
+            )
+    await database.audit_events.insert_one(
+        {
+            "_id": str(ObjectId()),
+            "institute_id": institute_id,
+            "action": "marksheet.create",
+            "actor_id": user["_id"],
+            "at": _now(),
+            "context": {"marksheet_id": sheet_id, "title": title},
+        }
+    )
+    return {"id": sheet_id, "status": "draft"}
+
+
+@router.post("/marksheets/{marksheet_id}/results")
+async def add_result(request: Request, marksheet_id: str, body: ResultCreate) -> dict:
+    user, sheet = await _editable(request, marksheet_id, "marksheet.edit_draft")
+    if sheet.get("status") not in {"draft", "submitted"}:
+        raise AppError(422, "marksheet.state", "Add students on a draft. A published sheet uses a correction.")
+    if body.status not in {"scored", "absent", "missing"}:
+        raise AppError(422, "import.invalid_mark", "Choose scored, absent, or missing.")
+    score = body.score
+    if body.status == "scored":
+        if score is None or score < 0 or (sheet.get("maximum") is not None and score > sheet["maximum"]):
+            raise AppError(422, "import.invalid_mark", "The score must be from 0 through the maximum.")
+    else:
+        score = None
+    enrollment = await db(request).enrollments.find_one(
+        {"student_id": body.student_id, "batch_id": {"$in": sheet.get("batch_ids") or []}}
+    )
+    if enrollment is None:
+        raise AppError(422, "marksheet.not_enrolled", "That student is not enrolled in this batch.")
+    revision = sheet.get("revision") or 1
+    duplicate = await db(request).results.find_one(
+        {"marksheet_id": sheet["_id"], "revision": revision, "student_id": body.student_id}
+    )
+    if duplicate:
+        raise AppError(409, "marksheet.duplicate", "That student is already on this marksheet.")
+    result_id = str(ObjectId())
+    await db(request).results.insert_one(
+        {
+            "_id": result_id,
+            "institute_id": user["institute_id"],
+            "marksheet_id": sheet["_id"],
+            "enrollment_id": enrollment["_id"],
+            "student_id": body.student_id,
+            "revision": revision,
+            "active": False,
+            "status": body.status,
+            "score": score,
+            "maximum": sheet.get("maximum"),
+            "exam_date": sheet.get("exam_date"),
+            "title": sheet.get("title"),
+            "assessment_id": sheet.get("assessment_id"),
+            "attempt_kind": sheet.get("attempt_kind") or "original",
+            "exam_type": sheet.get("exam_type"),
+            "counts_in_aggregate": True,
+            "branch_id": sheet.get("branch_id"),
+            "course_id": sheet.get("course_id"),
+            "batch_id": enrollment["batch_id"],
+            "subject_id": sheet.get("subject_id"),
+            "paper_id": sheet.get("paper_id"),
+            "source": {"sheet": "Entered here"},
+        }
+    )
+    version = sheet.get("edit_version", 0) + 1
+    await db(request).marksheets.update_one({"_id": sheet["_id"]}, {"$set": {"edit_version": version}})
+    await _refresh_sheet_marks(request, sheet)
+    return {"id": result_id, "edit_version": version}
+
+
 @router.get("/marksheets")
 async def list_marksheets(
     request: Request,
@@ -425,7 +614,12 @@ async def list_marksheets(
     subject_id: str = "",
     paper_id: str = "",
     exam_date: str = "",
+    exam_date_from: str = "",
+    exam_date_to: str = "",
     q: str = "",
+    sort: str = "title",
+    page: int = 0,
+    page_size: int = 8,
 ) -> dict:
     user = await current_user(request)
     if not any("marksheet.view" in grant["actions"] for grant in user["grants"]):
@@ -442,8 +636,30 @@ async def list_marksheets(
     ):
         if value:
             query[field] = value
+    if not exam_date and (exam_date_from or exam_date_to):
+        window = {}
+        if exam_date_from:
+            window["$gte"] = exam_date_from
+        if exam_date_to:
+            window["$lte"] = exam_date_to
+        query["exam_date"] = window
     if batch_id:
         query["batch_ids"] = batch_id
+    named_sheets: set[str] = set()
+    if q:
+        matched_students = await db(request).students.find(
+            {"institute_id": user["institute_id"], "display_name": {"$regex": q, "$options": "i"}},
+            {"_id": 1},
+        ).to_list(length=200)
+        student_ids = [item["_id"] for item in matched_students]
+        if student_ids:
+            named_sheets = {
+                item["marksheet_id"]
+                for item in await db(request).results.find(
+                    {"student_id": {"$in": student_ids}},
+                    {"marksheet_id": 1},
+                ).to_list(length=2000)
+            }
     items = []
     names = {}
     cursor = db(request).marksheets.find(query)
@@ -457,9 +673,8 @@ async def list_marksheets(
         if not allows(user["grants"], "marksheet.view", resource):
             continue
         summary = _marksheet_summary(sheet)
-        if q and q.casefold() not in " ".join(
-            str(summary.get(field) or "") for field in ("title", "source_file", "source_sheet")
-        ).casefold():
+        haystack = " ".join(str(summary.get(field) or "") for field in ("title", "source_file", "source_sheet")).casefold()
+        if q and q.casefold() not in haystack and sheet["_id"] not in named_sheets:
             continue
         for field, key in (("uploader_id", "uploader_name"), ("reviewer_id", "reviewer_name")):
             person_id = sheet.get(field)
@@ -468,7 +683,14 @@ async def list_marksheets(
                 names[person_id] = person["name"] if person else ""
             summary[key] = names.get(person_id, "")
         items.append(summary)
-    return {"items": items}
+    items.sort(key=lambda item: str(item.get(sort if sort in {"exam_date", "status", "title"} else "title") or "").casefold())
+    total = len(items)
+    current = page or 1
+    if page:
+        start = (page - 1) * page_size
+        items = items[start : start + page_size]
+    pages = max(1, (total + page_size - 1) // page_size)
+    return {"items": items, "total": total, "page": current, "pages": pages}
 
 
 @router.post("/marksheets/{marksheet_id}/submit")
@@ -521,17 +743,46 @@ async def patch_result(request: Request, marksheet_id: str, result_id: str, body
     if result is None:
         raise AppError(404, "not_found", "That record was not found.")
     updates = {"previous_score": result.get("score")}
-    if body.score is not None:
+    if body.status in {"absent", "missing"}:
+        updates["status"] = body.status
+        updates["score"] = None
+    elif body.status == "scored" or body.score is not None:
+        if body.score is None:
+            raise AppError(422, "import.invalid_mark", "Enter a score, or mark the row missing or absent.")
         if body.score < 0 or (sheet.get("maximum") is not None and body.score > sheet["maximum"]):
             raise AppError(422, "import.invalid_mark", "The score must be from 0 through the maximum.")
         updates["score"] = body.score
         updates["status"] = "scored"
-    if body.status:
-        updates["status"] = body.status
+    elif body.status:
+        raise AppError(422, "import.invalid_mark", "Choose scored, absent, or missing.")
     version = sheet.get("edit_version", 0) + 1
     await db(request).results.update_one({"_id": result_id}, {"$set": updates})
     await db(request).marksheets.update_one({"_id": sheet["_id"]}, {"$set": {"edit_version": version}})
+    await _refresh_sheet_marks(request, sheet)
     return {"id": result_id, "edit_version": version, **updates}
+
+
+async def _refresh_sheet_marks(request: Request, sheet: dict) -> None:
+    from app.calculating import band, dense_ranks, display_percentage, percentage
+
+    revision = sheet.get("revision") or 1
+    rows = await db(request).results.find({"marksheet_id": sheet["_id"], "revision": revision}).to_list(length=500)
+    policy = await db(request).policies.find_one({"institute_id": sheet["institute_id"]}, sort=[("version", -1)])
+    ranked = dense_ranks([
+        {"id": row["_id"], "status": row.get("status"), "score": row.get("score")}
+        for row in rows
+    ])
+    for row in rows:
+        exact = percentage(row.get("score"), row.get("maximum") if row.get("maximum") is not None else sheet.get("maximum"))
+        exact = exact if row.get("status") == "scored" else None
+        await db(request).results.update_one(
+            {"_id": row["_id"]},
+            {"$set": {
+                "percentage": display_percentage(exact),
+                "band": band(exact, policy) if row.get("status") == "scored" else None,
+                "rank": ranked.get(row["_id"]),
+            }},
+        )
 
 
 @router.get("/catalog")
@@ -545,12 +796,19 @@ async def catalog(request: Request) -> dict:
     batches = await database.batches.find({"institute_id": user["institute_id"]}).to_list(length=200)
     subjects = await database.subjects.find({"institute_id": user["institute_id"]}).to_list(length=200)
     students = await database.students.find({"institute_id": user["institute_id"]}).to_list(length=500)
+    papers = await database.papers.find({"institute_id": user["institute_id"]}).to_list(length=200)
+    offerings = await database.offerings.find({"institute_id": user["institute_id"]}).to_list(length=200)
     return {
         "branches": [_catalog_row(item) for item in branches],
         "courses": [_catalog_row(item) for item in courses],
         "batches": [_catalog_row(item) for item in batches],
         "subjects": [_catalog_row(item) for item in subjects],
+        "papers": [_catalog_row(item) for item in papers],
         "students": [_catalog_row(item) for item in students],
+        "offerings": [
+            {"id": item["_id"], "branch_id": item.get("branch_id"), "course_id": item.get("course_id")}
+            for item in offerings
+        ],
     }
 
 
@@ -559,7 +817,14 @@ async def patch_catalog(request: Request, kind: str, record_id: str, body: Catal
     user = await current_user(request)
     if not any("catalog.correct" in grant["actions"] or "catalog.manage" in grant["actions"] for grant in user["grants"]):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
-    collection = {"branch": "branches", "course": "courses", "batch": "batches", "subject": "subjects", "student": "students"}.get(kind)
+    collection = {
+        "branch": "branches",
+        "course": "courses",
+        "batch": "batches",
+        "subject": "subjects",
+        "paper": "papers",
+        "student": "students",
+    }.get(kind)
     if collection is None:
         raise AppError(404, "not_found", "That record was not found.")
     record = await db(request)[collection].find_one({"_id": record_id, "institute_id": user["institute_id"]})
@@ -695,12 +960,16 @@ async def _merge_pair(request: Request, institute_id: str, body: MergeBody) -> t
 
 
 def _catalog_row(item: dict) -> dict:
-    return {
+    row = {
         "id": item["_id"],
         "name": item.get("name") or item.get("display_name"),
         "archived": bool(item.get("archived")),
         "student_code": item.get("student_code"),
     }
+    for key in ("branch_id", "course_id", "subject_id", "offering_id", "number"):
+        if item.get(key) is not None:
+            row[key] = item[key]
+    return row
 
 
 async def _job(request: Request, user: dict, import_id: str) -> dict:
