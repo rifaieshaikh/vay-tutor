@@ -89,6 +89,7 @@ def comparisons(rows: list[dict], outside: list[dict] | None = None) -> list[dic
                 "latest_percentage": display_percentage(percentage(ordered[-1].get("score"), ordered[-1].get("maximum"))),
                 "change": percentage_change(ordered[0], ordered[-1]),
                 "baseline_outside_period": ordered[0]["id"] not in included,
+                "batch_id": ordered[-1].get("batch_id"),
             }
         )
     return items

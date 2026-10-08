@@ -1,11 +1,11 @@
 import { FormEvent, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
 
 type Row = { id: string; name: string; archived: boolean; student_code?: string; branch_id?: string; course_id?: string; subject_id?: string; number?: number };
 type Offering = { id: string; branch_id?: string; course_id?: string };
 type Catalog = { branches: Row[]; courses: Row[]; batches: Row[]; subjects: Row[]; papers: Row[]; students: Row[]; offerings: Offering[] };
-type History = { display_name: string; archived: boolean; enrollments: { id: string; batch_name: string }[]; aliases: string[] };
+type History = { student_code?: string; display_name: string; archived: boolean; enrollments: { id: string; batch_name: string }[]; aliases: string[] };
 type Preview = { source: string; target: string; move: string[]; kept_separate: string[]; alias: string };
 
 const KIND = { branches: "branch", courses: "course", batches: "batch", subjects: "subject", students: "student", papers: "paper" } as const;
@@ -77,12 +77,19 @@ function Notes({ error, message }: { error: string; message: string }) {
 }
 
 export function StudentsPage() {
+  const [params] = useSearchParams();
+  const selectedId = params.get("student") || "";
   const { catalog, error, message, rename, archive } = useCatalog();
   const [query, setQuery] = useState("");
   const [history, setHistory] = useState<History | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [localError, setLocalError] = useState("");
   const students = (catalog?.students || []).filter((row) => `${row.student_code || ""} ${row.name}`.toLowerCase().includes(query.toLowerCase()));
+
+  useEffect(() => {
+    if (!selectedId) return;
+    api<History>(`/api/v1/students/${selectedId}/enrollments`).then(setHistory).catch((reason: Error) => setLocalError(reason.message));
+  }, [selectedId]);
 
   async function openHistory(row: Row) {
     setHistory(await api<History>(`/api/v1/students/${row.id}/enrollments`));
@@ -125,6 +132,15 @@ export function StudentsPage() {
       <h1>Students</h1>
       <p>Students are created when a marklist is imported. This list is their identity, enrollments, and progress cards.</p>
       <Notes error={error || localError} message={message} />
+      {selectedId && history ? (
+        <section>
+          <h2>{history.display_name}</h2>
+          <p>{history.student_code}{history.archived ? " · Archived" : ""}</p>
+          <p>Enrollments: {history.enrollments.map((item) => item.batch_name).join(", ") || "None yet."}</p>
+          {history.aliases.length ? <p>Previous names: {history.aliases.join(", ")}</p> : null}
+          <p><Link to={`/cards?student=${selectedId}`}>Progress card</Link></p>
+        </section>
+      ) : null}
       <label>Search<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Name or student id" /></label>
       <p>{students.length} student{students.length === 1 ? "" : "s"}</p>
       <ul className="people">
@@ -141,7 +157,7 @@ export function StudentsPage() {
           </li>
         ))}
       </ul>
-      {history ? (
+      {history && !selectedId ? (
         <section>
           <h2>{history.display_name}</h2>
           <p>Enrollments: {history.enrollments.map((item) => item.batch_name).join(", ") || "None yet."}</p>
