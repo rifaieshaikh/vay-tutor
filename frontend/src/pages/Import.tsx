@@ -1,6 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
+import { Icon } from "./Catalog";
 
 type Student = {
   row: number;
@@ -939,7 +940,9 @@ function SheetGrid({
         </table>
       </div>
       <div className="excel-foot">
-        <button type="button" className="text-button" onClick={() => onAdd(sheet.id, nextRow)}>Add row</button>
+        <div className="icon-actions">
+          <button type="button" onClick={() => onAdd(sheet.id, nextRow)} aria-label="Add row" title="Add row"><Icon name="add" /></button>
+        </div>
       </div>
       <div className="sheet-tabs excel-tabs" role="tablist" aria-label="Sheets">
         {sheets.map((item) => {

@@ -2,14 +2,18 @@ import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { CONTEXT_FIELDS, Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
+import { Band, BandMark, bandTone } from "../bands";
+import { Icon } from "./Catalog";
 
-type Section = { id: string; label: string; students: number; results: number; percentage: number | null; band: string | null; coverage: string; missing?: number; absent?: number; marksheet_ids?: string[] };
+type Section = { id: string; label: string; students: number; results: number; percentage: number | null; band: string | null; band_name?: string | null; band_place?: string | null; coverage: string; missing?: number; absent?: number; marksheet_ids?: string[] };
 type Standing = {
   student_id: string;
   student_name?: string;
   student_code?: string;
   percentage: number | null;
   band: string | null;
+  band_name?: string | null;
+  band_place?: string | null;
   scored: number;
   expected: number;
 };
@@ -34,12 +38,15 @@ type Attention = {
   maximum: number | null;
   percentage: number | null;
   band: string;
+  band_name?: string | null;
+  band_place?: string | null;
   marksheet_id?: string | null;
 };
 type View = {
   level: string;
   policy_version?: number;
   policy_label?: string;
+  bands?: Band[];
   students: number;
   enrollments: number;
   roster_confirmed: boolean;
@@ -110,8 +117,7 @@ const DRILL: Record<string, [string, string]> = {
   subject: ["paper", "paper_id"],
 };
 const CHILD: Record<string, string> = { institute: "branch", branch: "course", course: "batch", batch: "subject", subject: "paper", paper: "assessment" };
-const BANDS: Record<string, string> = { danger: "Danger", "fifty-fifty": "Fifty-fifty", safe: "Safe" };
-
+const CHILD_HEADING: Record<string, string> = { institute: "Branch", branch: "Course", course: "Batch", batch: "Subject", subject: "Paper", paper: "Assessment" };
 function panelTabs(level: string) {
   const tabs: [string, string][] = [
     ["comparison", SECTION_HEADINGS[level] || "Comparison"],
@@ -163,34 +169,31 @@ function StudentName({ id, name, code, cardSuffix }: { id?: string | null; name?
   );
 }
 
-function ScoreBar({ percentage, band }: { percentage: number | null; band: string | null }) {
+function ScoreBar({ percentage, band, place }: { percentage: number | null; band: string | null; place?: string | null }) {
   return (
     <div className="comparison-score">
       <strong>{percentage == null ? "—" : `${formatPercent(percentage)}%`}</strong>
-      <span className={`bar ${band || ""}`} aria-hidden="true"><span style={{ width: `${Math.max(0, Math.min(100, percentage ?? 0))}%` }} /></span>
+      <span className={`bar ${bandTone(band, place)}`} aria-hidden="true"><span style={{ width: `${Math.max(0, Math.min(100, percentage ?? 0))}%` }} /></span>
     </div>
   );
 }
 
-const GROUP_LABEL: Record<string, string> = { institute: "Course", branch: "Course", course: "Batch", batch: "Subject", subject: "Paper", paper: "Assessment" };
-
-function GroupBar({ level, groups, selected, onSelect, note }: { level: string; groups: { id: string; label: string }[]; selected: string; onSelect: (id: string) => void; note: string }) {
+function GroupBar({ groups, selected, onSelect, note }: { groups: { id: string; label: string }[]; selected: string; onSelect: (id: string) => void; note: string }) {
   return (
     <div className="group-bar">
       {groups.length > 1 ? (
-        <label className="group-pick">
-          {GROUP_LABEL[level] || "Group"}
-          <select value={selected} onChange={(event) => onSelect(event.target.value)}>
-            {groups.map((group) => <option key={group.id} value={group.id}>{group.label}</option>)}
-          </select>
-        </label>
-      ) : null}
+        <div className="permission-picks" role="group" aria-label="Group">
+          {groups.map((group) => (
+            <button key={group.id} type="button" className={group.id === selected ? "permission is-selected" : "permission"} aria-pressed={group.id === selected} onClick={() => onSelect(group.id)}>{group.label}</button>
+          ))}
+        </div>
+      ) : groups[0] ? <strong>{groups[0].label}</strong> : null}
       <span className="meta">{note}</span>
     </div>
   );
 }
 
-function StandingList({ shown, level, cardSuffix }: { shown: View; level: string; cardSuffix: string }) {
+function StandingList({ shown, cardSuffix }: { shown: View; cardSuffix: string }) {
   const blocks = (shown.boards || []).filter((board) => board.top_student_count > 0);
   const [picked, setPicked] = useState(blocks[0]?.id || "");
   const selected = blocks.some((board) => board.id === picked) ? picked : (blocks[0]?.id || "");
@@ -199,7 +202,7 @@ function StandingList({ shown, level, cardSuffix }: { shown: View; level: string
   const note = block.top_student_count > block.top_students.length ? `${block.top_students.length} of ${block.top_student_count}` : `${block.top_student_count}`;
   return (
     <>
-      <GroupBar level={level} groups={blocks} selected={selected} onSelect={setPicked} note={note} />
+      <GroupBar groups={blocks} selected={selected} onSelect={setPicked} note={note} />
       <div className="table-wrap">
         <table className="people-table">
           <caption className="sr-only">Highest safe percentages for {block.label || "this view"}, up to 20.</caption>
@@ -209,9 +212,9 @@ function StandingList({ shown, level, cardSuffix }: { shown: View; level: string
               <tr key={item.student_id}>
                 <td className="place">{index + 1}</td>
                 <td><StudentName id={item.student_id} name={item.student_name} code={item.student_code} cardSuffix={cardSuffix} /></td>
-                <td><ScoreBar percentage={item.percentage} band={item.band} /></td>
+                <td><ScoreBar percentage={item.percentage} band={item.band} place={item.band_place} /></td>
                 <td className="nowrap">{item.scored} of {item.expected}</td>
-                <td>{item.band ? <span className={`chip ${item.band}`}>{BANDS[item.band]}</span> : "—"}</td>
+                <td><BandMark band={item.band} name={item.band_name} place={item.band_place} /></td>
               </tr>
             ))}
           </tbody>
@@ -221,7 +224,7 @@ function StandingList({ shown, level, cardSuffix }: { shown: View; level: string
   );
 }
 
-function AttentionBoards({ shown, level, cardSuffix, returnTo }: { shown: View; level: string; cardSuffix: string; returnTo: string }) {
+function AttentionBoards({ shown, cardSuffix, returnTo }: { shown: View; cardSuffix: string; returnTo: string }) {
   const boards = (shown.boards || []).filter((board) => board.attention_result_count > 0);
   const [picked, setPicked] = useState(boards[0]?.id || "");
   const [query, setQuery] = useState("");
@@ -248,7 +251,7 @@ function AttentionBoards({ shown, level, cardSuffix, returnTo }: { shown: View; 
   const note = matched.length > slice.length ? `${from}–${to} of ${matched.length}` : `${matched.length}`;
   return (
     <>
-      <GroupBar level={level} groups={boards} selected={selected} onSelect={setPicked} note={note} />
+      <GroupBar groups={boards} selected={selected} onSelect={setPicked} note={note} />
       <div className="toolbar attention-controls">
         <label>Find a student<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Name or student code" /></label>
         <label>Order by<select value={order} onChange={(event) => setOrder(event.target.value)}><option value="lowest">Lowest percentage first</option><option value="name">Student name</option><option value="assessment">Assessment</option></select></label>
@@ -263,14 +266,14 @@ function AttentionBoards({ shown, level, cardSuffix, returnTo }: { shown: View; 
                 <tr key={item.id}>
                   <td className="place">{(current - 1) * 20 + index + 1}</td>
                   <td><StudentName id={item.student_id} name={item.student_name} code={item.student_code} cardSuffix={cardSuffix} /></td>
-                  <td><ScoreBar percentage={item.percentage} band={item.band} /></td>
+                  <td><ScoreBar percentage={item.percentage} band={item.band} place={item.band_place} /></td>
                   <td>
                     <div className="student-cell">
                       <span className="nowrap">{item.score ?? "—"} of {item.maximum ?? "—"}</span>
                       {item.marksheet_id ? <Link className="result-line" to={`/marksheets/${item.marksheet_id}?returnTo=${returnTo}`}>{item.title}</Link> : <span className="meta">{item.title}</span>}
                     </div>
                   </td>
-                  <td>{item.band ? <span className={`chip ${item.band}`}>{BANDS[item.band] || item.band}</span> : "—"}</td>
+                  <td><BandMark band={item.band} name={item.band_name} place={item.band_place} /></td>
                 </tr>
               ))}
             </tbody>
@@ -566,16 +569,19 @@ export function ViewsPage() {
           <h1>Academic performance</h1>
         </div>
         <div className="actions">
-          {active.length === 0 ? <span>All authorized</span> : active.map((key) => (
+          {active.map((key) => (
             <button key={key} type="button" className="chip-button" onClick={() => removeFilter(key)}>{FILTERS.find(([name]) => name === key)?.[1] || (key === "exam_date_from" ? "From" : key === "exam_date_to" ? "To" : "Attempt")}: {labelFor(key, filters[key])}</button>
           ))}
-          {active.length ? <button type="button" className="text-button" onClick={resetFilters}>Clear filters</button> : null}
-          <button type="button" className="filters-toggle" onClick={openFilters}>Filters{active.length ? ` (${active.length})` : ""}</button>
+          <div className="icon-actions">
+            {active.length ? <button type="button" onClick={resetFilters} aria-label="Clear filters" title="Clear filters"><Icon name="clear" /></button> : null}
+            <button type="button" onClick={openFilters} aria-label={active.length ? `Filters, ${active.length} applied` : "Filters"} title="Filters"><Icon name="filter" /></button>
+            <Link to={`/cards${cardSuffix ? `?${cardSuffix}` : ""}`} aria-label="Open progress cards" title="Progress cards"><Icon name="card" /></Link>
+          </div>
         </div>
       </div>
-      <nav className="page-tabs academic-levels" aria-label="Academic level">
+      <nav className="page-tabs" role="tablist" aria-label="Academic level">
         {LEVELS.map((item) => (
-          <button key={item} type="button" aria-current={level === item ? "page" : undefined} onClick={() => goToLevel(item)}>{LEVEL_LABELS[item]}</button>
+          <button key={item} type="button" role="tab" aria-selected={level === item} onClick={() => goToLevel(item)}>{LEVEL_LABELS[item]}</button>
         ))}
       </nav>
       {filtersOpen ? (
@@ -668,9 +674,9 @@ export function ViewsPage() {
               ) : null}
               {orderedSections.length === 0 ? <p>No sections match these filters or the section search.</p> : (
                 <div className="table-wrap">
-                  <table>
+                  <table className="people-table">
                     <caption className="sr-only">{SECTION_HEADINGS[level]} in this view, in the selected order. Open a row to explore its published results.</caption>
-                    <thead><tr><th>Section</th><th>Students</th><th>Results</th><th>Performance</th><th>Band</th><th>Scored</th><th>Missing / absent</th></tr></thead>
+                    <thead><tr><th>{CHILD_HEADING[level] || "Section"}</th><th>Students</th><th>Results</th><th>Performance</th><th>Band</th><th>Scored</th><th>Missing / absent</th></tr></thead>
                     <tbody>
                       {orderedSections.map((section) => (
                         <tr key={section.id || section.label}>
@@ -679,8 +685,8 @@ export function ViewsPage() {
                           </td>
                           <td>{section.students}</td>
                           <td>{section.results}</td>
-                          <td><div className="comparison-score"><strong>{section.percentage == null ? "—" : `${formatPercent(section.percentage)}%`}</strong><span className={`bar ${section.band || ""}`} aria-hidden="true"><span style={{ width: `${Math.max(0, Math.min(100, section.percentage ?? 0))}%` }} /></span></div></td>
-                          <td>{section.band ? <span className={`chip ${section.band}`}>{BANDS[section.band]}</span> : "—"}</td>
+                          <td><div className="comparison-score"><strong>{section.percentage == null ? "—" : `${formatPercent(section.percentage)}%`}</strong><span className={`bar ${bandTone(section.band, section.band_place)}`} aria-hidden="true"><span style={{ width: `${Math.max(0, Math.min(100, section.percentage ?? 0))}%` }} /></span></div></td>
+                          <td><BandMark band={section.band} name={section.band_name} place={section.band_place} /></td>
                           <td>{coverageLabel(section.coverage)}</td><td>{section.missing ?? 0} / {section.absent ?? 0}</td>
                         </tr>
                       ))}
@@ -690,9 +696,8 @@ export function ViewsPage() {
               )}
             </>
           ) : null}
-          {panel === "top" ? <StandingList shown={shown} level={level} cardSuffix={cardSuffix} /> : null}
-          {panel === "attention" ? <AttentionBoards shown={shown} level={level} cardSuffix={cardSuffix} returnTo={returnTo} /> : null}
-          <p><Link to={`/cards${cardSuffix ? `?${cardSuffix}` : ""}`}>Open progress cards for this context →</Link></p>
+          {panel === "top" ? <StandingList shown={shown} cardSuffix={cardSuffix} /> : null}
+          {panel === "attention" ? <AttentionBoards shown={shown} cardSuffix={cardSuffix} returnTo={returnTo} /> : null}
         </article>
       ) : null}
     </section>

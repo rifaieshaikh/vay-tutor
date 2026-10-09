@@ -9,13 +9,28 @@ from openpyxl import load_workbook
 from app.security import name_key
 
 _MONTHS = {
-    "january": 1,
-    "jan": 1,
-    "september": 9,
-    "sept": 9,
+    "january": 1, "jan": 1,
+    "february": 2, "feb": 2,
+    "march": 3, "mar": 3,
+    "april": 4, "apr": 4,
+    "may": 5,
+    "june": 6, "jun": 6,
+    "july": 7, "jul": 7,
+    "august": 8, "aug": 8,
+    "september": 9, "sept": 9, "sep": 9,
+    "october": 10, "oct": 10,
+    "november": 11, "nov": 11,
+    "december": 12, "dec": 12,
 }
-_MONTH_LABEL = {1: "January", 9: "September"}
-_BATCH_RE = re.compile(r"\b(january|jan|september|sept)\b[\s.\-/]*(\d{2,4})", re.IGNORECASE)
+_MONTH_LABEL = {
+    1: "January", 2: "February", 3: "March", 4: "April",
+    5: "May", 6: "June", 7: "July", 8: "August",
+    9: "September", 10: "October", 11: "November", 12: "December",
+}
+_BATCH_RE = re.compile(
+    r"\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\b[\s.\-/]*(\d{2,4})",
+    re.IGNORECASE,
+)
 _MARK_RE = re.compile(r"MARK\s*\(\s*(\d+)\s*\)", re.IGNORECASE)
 _PAPER_RE = re.compile(r"PAPER\s*-?\s*(\d+)\s*-\s*(.+)", re.IGNORECASE)
 _LEGEND = ("more than 60", "between 40", "less than 40", "safe zone", "fifty-fifty", "danger zone", "learn, grow")
@@ -62,6 +77,13 @@ def parse_batches(text: str) -> list[dict]:
         seen.add(key)
         found.append({"session_key": key, "label": f"{_MONTH_LABEL[month]} {year}"})
     return found
+
+
+def session_key_for_label(text: str) -> str | None:
+    found = parse_batches(text)
+    if len(found) == 1:
+        return found[0]["session_key"]
+    return None
 
 
 def _parse_sheet(worksheet, position: int) -> dict:

@@ -12,6 +12,7 @@ def connect(settings: Settings) -> tuple[AsyncIOMotorClient, AsyncIOMotorDatabas
 
 
 async def ensure_schema(db: AsyncIOMotorDatabase) -> None:
+    await db.policies.create_index([("institute_id", 1), ("version", 1)], unique=True)
     current = await db.schema_meta.find_one({"_id": "schema"})
     if current and current.get("version", 0) >= 1:
         return

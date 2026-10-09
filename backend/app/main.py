@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.catalog_pages import router as catalog_router
 from app.config import load_settings
 from app.db import connect, ensure_schema
 from app.errors import AppError, app_error_handler, error_body
@@ -75,6 +76,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(router)
     app.include_router(import_router)
+    app.include_router(catalog_router)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):

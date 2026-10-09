@@ -1,6 +1,9 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
+import { studentRecordHref } from "../students";
+import { Band, BandMark, bandFor, bandTone } from "../bands";
+import { Icon } from "./Catalog";
 import { CONTEXT_FIELDS, Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
 
 type Performance = {
@@ -10,6 +13,8 @@ type Performance = {
   missing: number;
   absent: number;
   band: string | null;
+  band_name?: string | null;
+  band_place?: string | null;
 };
 type Student = {
   id: string;
@@ -32,6 +37,8 @@ type Result = {
   maximum: number | null;
   percentage: number | null;
   band: string | null;
+  band_name?: string | null;
+  band_place?: string | null;
   rank: number | null;
   batch_rank: number | null;
   exam_date: string | null;
@@ -48,17 +55,21 @@ type SubjectSummary = {
   missing: number;
   absent: number;
   band: string | null;
+  band_name?: string | null;
+  band_place?: string | null;
 };
 type Card = {
   student_code: string;
   display_name: string;
+  photo_id?: string | null;
   partial: boolean;
   coverage_note: string | null;
   empty_reason: string | null;
   policy_version: number;
+  bands?: Band[];
   result_count?: number;
   enrollments?: { branch_id?: string | null; course_id?: string | null; batch_id?: string | null }[];
-  performance: { percentage: number | null; scored: number; expected: number; missing: number; absent: number; label: string; band?: string | null };
+  performance: { percentage: number | null; scored: number; expected: number; missing: number; absent: number; label: string; band?: string | null; band_name?: string | null; band_place?: string | null };
   subjects?: SubjectSummary[];
   retests: { title: string | null; original_percentage: number | null; latest_percentage: number | null; change: number | null; baseline_outside_period?: boolean; batch_id?: string | null }[];
   results: Result[];
@@ -92,7 +103,6 @@ const EMPTY_REASONS: Record<string, string> = {
   unpublished: "No published results yet. Drafts stay off this card.",
   restricted: "No authorized results are available for this student.",
 };
-const BANDS: Record<string, string> = { danger: "Danger", "fifty-fifty": "Fifty-fifty", safe: "Safe" };
 const EXPORT_LABELS = { queued: "Queued", running: "Running", ready: "Ready", failed: "Failed" };
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -144,7 +154,7 @@ function latestAttempts(rows: Result[]) {
   });
 }
 
-function tally(rows: Result[]) {
+function tally(rows: Result[], bands?: Band[]) {
   const chosen = latestAttempts(rows);
   const scored = chosen.filter((row) => row.status === "scored" && row.score != null && row.maximum);
   const missing = chosen.filter((row) => row.status === "missing").length;
@@ -152,9 +162,12 @@ function tally(rows: Result[]) {
   const obtained = scored.reduce((sum, row) => sum + Number(row.score), 0);
   const maximum = scored.reduce((sum, row) => sum + Number(row.maximum), 0);
   const exact = maximum ? (obtained / maximum) * 100 : null;
+  const marked = bandFor(exact, bands);
   return {
     percentage: exact == null ? null : Math.round((exact + Number.EPSILON) * 100) / 100,
-    band: exact == null ? null : exact < 40 ? "danger" : exact > 60 ? "safe" : "fifty-fifty",
+    band: marked.band,
+    band_name: marked.name,
+    band_place: marked.place,
     scored: scored.length,
     expected: scored.length + missing + absent,
     missing,
@@ -162,7 +175,7 @@ function tally(rows: Result[]) {
   };
 }
 
-function subjectsFrom(rows: Result[]): SubjectSummary[] {
+function subjectsFrom(rows: Result[], bands?: Band[]): SubjectSummary[] {
   const groups = new Map<string, Result[]>();
   for (const row of rows) {
     const key = `${row.subject_id || ""}|${row.paper_id || ""}`;
@@ -170,17 +183,22 @@ function subjectsFrom(rows: Result[]): SubjectSummary[] {
   }
   return [...groups.entries()].map(([key, group]) => {
     const [subjectId, paperId] = key.split("|");
-    return { subject_id: subjectId || null, paper_id: paperId || null, ...tally(group) };
+    return { subject_id: subjectId || null, paper_id: paperId || null, ...tally(group, bands) };
   });
 }
 
-function ScoreBar({ percentage, band }: { percentage: number | null; band: string | null }) {
+function ScoreBar({ percentage, band, place }: { percentage: number | null; band: string | null; place?: string | null }) {
   return (
     <div className="comparison-score">
       <strong>{percentage == null ? "—" : `${formatPercent(percentage)}%`}</strong>
-      <span className={`bar ${band || ""}`} aria-hidden="true"><span style={{ width: `${Math.max(0, Math.min(100, percentage ?? 0))}%` }} /></span>
+      <span className={`bar ${bandTone(band, place)}`} aria-hidden="true"><span style={{ width: `${Math.max(0, Math.min(100, percentage ?? 0))}%` }} /></span>
     </div>
   );
+}
+
+function studentsReturn(value: string | null) {
+  if (!value || !value.startsWith("/students") || value.startsWith("//") || value.includes("://") || value.includes("\\")) return "";
+  return value;
 }
 
 function readApplied(params: URLSearchParams) {
@@ -336,11 +354,16 @@ export function CardsPage({ session }: { session: Session }) {
   const [subjectSort, setSubjectSort] = useState("name");
   const [examSort, setExamSort] = useState("exam_date");
   const [batchPick, setBatchPick] = useState("");
+  const [photoFailed, setPhotoFailed] = useState(false);
   const appliedKey = params.toString();
   const studentId = params.get("student") || "";
   const sort = reportSort(params.get("sort") || "");
   const page = Number(applied.page) || 1;
-  const requestKey = studentId;
+  const listReturn = studentsReturn(params.get("returnTo"));
+  const cardBranch = listReturn ? params.get("branch_id") || "" : "";
+  const cardCourse = listReturn ? params.get("course_id") || "" : "";
+  const cardBatch = listReturn ? params.get("batch_id") || "" : "";
+  const requestKey = [studentId, cardBranch, cardCourse, cardBatch].join("|");
   const listKey = ["list", applied.q, page, sort, ...REPORT_FILTERS.map((key) => applied[key])].join("|");
   const shown = card && loadedKey === requestKey ? card : null;
 
@@ -354,8 +377,12 @@ export function CardsPage({ session }: { session: Session }) {
     setPanel("subjects");
     setSubjectSort("name");
     setExamSort("exam_date");
-    setBatchPick("");
+    setBatchPick(studentsReturn(params.get("returnTo")) ? params.get("batch_id") || "" : "");
   }, [studentId]);
+
+  useEffect(() => {
+    setPhotoFailed(false);
+  }, [studentId, card?.photo_id]);
 
   useEffect(() => {
     Promise.all(
@@ -414,7 +441,12 @@ export function CardsPage({ session }: { session: Session }) {
     let cancelled = false;
     setLoading(true);
     setError("");
-    api<Card>(`/api/v1/students/${studentId}/card`)
+    const scope = new URLSearchParams();
+    if (cardBranch) scope.set("branch_id", cardBranch);
+    if (cardCourse) scope.set("course_id", cardCourse);
+    if (cardBatch) scope.set("batch_id", cardBatch);
+    const suffix = scope.toString();
+    api<Card>(`/api/v1/students/${studentId}/card${suffix ? `?${suffix}` : ""}`)
       .then((data) => {
         if (cancelled) return;
         setCard(data);
@@ -584,7 +616,10 @@ export function CardsPage({ session }: { session: Session }) {
   const rangeTo = Math.min(total, (page - 1) * 8 + students.length);
 
   const filterButton = (
-    <button type="button" className="filters-toggle" onClick={openFilters}>Filters{active.length ? ` (${active.length})` : ""}</button>
+    <div className="icon-actions">
+      {active.length ? <button type="button" onClick={resetFilters} aria-label="Clear filters" title="Clear filters"><Icon name="clear" /></button> : null}
+      <button type="button" onClick={openFilters} aria-label={active.length ? `Filters, ${active.length} applied` : "Filters"} title="Filters"><Icon name="filter" /></button>
+    </div>
   );
   const filters = filtersOpen ? (
     <Dialog title="Report filters" onClose={closeFilters}>
@@ -606,7 +641,6 @@ export function CardsPage({ session }: { session: Session }) {
       {active.length === 0 ? <span>All authorized</span> : active.map((key) => (
         <button key={key} type="button" className="chip-button" onClick={() => removeFilter(key)}>{FILTER_LABELS[key]}: {labelFor(key, applied[key])}</button>
       ))}
-      {active.length ? <button type="button" className="text-button" onClick={resetFilters}>Clear filters</button> : null}
       {filterButton}
     </>
   );
@@ -618,9 +652,9 @@ export function CardsPage({ session }: { session: Session }) {
     const selectedBatch = orderedMemberships.some((item) => item.batch_id === batchPick) ? batchPick : (orderedMemberships[0]?.batch_id || "");
     const splitBatch = orderedMemberships.length > 1;
     const results = splitBatch ? allResults.filter((item) => item.batch_id === selectedBatch) : allResults;
-    const performance = shown ? (splitBatch ? tally(results) : shown.performance) : null;
+    const performance = shown ? (splitBatch ? tally(results, shown.bands) : shown.performance) : null;
     const history = orderResults(results, examSort);
-    const danger = [...results].filter((result) => result.band === "danger").sort((left, right) => (left.percentage ?? 0) - (right.percentage ?? 0) || (left.title || "").localeCompare(right.title || ""));
+    const danger = [...results].filter((result) => result.band_place === "low" || (result.band_place == null && result.band === "danger")).sort((left, right) => (left.percentage ?? 0) - (right.percentage ?? 0) || (left.title || "").localeCompare(right.title || ""));
     const gaps = results.filter((result) => result.status === "missing" || result.status === "absent");
     const returnTo = encodeURIComponent(`/cards?${params.toString()}`);
     const subjectName = (id?: string | null) => optionLabel("subject", id) || "Subject";
@@ -633,8 +667,9 @@ export function CardsPage({ session }: { session: Session }) {
     const studentName = shown?.display_name || (heading?.id === studentId ? heading.name : "");
     const studentCode = shown?.student_code || (heading?.id === studentId ? heading?.code : "");
     const photoInitials = studentName.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() || "").join("");
+    const photoId = shown?.photo_id || "";
     const retests = (shown?.retests || []).filter((item) => !splitBatch || item.batch_id === selectedBatch);
-    const subjectRows = [...(splitBatch ? subjectsFrom(results) : (shown?.subjects || []))].sort((left, right) => {
+    const subjectRows = [...(splitBatch ? subjectsFrom(results, shown?.bands) : (shown?.subjects || []))].sort((left, right) => {
       const label = subjectName(left.subject_id).localeCompare(subjectName(right.subject_id))
         || paperName(left.paper_id).localeCompare(paperName(right.paper_id));
       if (subjectSort !== "percentage") return label;
@@ -645,9 +680,11 @@ export function CardsPage({ session }: { session: Session }) {
     });
     return (
       <section className="panel wide print-card" aria-busy={loading}>
-        <button type="button" className="quiet back-link" onClick={closeCard}>← Progress cards</button>
+        {listReturn ? <Link className="quiet back-link" to={listReturn}>← Students</Link> : <button type="button" className="quiet back-link" onClick={closeCard}>← Progress cards</button>}
         <div className="card-head">
-          <div className="student-photo" role="img" aria-label={studentName ? `Photo space for ${studentName}` : "Student photo"}>{photoInitials}</div>
+          <div className="student-photo" role="img" aria-label={photoId && !photoFailed ? `Photo of ${studentName}` : (studentName ? `Photo space for ${studentName}` : "Student photo")}>
+            {photoId && !photoFailed ? <img src={`/api/v1/students/${studentId}/photo?v=${photoId}`} alt="" onError={() => setPhotoFailed(true)} /> : photoInitials}
+          </div>
           <div className="card-person">
             <h1>{studentName || "Progress card"}</h1>
             <dl className="card-identity">
@@ -670,7 +707,7 @@ export function CardsPage({ session }: { session: Session }) {
             {canPdf ? <button type="button" onClick={() => exportCard("pdf")} disabled={exporting}>PDF</button> : null}
             {canSheet ? <button type="button" onClick={() => exportCard("xlsx")} disabled={exporting}>Spreadsheet</button> : null}
             <button type="button" onClick={() => window.print()}>Print</button>
-            {session.actions.includes("student.lookup") ? <Link to={`/students?student=${studentId}`}>View student</Link> : null}
+            {session.actions.includes("student.lookup") ? <Link to={studentRecordHref(studentId, listReturn || "/students", { q: "", branch_id: selectedEnrollment?.branch_id || "", course_id: selectedEnrollment?.course_id || "", batch_id: selectedEnrollment?.batch_id || "" })}>View student</Link> : null}
           </div>
         </div>
         <p className="print-context">{[`Student code ${studentCode}`, branchName ? `Branch ${branchName}` : "", courseName ? `Course ${courseName}` : "", batchName ? `Batch ${batchName}` : ""].filter(Boolean).join(". ")}</p>
@@ -687,7 +724,7 @@ export function CardsPage({ session }: { session: Session }) {
         {shown && !empty ? (
           <>
             <div className="academic-stats">
-              <div><span>Weighted performance</span><strong>{performance?.percentage == null ? "—" : `${formatPercent(performance.percentage)}%`}</strong>{performance?.band ? <span className={`chip ${performance.band}`}>{BANDS[performance.band]}</span> : <small>Scored marks ÷ corresponding maxima</small>}</div>
+              <div><span>Weighted performance</span><strong>{performance?.percentage == null ? "—" : `${formatPercent(performance.percentage)}%`}</strong>{performance?.band ? <BandMark band={performance.band} name={performance.band_name} place={performance.band_place} /> : <small>Scored marks ÷ corresponding maxima</small>}</div>
               <div><span>Scored results</span><strong>{performance?.scored ?? 0}<small> / {performance?.expected ?? 0}</small></strong><small>Latest published attempt in this report</small></div>
               <div><span>Missing</span><strong>{performance?.missing ?? 0}</strong><small>No mark entered</small></div>
               <div><span>Absent</span><strong>{performance?.absent ?? 0}</strong><small>Marked absent</small></div>
@@ -718,9 +755,9 @@ export function CardsPage({ session }: { session: Session }) {
                       <tr key={`${subject.subject_id || "subject"}-${subject.paper_id || "paper"}`}>
                         <td>{subjectName(subject.subject_id)}</td>
                         <td>{paperName(subject.paper_id)}</td>
-                        <td><ScoreBar percentage={subject.percentage} band={subject.band} /></td>
+                        <td><ScoreBar percentage={subject.percentage} band={subject.band} place={subject.band_place} /></td>
                         <td className="nowrap">{subject.scored} of {subject.expected}</td>
-                        <td>{subject.band ? <span className={`chip ${subject.band}`}>{BANDS[subject.band] || subject.band}</span> : "—"}</td>
+                        <td><BandMark band={subject.band} name={subject.band_name} place={subject.band_place} /></td>
                       </tr>
                     ))}
                   </tbody>
@@ -730,8 +767,8 @@ export function CardsPage({ session }: { session: Session }) {
             </div>
             <div className={panel === "attention" ? "card-panel" : "card-panel is-hidden"}>
             <h2 className="sr-only">Needs attention</h2>
-            {danger.length === 0 && gaps.length === 0 ? <p>Nothing in this view is below 40%, missing, or absent.</p> : null}
-            {danger.length === 0 && gaps.length > 0 ? <p>No scored results in this view fall in the danger band.</p> : null}
+            {danger.length === 0 && gaps.length === 0 ? <p>Nothing in this view is in the lowest band, missing, or absent.</p> : null}
+            {danger.length === 0 && gaps.length > 0 ? <p>No scored results in this view fall in the lowest band.</p> : null}
             {danger.length > 0 ? (
               <div className="table-wrap">
                 <table className="people-table">
@@ -742,14 +779,14 @@ export function CardsPage({ session }: { session: Session }) {
                       <tr key={result.id}>
                         <td className="place">{index + 1}</td>
                         <td><div className="student-cell"><span>{shown.display_name}</span><span className="meta">{shown.student_code}</span></div></td>
-                        <td><ScoreBar percentage={result.percentage} band={result.band} /></td>
+                        <td><ScoreBar percentage={result.percentage} band={result.band} place={result.band_place} /></td>
                         <td>
                           <div className="student-cell">
                             <span className="nowrap">{result.score ?? "—"} of {result.maximum ?? "—"}</span>
                             {result.marksheet_id ? <Link className="result-line" to={`/marksheets/${result.marksheet_id}?returnTo=${returnTo}`}>{result.title}</Link> : <span className="meta">{result.title}</span>}
                           </div>
                         </td>
-                        <td>{result.band ? <span className={`chip ${result.band}`}>{BANDS[result.band]}</span> : "—"}</td>
+                        <td><BandMark band={result.band} name={result.band_name} place={result.band_place} /></td>
                       </tr>
                     ))}
                   </tbody>
@@ -799,9 +836,9 @@ export function CardsPage({ session }: { session: Session }) {
                             <span className="meta">{subjectName(result.subject_id)}{result.attempt === "retest" ? " · Retest" : ""}{result.included_in_total === false ? " · kept out" : ""}</span>
                           </div>
                         </td>
-                        <td><ScoreBar percentage={result.percentage} band={result.band} /></td>
+                        <td><ScoreBar percentage={result.percentage} band={result.band} place={result.band_place} /></td>
                         <td className="nowrap">{result.score ?? "—"} of {result.maximum ?? "—"}</td>
-                        <td>{result.band ? <span className={`chip ${result.band}`}>{BANDS[result.band] || result.band}</span> : result.status}</td>
+                        <td>{result.band ? <BandMark band={result.band} name={result.band_name} place={result.band_place} /> : result.status}</td>
                         <td>{result.rank ?? "—"}{result.batch_rank != null ? ` · batch ${result.batch_rank}` : ""}</td>
                       </tr>
                     ))}
@@ -849,7 +886,7 @@ export function CardsPage({ session }: { session: Session }) {
       {loading ? <p role="status">Loading students…</p> : null}
       {!loading && summary ? (
         <div className="academic-stats">
-          <div><span>Weighted performance</span><strong>{summary.percentage == null ? "—" : `${formatPercent(summary.percentage)}%`}</strong>{summary.band ? <span className={`chip ${summary.band}`}>{BANDS[summary.band]}</span> : <small>Scored marks ÷ corresponding maxima</small>}</div>
+          <div><span>Weighted performance</span><strong>{summary.percentage == null ? "—" : `${formatPercent(summary.percentage)}%`}</strong>{summary.band ? <BandMark band={summary.band} name={summary.band_name} place={summary.band_place} /> : <small>Scored marks ÷ corresponding maxima</small>}</div>
           <div><span>Students</span><strong>{summary.students}</strong><small>{summary.with_results} with published results</small></div>
           <div><span>Scored results</span><strong>{summary.scored}<small> / {summary.expected}</small></strong><small>Latest published attempt in this report</small></div>
           <div><span>Incomplete results</span><strong>{summary.missing + summary.absent}</strong><small>{summary.missing} missing · {summary.absent} absent</small></div>
@@ -881,9 +918,9 @@ export function CardsPage({ session }: { session: Session }) {
                         <span className="meta">{student.student_code}</span>
                       </div>
                     </td>
-                    <td>{unpublished ? "No published results" : <ScoreBar percentage={row?.percentage ?? null} band={row?.band ?? null} />}</td>
+                    <td>{unpublished ? "No published results" : <ScoreBar percentage={row?.percentage ?? null} band={row?.band ?? null} place={row?.band_place} />}</td>
                     <td className="nowrap">{unpublished || !row ? "—" : `${row.scored} of ${row.expected}`}</td>
-                    <td>{row?.band ? <span className={`chip ${row.band}`}>{BANDS[row.band]}</span> : "—"}</td>
+                    <td><BandMark band={row?.band} name={row?.band_name} place={row?.band_place} /></td>
                     <td>{formatDate(student.latest_exam_date || null)}</td>
                   </tr>
                 );

@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { api, Health, Session } from "./api";
-import { AccessPage } from "./pages/Access";
+import { AccessPage, UserAccessPage } from "./pages/Access";
 import { AuditPage } from "./pages/Audit";
-import { CoursesPage, InstitutePage, StudentsPage } from "./pages/Catalog";
+import { CoursePage, CoursesPage, InstitutePage, StudentsPage, BatchesPage } from "./pages/Catalog";
+import { BranchPage } from "./pages/Branch";
+import { StudentPage } from "./pages/Student";
 import { CardsPage } from "./pages/Cards";
 import { ImportPage } from "./pages/Import";
 import { ViewsPage } from "./pages/Views";
@@ -61,13 +63,18 @@ export function App() {
         <Route path="/" element={<OverviewPage canImport={can("marksheet.upload")} />} />
         <Route path="/import" element={can("marksheet.upload") ? <ImportPage /> : <Navigate to="/" replace />} />
         <Route path="/marksheets" element={can("marksheet.view") ? <MarksheetsPage canAdd={can("marksheet.upload")} /> : <Navigate to="/" replace />} />
-        <Route path="/marksheets/:marksheetId" element={can("marksheet.view") ? <MarksheetPage /> : <Navigate to="/" replace />} />
+        <Route path="/marksheets/:marksheetId" element={can("marksheet.view") ? <MarksheetPage canSetBands={can("marksheet.edit_draft") || can("marksheet.correct")} /> : <Navigate to="/" replace />} />
         <Route path="/cards" element={can("progress_card.view") ? <CardsPage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/views" element={can("dashboard.view") ? <ViewsPage /> : <Navigate to="/" replace />} />
-        <Route path="/students" element={can("student.lookup") ? <StudentsPage /> : <Navigate to="/" replace />} />
+        <Route path="/students" element={can("student.lookup") ? <StudentsPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/students/:studentId" element={can("student.lookup") ? <StudentPage /> : <Navigate to="/" replace />} />
         <Route path="/institute" element={can("student.lookup") ? <InstitutePage session={session} /> : <Navigate to="/" replace />} />
-        <Route path="/courses" element={can("student.lookup") ? <CoursesPage /> : <Navigate to="/" replace />} />
+        <Route path="/institute/branches/:branchId" element={can("student.lookup") ? <BranchPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/courses" element={can("student.lookup") ? <CoursesPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/courses/:courseId" element={can("student.lookup") ? <CoursePage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/batches" element={can("student.lookup") ? <BatchesPage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/access" element={can("user.manage") ? <AccessPage /> : <Navigate to="/" replace />} />
+        <Route path="/access/:userId" element={can("user.manage") ? <UserAccessPage /> : <Navigate to="/" replace />} />
         <Route path="/audit" element={can("audit.view") ? <AuditPage /> : <Navigate to="/" replace />} />
         <Route path="/settings" element={can("dashboard.view") ? <SettingsPage session={session} /> : <Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />

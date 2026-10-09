@@ -11,6 +11,7 @@ const LINKS = [
   { to: "/students", label: "Students", action: "student.lookup" },
   { to: "/institute", label: "Institute", action: "student.lookup" },
   { to: "/courses", label: "Courses", action: "student.lookup" },
+  { to: "/batches", label: "Batches", action: "student.lookup" },
   { to: "/access", label: "Users and Access", action: "user.manage" },
   { to: "/audit", label: "Audit", action: "audit.view" },
   { to: "/settings", label: "Settings", action: "dashboard.view" },

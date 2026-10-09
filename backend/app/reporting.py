@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from app.acl import allows
 from app.calculating import (
     aggregate,
-    band,
+    band_detail,
     dense_ranks,
     display_percentage,
     percentage,
@@ -41,12 +41,20 @@ async def hydrate(db, results: list[dict]) -> list[dict]:
         row["attempt_kind"] = result.get("attempt_kind") or "original"
         row["published"] = sheet.get("status") == "published" or result.get("active") is True
         row["policy_version"] = sheet.get("policy_version")
+        row["bands"] = sheet.get("bands")
         rows.append(row)
     return rows
 
 
+def row_policy(row: dict, policy: dict | None) -> dict | None:
+    if row.get("bands"):
+        return {"bands": row["bands"]}
+    return policy
+
+
 def present(row: dict, policy: dict, rank: int | None, batch_rank: int | None) -> dict:
     exact = percentage(row.get("score"), row.get("maximum")) if row.get("status") == "scored" else None
+    detail = band_detail(exact, row_policy(row, policy)) if row.get("status") == "scored" else {"band": None, "band_name": None, "band_place": None}
     return {
         "id": row["id"],
         "subject_id": row.get("subject_id"),
@@ -56,7 +64,9 @@ def present(row: dict, policy: dict, rank: int | None, batch_rank: int | None) -
         "score": row.get("score"),
         "maximum": row.get("maximum"),
         "percentage": display_percentage(exact),
-        "band": band(exact, policy) if row.get("status") == "scored" else None,
+        "band": detail["band"],
+        "band_name": detail["band_name"],
+        "band_place": detail["band_place"],
         "rank": rank,
         "batch_rank": batch_rank,
         "rank_label": "Cohort rank" if rank is not None else None,
@@ -147,6 +157,8 @@ def view_sections(level: str, rows: list[dict], enrollments: list[dict], names: 
                 "results": len(section_rows),
                 "percentage": summary["percentage"],
                 "band": summary["band"],
+                "band_name": summary.get("band_name"),
+                "band_place": summary.get("band_place"),
                 "coverage": f"{summary['scored']}/{summary['expected']}" if summary["expected"] else "0/0",
                 "missing": summary["missing"],
                 "absent": summary["absent"],
@@ -244,13 +256,15 @@ def _ranked_students(by_student: dict[str, list[dict]], policy: dict, limit: int
         if not student_id:
             continue
         summary = aggregate(student_rows, policy)
-        if summary["band"] != "safe":
+        if summary.get("band_place") != "high":
             continue
         items.append(
             {
                 "student_id": student_id,
                 "percentage": summary["percentage"],
                 "band": summary["band"],
+                "band_name": summary.get("band_name"),
+                "band_place": summary.get("band_place"),
                 "scored": summary["scored"],
                 "expected": summary["expected"],
             }
@@ -301,8 +315,8 @@ def attention(rows: list[dict], policy: dict) -> list[dict]:
         if row.get("status") != "scored":
             continue
         exact = percentage(row.get("score"), row.get("maximum"))
-        label = band(exact, policy)
-        if label != "danger":
+        detail = band_detail(exact, row_policy(row, policy))
+        if detail["band_place"] != "low":
             continue
         items.append(
             {
@@ -312,7 +326,9 @@ def attention(rows: list[dict], policy: dict) -> list[dict]:
                 "score": row.get("score"),
                 "maximum": row.get("maximum"),
                 "percentage": display_percentage(exact),
-                "band": label,
+                "band": detail["band"],
+                "band_name": detail["band_name"],
+                "band_place": detail["band_place"],
                 "marksheet_id": row.get("marksheet_id"),
             }
         )

@@ -2,6 +2,8 @@ import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { CONTEXT_FIELDS, Option, clearIncompatible, optionFits } from "../filters";
+import { Band, BandFields, bandsPayload, bandsReady, draftsFrom } from "../bands";
+import { Icon, StudentDialog } from "./Catalog";
 
 type Marksheet = {
   id: string;
@@ -35,7 +37,7 @@ type Result = {
   previous_score: number | null;
   source?: { row?: number };
 };
-type Detail = Marksheet & { attempt_kind?: string; available_students?: Person[]; results: Result[] };
+type Detail = Marksheet & { attempt_kind?: string; available_students?: Person[]; results: Result[]; bands?: Band[] | null };
 type Draft = { score: string; status: string };
 
 const FILTER_KEYS = ["q", "status", "exam_type", "branch_id", "course_id", "batch_id", "subject_id", "paper_id", "exam_date_from", "exam_date_to", "sort", "page"];
@@ -258,7 +260,11 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
           <p className="eyebrow">After import</p>
           <h1>Marksheets</h1>
         </div>
-        {canAdd ? <button type="button" onClick={() => { setError(""); setPanel("choose"); }}>Add marksheet</button> : null}
+        {canAdd ? (
+          <div className="icon-actions">
+            <button type="button" onClick={() => { setError(""); setPanel("choose"); }} aria-label="Add marksheet" title="Add marksheet"><Icon name="add" /></button>
+          </div>
+        ) : null}
       </div>
       <p className="page-lead">Enter marks here, or import a workbook. A draft stays off progress cards until it is published.</p>
       <div className="toolbar common">
@@ -291,14 +297,20 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
             ))}
           </select>
         </label>
-        <button type="button" className="quiet" onClick={() => setPanel("filters")}>More filters{advancedCount ? ` (${advancedCount})` : ""}</button>
+        <div className="icon-actions">
+          <button type="button" onClick={() => setPanel("filters")} aria-label={advancedCount ? `Filters, ${advancedCount} applied` : "Filters"} title="Filters"><Icon name="filter" /></button>
+        </div>
       </div>
       {notice ? <p className="ok" role="status">{notice}</p> : null}
       <p className="filter-row">
         {active.map(([key, value]) => (
           <button key={key} type="button" className="chip-button" onClick={() => choose(key, "")}>{LABELS[key]}: {labelFor(key, value)}</button>
         ))}
-        {active.length ? <button type="button" className="text-button" onClick={() => write({ sort: filters.sort })}>Clear filters</button> : null}
+        {active.length ? (
+          <div className="icon-actions">
+            <button type="button" onClick={() => write({ sort: filters.sort })} aria-label="Clear filters" title="Clear filters"><Icon name="clear" /></button>
+          </div>
+        ) : null}
         <span>{total} marksheet{total === 1 ? "" : "s"}</span>
       </p>
       {panel === "filters" ? (
@@ -493,7 +505,7 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
   );
 }
 
-export function MarksheetPage() {
+export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }) {
   const { marksheetId = "" } = useParams();
   const [params] = useSearchParams();
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -508,6 +520,8 @@ export function MarksheetPage() {
   const [rowScore, setRowScore] = useState("");
   const [panel, setPanel] = useState<"student" | "withdraw" | null>(null);
   const [tab, setTab] = useState<"results" | "details">("results");
+  const [bandEditor, setBandEditor] = useState(false);
+  const [defaults, setDefaults] = useState<Band[] | null>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const versionRef = useRef(0);
   const savingRef = useRef(false);
@@ -546,6 +560,12 @@ export function MarksheetPage() {
       active = false;
     };
   }, [marksheetId]);
+
+  useEffect(() => {
+    api<{ bands?: Band[] }>("/api/v1/policies/active")
+      .then((policy) => setDefaults(policy.bands || null))
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     Promise.all(
@@ -799,7 +819,11 @@ export function MarksheetPage() {
       <div className="title-row">
         <h1>{detail.title}</h1>
         <div className="actions">
-          {!editing && canAddStudent ? <button type="button" onClick={() => setPanel("student")}>Add a student</button> : null}
+          {!editing && canAddStudent ? (
+            <div className="icon-actions">
+              <button type="button" onClick={() => setPanel("student")} aria-label="Add a student" title="Add a student"><Icon name="add" /></button>
+            </div>
+          ) : null}
           {!editing && (detail.status === "draft" || detail.status === "published") ? <button type="button" className="text-button" onClick={startEdit}>Edit scores</button> : null}
           {editing ? <button type="button" onClick={saveEdits} disabled={saveState === "saving"}>{saveState === "saving" ? "Saving…" : "Save"}</button> : null}
           {editing ? <button type="button" className="text-button" onClick={cancelEdit}>Cancel</button> : null}
@@ -814,6 +838,7 @@ export function MarksheetPage() {
       {error ? <p className="error" role="alert">{error}</p> : null}
       {message ? <p className="ok" role="status">{message}</p> : null}
       {tab === "details" ? (
+      <>
       <dl className="facts">
         {facts.map(([label, value]) => (
           <div key={label}>
@@ -837,6 +862,39 @@ export function MarksheetPage() {
           </dd>
         </div>
       </dl>
+      <div className="title-row">
+        <h2>Bands</h2>
+        {canSetBands ? (
+          <div className="icon-actions">
+            <button type="button" onClick={() => setBandEditor(true)} aria-label="Edit bands" title="Edit"><Icon name="edit" /></button>
+          </div>
+        ) : null}
+      </div>
+      {detail.bands?.length ? (
+        <dl className="facts">
+          {detail.bands.map((item) => (
+            <div key={item.key || item.name}>
+              <dt>{item.name}</dt>
+              <dd>{item.phrase}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <>
+          <p className="meta">This marksheet uses the bands in Settings.</p>
+          {defaults?.length ? (
+            <dl className="facts">
+              {defaults.map((item) => (
+                <div key={item.key || item.name}>
+                  <dt>{item.name}</dt>
+                  <dd>{item.phrase}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : null}
+        </>
+      )}
+      </>
       ) : (
       <>
       <div className="stat-line">
@@ -935,7 +993,11 @@ export function MarksheetPage() {
             {error ? <p className="error" role="alert">{error}</p> : null}
             <div className="dialog-actions">
               <button type="button" className="text-button" onClick={() => setPanel(null)}>Cancel</button>
-              {(detail.available_students || []).length ? <button type="submit">Add to marksheet</button> : null}
+              {(detail.available_students || []).length ? (
+                <div className="icon-actions">
+                  <button type="submit" aria-label="Add to marksheet" title="Add to marksheet"><Icon name="add" /></button>
+                </div>
+              ) : null}
             </div>
           </form>
         </Dialog>
@@ -952,6 +1014,66 @@ export function MarksheetPage() {
           </form>
         </Dialog>
       ) : null}
+      {bandEditor ? (
+        <SheetBands
+          bands={detail.bands}
+          fallback={defaults}
+          onClose={() => setBandEditor(false)}
+          onSaved={async (messageText) => {
+            setBandEditor(false);
+            setMessage(messageText);
+            await reload();
+          }}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function SheetBands({ bands, fallback, onClose, onSaved }: { bands?: Band[] | null; fallback: Band[] | null; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
+  const { marksheetId = "" } = useParams();
+  const [rows, setRows] = useState(draftsFrom(bands?.length ? bands : fallback));
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const ready = bandsReady(rows);
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api(`/api/v1/marksheets/${marksheetId}`, { method: "PATCH", body: JSON.stringify({ bands: bandsPayload(rows) }) });
+      await onSaved("These bands apply to this marksheet.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save the bands.");
+      setSaving(false);
+    }
+  }
+
+  async function useSettings() {
+    setSaving(true);
+    setError("");
+    try {
+      await api(`/api/v1/marksheets/${marksheetId}`, { method: "PATCH", body: JSON.stringify({ bands: null }) });
+      await onSaved("This marksheet uses the bands in Settings.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save the bands.");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <StudentDialog title="Bands for this marksheet" onClose={onClose}>
+      <form className="form-grid" onSubmit={save}>
+        <p className="meta span-2">Scores on this marksheet use these bands. Leave them on Settings when this sheet should follow the institute bands. Totals that mix marksheets still use Settings.</p>
+        <BandFields rows={rows} onChange={setRows} />
+        {error ? <p className="error span-2" role="alert">{error}</p> : null}
+        <div className="dialog-actions span-2">
+          <button type="button" className="quiet" onClick={onClose}>Cancel</button>
+          <button type="button" className="quiet" disabled={saving || !bands?.length} onClick={() => void useSettings()}>Use settings</button>
+          <button type="submit" disabled={saving || !ready}>Save</button>
+        </div>
+      </form>
+    </StudentDialog>
   );
 }

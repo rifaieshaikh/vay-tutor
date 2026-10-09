@@ -35,6 +35,14 @@ from app.security import (
     verify_password,
     verify_totp,
 )
+from app.students import (
+    card_visible,
+    directory_facts,
+    enrollment_context,
+    enrollment_resource,
+    enrollment_visible,
+    identity_editable,
+)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -87,6 +95,23 @@ class GrantBody(BaseModel):
 class RoleBody(BaseModel):
     name: str = Field(min_length=1)
     actions: list[str]
+
+
+class RolePatch(BaseModel):
+    actions: list[str]
+
+
+class BandBody(BaseModel):
+    name: str = ""
+    through: float | None = None
+
+
+class PolicyBody(BaseModel):
+    bands: list[BandBody] | None = None
+    danger_below: float | None = None
+    safe_above: float | None = None
+    passing_threshold: float | None = None
+    self_publication: bool | None = None
 
 
 class ScopeBody(BaseModel):
@@ -220,6 +245,18 @@ def public_user(user: dict) -> dict:
 async def public_institute(request: Request, institute_id: str) -> dict:
     institute = await db(request).institutes.find_one({"_id": institute_id})
     return {"id": institute["_id"], "name": institute["name"], "code": institute["code"]}
+
+
+def _checked_actions(user: dict, actions: list[str]) -> list[str]:
+    if not actions:
+        raise AppError(422, "role.empty", "Choose at least one permission.")
+    unknown = [action for action in actions if action not in ACTIONS]
+    if unknown:
+        raise AppError(422, "role.unknown_action", "That role includes an unknown action.")
+    held = contained_actions(user["grants"], institute_resource(user))
+    if any(action not in held for action in actions):
+        raise AppError(403, "auth.forbidden", "You cannot grant an action you do not have.")
+    return list(dict.fromkeys(actions))
 
 
 def _role_actions(role: dict) -> list[str]:
@@ -511,18 +548,13 @@ async def list_roles(request: Request) -> dict:
 async def create_role(request: Request, body: RoleBody) -> dict:
     user = await current_user(request)
     require(user, "grant.manage", institute_resource(user))
-    unknown = [action for action in body.actions if action not in ACTIONS]
-    if unknown:
-        raise AppError(422, "role.unknown_action", "That role includes an unknown action.")
-    held = contained_actions(user["grants"], institute_resource(user))
-    if any(action not in held for action in body.actions):
-        raise AppError(403, "auth.forbidden", "You cannot grant an action you do not have.")
+    actions = _checked_actions(user, body.actions)
     document = {
         "_id": new_id(),
         "institute_id": user["institute_id"],
         "name": body.name.strip(),
         "name_key": name_key(body.name),
-        "actions": body.actions,
+        "actions": actions,
     }
     try:
         await db(request).roles.insert_one(document)
@@ -530,6 +562,26 @@ async def create_role(request: Request, body: RoleBody) -> dict:
         raise AppError(409, "role.exists", "A role with that name already exists.") from None
     await write_audit(request, user, "role.create", None, {"name": document["name"]}, institute_resource(user))
     return {"id": document["_id"], "name": document["name"], "actions": document["actions"]}
+
+
+@router.patch("/roles/{role_id}")
+async def update_role(request: Request, role_id: str, body: RolePatch) -> dict:
+    user = await current_user(request)
+    require(user, "grant.manage", institute_resource(user))
+    actions = _checked_actions(user, body.actions)
+    role = await db(request).roles.find_one({"_id": role_id, "institute_id": user["institute_id"]})
+    if role is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    await db(request).roles.update_one({"_id": role_id}, {"$set": {"actions": actions}})
+    await write_audit(
+        request,
+        user,
+        "role.update",
+        {"actions": role.get("actions") or []},
+        {"actions": actions},
+        institute_resource(user),
+    )
+    return {"id": role["_id"], "name": role["name"], "actions": actions}
 
 
 @router.get("/users")
@@ -751,7 +803,105 @@ async def active_policy(request: Request) -> dict:
     if policy is None:
         raise AppError(404, "not_found", "That record was not found.")
     policy["id"] = policy.pop("_id")
+    from app.calculating import public_bands
+
+    policy["bands"] = public_bands(policy.get("bands"))
     return policy
+
+
+def _percent(value: float, label: str) -> int | float:
+    number = float(value)
+    if number != number or number < 0 or number > 100:
+        raise AppError(422, "policy.range", f"{label} must be from 0 through 100.")
+    hundredths = round(number, 2)
+    whole = round(hundredths)
+    if abs(hundredths - whole) < 1e-9:
+        return int(whole)
+    return hundredths
+
+
+@router.post("/policies")
+async def create_policy(request: Request, body: PolicyBody) -> dict:
+    user = await current_user(request)
+    require(user, "grant.manage", institute_resource(user))
+    current = await db(request).policies.find_one(
+        {"institute_id": user["institute_id"]}, sort=[("version", -1)]
+    )
+    if current is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    from app.calculating import prepare_bands, public_bands
+
+    if body.bands:
+        try:
+            chosen = prepare_bands([item.model_dump() for item in body.bands])
+        except ValueError as error:
+            raise AppError(422, "policy.bands", str(error)) from None
+    elif body.danger_below is not None and body.safe_above is not None:
+        try:
+            chosen = prepare_bands([
+                {"name": "Danger", "through": body.danger_below},
+                {"name": "Fifty-fifty", "through": body.safe_above},
+                {"name": "Safe"},
+            ])
+        except ValueError as error:
+            raise AppError(422, "policy.bands", str(error)) from None
+    else:
+        raise AppError(422, "policy.bands", "Choose the bands.")
+    threshold = current.get("passing_threshold")
+    if "passing_threshold" in body.model_fields_set:
+        if body.passing_threshold is None:
+            threshold = None
+        else:
+            threshold = _percent(body.passing_threshold, "The passing threshold")
+    publication = bool(current.get("self_publication", False))
+    if body.self_publication is not None:
+        publication = body.self_publication
+    current_bands = public_bands(current.get("bands"))
+    chosen_bands = public_bands(chosen)
+    same = (
+        [(item["name"], item.get("through")) for item in current_bands]
+        == [(item["name"], item.get("through")) for item in chosen_bands]
+        and current.get("passing_threshold") == threshold
+        and publication == bool(current.get("self_publication", False))
+    )
+    if same:
+        raise AppError(422, "policy.unchanged", "Those rules are already in use.")
+    version = int(current.get("version") or 1) + 1
+    document = {
+        "_id": new_id(),
+        "institute_id": user["institute_id"],
+        "version": version,
+        "bands": chosen,
+        "ranking": current.get("ranking") or "dense",
+        "aggregate": current.get("aggregate") or "maximum-marks-weighted",
+        "attempt": current.get("attempt") or "latest-by-date",
+        "passing_threshold": threshold,
+        "self_publication": publication,
+    }
+    try:
+        await db(request).policies.insert_one(document)
+    except DuplicateKeyError:
+        raise AppError(409, "policy.conflict", "Someone else saved a policy. Reload and try again.") from None
+    before = {
+        "version": current.get("version"),
+        "bands": [{"name": item["name"], "through": item.get("through")} for item in current_bands],
+        "passing_threshold": current.get("passing_threshold"),
+        "self_publication": bool(current.get("self_publication", False)),
+    }
+    after = {
+        "version": version,
+        "bands": [{"name": item["name"], "through": item.get("through")} for item in chosen_bands],
+        "passing_threshold": threshold,
+        "self_publication": publication,
+    }
+    await write_audit(request, user, "policy.update", before, after, institute_resource(user))
+    earlier = await db(request).marksheets.count_documents(
+        {"institute_id": user["institute_id"], "status": "published", "policy_version": {"$ne": version}}
+    )
+    document["id"] = document.pop("_id")
+    document["bands"] = chosen_bands
+    document["published_on_earlier_version"] = earlier
+    return document
 
 
 @router.get("/context/options")
@@ -871,7 +1021,7 @@ async def view(
             enrollment_query[field] = filters[field]
     enrollment_rows = await _every(db(request).enrollments.find(enrollment_query))
     student_ids = {item["student_id"] for item in enrollment_rows}
-    from app.calculating import aggregate
+    from app.calculating import aggregate, public_bands
     from app.reporting import (
         attention,
         authorized,
@@ -955,6 +1105,7 @@ async def view(
         "membership_label": "students listed in imported marklists",
         "policy_version": policy.get("version", 1),
         "policy_label": policy.get("aggregate") or "maximum-marks-weighted",
+        "bands": public_bands(policy.get("bands")),
         "pending_recalculation": pending,
         "sample_size": summary["scored"],
         "performance": summary,
@@ -1021,6 +1172,64 @@ def _and(clause: dict) -> dict:
     return clause
 
 
+@router.get("/students/options")
+async def student_options(request: Request, manage: bool = False) -> dict:
+    user = await current_user(request)
+    grants = user["grants"]
+    known = {"student.lookup", "student.manage"}
+    if not any(known.intersection(grant.get("actions") or []) for grant in grants):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    database = db(request)
+    institute_id = user["institute_id"]
+    branches = await database.branches.find({"institute_id": institute_id}).to_list(length=200)
+    courses = await database.courses.find({"institute_id": institute_id}).to_list(length=200)
+    batches = await database.batches.find({"institute_id": institute_id}).to_list(length=200)
+    offerings = await database.offerings.find({"institute_id": institute_id}).to_list(length=200)
+    action = "student.manage" if manage else "student.lookup"
+
+    def covered(resource: dict) -> bool:
+        return allows(grants, action, resource, resource_fields_only=not manage)
+
+    visible_branches = [
+        {"id": row["_id"], "label": row.get("name") or ""}
+        for row in branches
+        if covered({"institute_id": institute_id, "branch_id": row["_id"]})
+    ]
+    course_branches: dict[str, list[str]] = {}
+    for offering in offerings:
+        resource = {
+            "institute_id": institute_id,
+            "branch_id": offering.get("branch_id"),
+            "course_id": offering.get("course_id"),
+        }
+        if covered(resource) and offering.get("course_id") and offering.get("branch_id"):
+            course_branches.setdefault(offering["course_id"], []).append(offering["branch_id"])
+    visible_courses = [
+        {"id": row["_id"], "label": row.get("name") or "", "parents": {"branch_ids": course_branches[row["_id"]]}}
+        for row in courses
+        if row["_id"] in course_branches
+    ]
+    visible_batches = []
+    for row in batches:
+        resource = {
+            "institute_id": institute_id,
+            "branch_id": row.get("branch_id"),
+            "course_id": row.get("course_id"),
+            "batch_id": row["_id"],
+        }
+        if not covered(resource):
+            continue
+        visible_batches.append({
+            "id": row["_id"],
+            "label": row.get("name") or "",
+            "parents": {"branch_id": row.get("branch_id"), "course_id": row.get("course_id")},
+        })
+    visible_branches.sort(key=lambda item: item["label"].casefold())
+    visible_courses.sort(key=lambda item: item["label"].casefold())
+    visible_batches.sort(key=lambda item: item["label"].casefold())
+    return {"branches": visible_branches, "courses": visible_courses, "batches": visible_batches}
+
+
 @router.get("/students")
 async def list_students(
     request: Request,
@@ -1035,6 +1244,7 @@ async def list_students(
     exam_date_to: str = "",
     attempt: str = "",
     sort: str = "name",
+    direction: str = "asc",
     page: int = 0,
     page_size: int = 8,
 ) -> dict:
@@ -1056,7 +1266,17 @@ async def list_students(
         if value:
             enrollment_query[field] = value
     enrollments = await db(request).enrollments.find(enrollment_query).to_list(length=1000)
-    student_ids = list({item["student_id"] for item in enrollments})
+    facts = await directory_facts(db(request), user["institute_id"])
+    enrollments = [
+        item for item in enrollments
+        if enrollment_visible(
+            user["grants"], item, facts["subject_by_id"], facts["paper_subject"], facts["rosters"],
+        )
+    ]
+    by_student: dict[str, list] = {}
+    for item in enrollments:
+        by_student.setdefault(item["student_id"], []).append(item)
+    student_ids = list(by_student)
     filters = _report_filters(
         branch_id, course_id, batch_id, subject_id, paper_id, exam_type, exam_date_from, exam_date_to, attempt,
     )
@@ -1093,6 +1313,12 @@ async def list_students(
                 continue
             grouped.setdefault(row.get("student_id"), []).append(row)
     manage = allows(user["grants"], "student.manage", institute_resource(user))
+    owned: dict[str, list] = {}
+    if student_ids:
+        for item in await db(request).enrollments.find(
+            {"institute_id": user["institute_id"], "student_id": {"$in": student_ids}}
+        ).to_list(length=5000):
+            owned.setdefault(item["student_id"], []).append(item)
     items = []
     included_rows: list = []
     for student in students:
@@ -1115,6 +1341,11 @@ async def list_students(
             },
             "latest_exam_date": latest or None,
             "empty_reason": None if rows else "unpublished",
+            "enrollments": enrollment_context(by_student.get(student["_id"], []), facts),
+            "actions": {
+                "edit": identity_editable(user["grants"], owned.get(student["_id"], [])),
+                "card": card_visible(user["grants"], by_student.get(student["_id"], [])),
+            },
         }
         if manage:
             item["name_key"] = student.get("name_key")
@@ -1135,7 +1366,7 @@ async def list_students(
     current = page or 1
     size = min(max(page_size, 1), 50)
     if page:
-        items.sort(key=lambda item: _student_sort_key(item, sort))
+        items.sort(key=lambda item: _student_sort_key(item, sort), reverse=direction == "desc")
         offset = (current - 1) * size
         items = items[offset:offset + size]
     pages = max(1, (total + size - 1) // size) if total else 1
@@ -1159,15 +1390,33 @@ def _period(exam_date_from: str | None, exam_date_to: str | None) -> tuple[str, 
     return start, end
 
 
+def _blank_last(value: str) -> tuple:
+    text = str(value or "").casefold()
+    return (text == "", text)
+
+
 def _student_sort_key(item: dict, sort: str):
     name = str(item.get("display_name") or "").casefold()
     code = str(item.get("student_code") or "")
+    enrollment = (item.get("enrollments") or [{}])[0] or {}
     if sort == "percentage":
         percentage = (item.get("performance") or {}).get("percentage")
         return (percentage is None, -(percentage if percentage is not None else 0), name, code)
     if sort == "exam_date":
         latest = str(item.get("latest_exam_date") or "")
         return (latest == "", "".join(chr(255 - ord(char)) for char in latest), name, code)
+    if sort == "code":
+        return (code, name)
+    fields = {
+        "branch": enrollment.get("branch_name"),
+        "course": enrollment.get("course_name"),
+        "batch": enrollment.get("batch_name"),
+        "started": enrollment.get("started_on"),
+        "ended": enrollment.get("ended_on"),
+        "status": enrollment.get("status"),
+    }
+    if sort in fields:
+        return (*_blank_last(fields[sort]), name, code)
     return (name, code)
 
 
@@ -1280,8 +1529,12 @@ async def student_card(
             visible = True
     if not visible:
         raise AppError(404, "not_found", "That record was not found.")
+    enrollments = [
+        item for item in enrollments
+        if allows(user["grants"], "progress_card.view", enrollment_resource(item), resource_fields_only=True)
+    ]
     results = await db(request).results.find({"student_id": student_id, "active": {"$ne": False}}).to_list(length=500)
-    from app.calculating import aggregate
+    from app.calculating import aggregate, public_bands
     from app.reporting import comparisons, hydrate, matches, policy_for, present, ranks_for
 
     policy = await policy_for(db(request), user["institute_id"])
@@ -1361,11 +1614,13 @@ async def student_card(
     return {
         "student_code": student["student_code"],
         "display_name": student["display_name"],
+        "photo_id": student.get("photo_file_id") or None,
         "partial": hidden,
         "coverage_note": "Authorized subjects only." if hidden else None,
         "empty_reason": empty_reason,
         "membership_label": "students listed in imported marklists",
         "policy_version": policy.get("version", 1),
+        "bands": public_bands(policy.get("bands")),
         "performance": summary,
         "subjects": subjects,
         "retests": comparisons(selected, outside),
@@ -1397,6 +1652,8 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
     )
     if sheet is None:
         raise AppError(404, "not_found", "That record was not found.")
+    from app.calculating import public_bands
+
     resource = _sheet_resource(sheet)
     if not allows(user["grants"], "marksheet.view", resource):
         raise AppError(404, "not_found", "That record was not found.")
@@ -1443,6 +1700,7 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
         "file_id": sheet.get("file_id"),
         "uploader_id": sheet.get("uploader_id"),
         "reviewer_id": sheet.get("reviewer_id"),
+        "bands": public_bands(sheet["bands"]) if sheet.get("bands") else None,
         "available_students": available,
         "results": [
             {
@@ -1586,6 +1844,8 @@ async def download_file(request: Request, file_id: str):
         {"_id": file_id, "institute_id": user["institute_id"]}
     )
     if file_doc is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    if file_doc.get("kind") == "student_photo":
         raise AppError(404, "not_found", "That record was not found.")
     if file_doc.get("kind") == "source_xlsx":
         if not any("marksheet.view" in grant["actions"] for grant in user["grants"]):

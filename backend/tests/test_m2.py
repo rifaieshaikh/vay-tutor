@@ -385,6 +385,24 @@ def test_audit_is_append_only(client):
     assert client.get("/api/v1/audit").status_code == 401
 
 
+def test_custom_role_permissions_can_be_changed_for_later_grants(client):
+    bootstrap(client)
+    created = client.post("/api/v1/roles", json={"name": "Card reader", "actions": ["progress_card.view"]})
+    assert created.status_code == 200, created.text
+    empty = client.post("/api/v1/roles", json={"name": "Empty", "actions": []})
+    assert empty.status_code == 422
+    assert empty.json()["error"]["code"] == "role.empty"
+    role_id = created.json()["id"]
+    updated = client.patch(f"/api/v1/roles/{role_id}", json={"actions": ["dashboard.view", "progress_card.view"]})
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["actions"] == ["dashboard.view", "progress_card.view"]
+    listed = client.get("/api/v1/roles").json()["items"]
+    stored = next(item for item in listed if item["id"] == role_id)
+    assert stored["actions"] == ["dashboard.view", "progress_card.view"]
+    unknown = client.patch(f"/api/v1/roles/{role_id}", json={"actions": ["not.real"]})
+    assert unknown.status_code == 422
+
+
 def test_incompatible_client_is_rejected(client):
     response = client.get("/api/v1/auth/session", headers={"X-Client-Version": "2.0.0"})
     assert response.status_code == 426
