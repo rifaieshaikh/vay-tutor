@@ -9,8 +9,9 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict
 from pymongo.errors import DuplicateKeyError
 
+from app.acl import allows
 from app.errors import AppError
-from app.http import current_user, db
+from app.http import current_user, db, institute_resource, new_id, require, write_audit
 from app.importing.parse import session_key_for_label
 from app.security import name_key
 
@@ -298,6 +299,7 @@ async def branch_profile(request: Request, branch_id: str) -> dict:
             "started_on": batch.get("started_on") or None,
             "ended_on": batch.get("ended_on") or None,
             "timings": batch.get("timings") or None,
+            "session_key": batch.get("session_key") or None,
             "archived": bool(batch.get("archived")),
         })
     course_rows = []
@@ -448,3 +450,273 @@ async def rename_subject_item(request: Request, subject_id: str, item_id: str, b
     await database.subjects.update_one({"_id": subject_id}, {"$set": {"units": units}})
     await _audit(request, user, {"name": text}, item_id, found.get("kind") or "chapter")
     return {"id": item_id}
+
+
+class BatchAssignmentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    teacher_id: str
+    subject_id: str
+    paper_id: str = ""
+    started_on: str = ""
+
+
+class EndAssignmentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ended_on: str = ""
+
+
+def _page(rows: list, page: int, page_size: int) -> tuple[list, int, int, int]:
+    size = min(max(page_size, 1), 50)
+    number = max(page, 1)
+    total = len(rows)
+    start = (number - 1) * size
+    pages = max(1, (total + size - 1) // size)
+    return rows[start : start + size], total, number, pages
+
+
+async def _open_batch(request: Request, user: dict, batch_id: str) -> dict:
+    batch = await db(request).batches.find_one({"_id": batch_id, "institute_id": user["institute_id"]})
+    if batch is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    resource = {
+        "institute_id": user["institute_id"],
+        "branch_id": batch.get("branch_id"),
+        "course_id": batch.get("course_id"),
+        "batch_id": batch["_id"],
+    }
+    if not allows(user["grants"], "student.lookup", resource, True):
+        raise AppError(404, "not_found", "That record was not found.")
+    return batch
+
+
+@router.get("/batches/{batch_id}")
+async def batch_workspace(
+    request: Request,
+    batch_id: str,
+    student_page: int = 1,
+    assessment_page: int = 1,
+    page_size: int = 8,
+) -> dict:
+    user = await current_user(request)
+    batch = await _open_batch(request, user, batch_id)
+    database = db(request)
+    from app.importing.routes import marksheet_visible
+    from app.students import directory_facts, enrollment_visible
+
+    facts = await directory_facts(database, user["institute_id"])
+    enrollments = await database.enrollments.find(
+        {"institute_id": user["institute_id"], "batch_id": batch["_id"]}
+    ).to_list(length=2000)
+    visible = [
+        row for row in enrollments
+        if enrollment_visible(user["grants"], row, facts["subject_by_id"], facts["paper_subject"], facts["rosters"])
+    ]
+    student_ids = [row["student_id"] for row in visible if row.get("student_id")]
+    people = {}
+    if student_ids:
+        for student in await database.students.find({"_id": {"$in": student_ids}}).to_list(length=len(student_ids)):
+            people[student["_id"]] = student
+    student_rows = []
+    for row in visible:
+        person = people.get(row.get("student_id")) or {}
+        student_rows.append({
+            "id": row.get("student_id"),
+            "enrollment_id": row.get("_id"),
+            "student_code": person.get("student_code") or "",
+            "display_name": person.get("display_name") or "Not recorded",
+            "started_on": row.get("started_on") or None,
+            "ended_on": row.get("ended_on") or None,
+        })
+    student_rows.sort(key=lambda item: item["display_name"].casefold())
+    student_items, student_total, student_number, student_pages = _page(student_rows, student_page, page_size)
+
+    subjects = await database.subjects.find(
+        {"institute_id": user["institute_id"], "course_id": batch.get("course_id")}
+    ).to_list(length=200)
+    subject_ids = [item["_id"] for item in subjects]
+    papers = await database.papers.find(
+        {"institute_id": user["institute_id"], "subject_id": {"$in": subject_ids}}
+    ).to_list(length=400) if subject_ids else []
+    papers_for: dict[str, list] = {}
+    for paper in papers:
+        papers_for.setdefault(paper.get("subject_id"), []).append({
+            "id": paper["_id"],
+            "name": paper.get("name") or f"Paper {paper.get('number') or ''}".strip(),
+        })
+    curriculum = []
+    for subject in sorted(subjects, key=lambda item: (item.get("name") or "").casefold()):
+        curriculum.append({
+            "id": subject["_id"],
+            "name": subject.get("name") or "",
+            "papers": sorted(papers_for.get(subject["_id"], []), key=lambda item: item["name"].casefold()),
+        })
+
+    subject_name = {item["_id"]: item.get("name") or "" for item in subjects}
+    paper_name = {item["_id"]: item.get("name") or "" for item in papers}
+    teachers = await database.teachers.find(
+        {"institute_id": user["institute_id"], "assignments.batch_id": batch["_id"]}
+    ).to_list(length=500)
+    assignments = []
+    for teacher in teachers:
+        for item in teacher.get("assignments") or []:
+            if item.get("batch_id") != batch["_id"]:
+                continue
+            assignments.append({
+                "id": item.get("id"),
+                "teacher_id": teacher["_id"],
+                "teacher_name": teacher.get("name") or "",
+                "subject_id": item.get("subject_id") or "",
+                "subject_name": subject_name.get(item.get("subject_id"), ""),
+                "paper_id": item.get("paper_id") or "",
+                "paper_name": paper_name.get(item.get("paper_id"), ""),
+                "started_on": item.get("started_on") or None,
+                "ended_on": item.get("ended_on") or None,
+                "status": item.get("status") or "current",
+            })
+    assignments.sort(key=lambda item: (
+        item["status"] != "current",
+        item["teacher_name"].casefold(),
+        item["subject_name"].casefold(),
+    ))
+
+    sheets = await database.marksheets.find(
+        {"institute_id": user["institute_id"], "batch_ids": batch["_id"]}
+    ).to_list(length=500)
+    assessment_rows = []
+    for sheet in sheets:
+        if not marksheet_visible(user, sheet):
+            continue
+        assessment_rows.append({
+            "id": sheet["_id"],
+            "title": sheet.get("title") or sheet.get("status") or "Marksheet",
+            "status": sheet.get("status") or "",
+            "subject_id": sheet.get("subject_id") or "",
+            "exam_date": sheet.get("exam_date") or None,
+        })
+    assessment_rows.sort(key=lambda item: str(item["title"]).casefold())
+    assessment_items, assessment_total, assessment_number, assessment_pages = _page(
+        assessment_rows, assessment_page, page_size
+    )
+    return {
+        "id": batch["_id"],
+        "name": batch.get("name") or "",
+        "branch_id": batch.get("branch_id") or "",
+        "branch_name": facts["branch_name"].get(batch.get("branch_id"), ""),
+        "course_id": batch.get("course_id") or "",
+        "course_name": facts["course_name"].get(batch.get("course_id"), ""),
+        "session_key": batch.get("session_key") or "",
+        "started_on": batch.get("started_on") or None,
+        "ended_on": batch.get("ended_on") or None,
+        "timings": batch.get("timings") or None,
+        "closed": bool(batch.get("ended_on")),
+        "students": {"items": student_items, "total": student_total, "page": student_number, "pages": student_pages},
+        "curriculum": curriculum,
+        "assignments": assignments,
+        "assessments": {
+            "items": assessment_items,
+            "total": assessment_total,
+            "page": assessment_number,
+            "pages": assessment_pages,
+        },
+    }
+
+
+@router.post("/batches/{batch_id}/assignments")
+async def assign_batch_teacher(request: Request, batch_id: str, body: BatchAssignmentBody) -> dict:
+    user = await current_user(request)
+    require(user, "user.manage", institute_resource(user))
+    batch = await _open_batch(request, user, batch_id)
+    if batch.get("ended_on"):
+        raise AppError(422, "batch.closed", "This batch is closed.")
+    database = db(request)
+    teacher = await database.teachers.find_one({"_id": body.teacher_id, "institute_id": user["institute_id"]})
+    if teacher is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    subject = await database.subjects.find_one({
+        "_id": body.subject_id,
+        "institute_id": user["institute_id"],
+        "course_id": batch.get("course_id"),
+    })
+    if subject is None:
+        raise AppError(422, "teaching.subject", "Choose a subject in this course.")
+    paper_id = body.paper_id.strip()
+    if paper_id:
+        paper = await database.papers.find_one({
+            "_id": paper_id,
+            "institute_id": user["institute_id"],
+            "subject_id": subject["_id"],
+        })
+        if paper is None:
+            raise AppError(422, "teaching.part", "Choose a paper on that subject.")
+    started = calendar_date(body.started_on, "started_on")
+    for item in teacher.get("assignments") or []:
+        if item.get("status") == "ended":
+            continue
+        same = (
+            item.get("batch_id") == batch["_id"]
+            and item.get("subject_id") == subject["_id"]
+            and (item.get("paper_id") or "") == paper_id
+        )
+        if same:
+            raise AppError(409, "teaching.exists", "This teacher already has that current assignment in this batch.")
+    assignment = {
+        "id": new_id(),
+        "batch_id": batch["_id"],
+        "branch_id": batch.get("branch_id") or "",
+        "course_id": batch.get("course_id") or "",
+        "subject_id": subject["_id"],
+        "paper_id": paper_id,
+        "started_on": started,
+        "ended_on": "",
+        "status": "current",
+    }
+    await database.teachers.update_one({"_id": teacher["_id"]}, {"$push": {"assignments": assignment}})
+    await write_audit(
+        request,
+        user,
+        "teacher.assign",
+        None,
+        {"teacher_id": teacher["_id"], "subject_id": subject["_id"], "batch_id": batch["_id"]},
+        {"institute_id": user["institute_id"], "batch_id": batch["_id"], "teacher_id": teacher["_id"]},
+    )
+    return {"id": assignment["id"]}
+
+
+@router.post("/batches/{batch_id}/assignments/{assignment_id}/end")
+async def end_batch_assignment(
+    request: Request, batch_id: str, assignment_id: str, body: EndAssignmentBody
+) -> dict:
+    user = await current_user(request)
+    require(user, "user.manage", institute_resource(user))
+    batch = await _open_batch(request, user, batch_id)
+    database = db(request)
+    teacher = await database.teachers.find_one({
+        "institute_id": user["institute_id"],
+        "assignments": {"$elemMatch": {"id": assignment_id, "batch_id": batch["_id"]}},
+    })
+    if teacher is None:
+        raise AppError(404, "not_found", "That record was not found.")
+    ended = calendar_date(body.ended_on, "ended_on") or _now().date().isoformat()
+    kept = []
+    found = None
+    for item in teacher.get("assignments") or []:
+        if item.get("id") == assignment_id and item.get("batch_id") == batch["_id"]:
+            if item.get("status") == "ended":
+                raise AppError(409, "teaching.ended", "That assignment has already ended.")
+            started = item.get("started_on") or ""
+            if started and ended < started:
+                raise AppError(422, "catalog.date", "The until date is before the from date.", field="ended_on")
+            found = {**item, "ended_on": ended, "status": "ended"}
+            kept.append(found)
+        else:
+            kept.append(item)
+    await database.teachers.update_one({"_id": teacher["_id"]}, {"$set": {"assignments": kept}})
+    await write_audit(
+        request,
+        user,
+        "teacher.assign_end",
+        {"status": "current"},
+        {"status": "ended", "ended_on": ended, "assignment_id": assignment_id},
+        {"institute_id": user["institute_id"], "batch_id": batch["_id"], "teacher_id": teacher["_id"]},
+    )
+    return {"id": assignment_id, "status": "ended", "ended_on": ended}

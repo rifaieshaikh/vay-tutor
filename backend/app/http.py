@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from bson import ObjectId
 from fastapi import APIRouter, Request
@@ -773,14 +774,19 @@ def _assignment_grants(teacher: dict) -> list[dict]:
     rows = []
     for item in teacher.get("assignments") or []:
         rows.append({
-            "_id": f"{item.get('course_id')}:{item.get('subject_id')}:{item.get('paper_id') or ''}",
+            "_id": ":".join([
+                item.get("batch_id") or "",
+                item.get("course_id") or "",
+                item.get("subject_id") or "",
+                item.get("paper_id") or "",
+            ]),
             "role": "teacher",
             "actions": [],
             "scope": {
                 "institute_id": teacher["institute_id"],
-                "branch_id": None,
+                "branch_id": item.get("branch_id"),
                 "course_id": item.get("course_id"),
-                "batch_id": None,
+                "batch_id": item.get("batch_id"),
                 "subject_id": item.get("subject_id"),
                 "paper_id": item.get("paper_id"),
             },
@@ -1310,6 +1316,121 @@ async def create_policy(request: Request, body: PolicyBody) -> dict:
     return document
 
 
+_CONTEXT_ACTIONS = (
+    "dashboard.view",
+    "marksheet.view",
+    "marksheet.upload",
+    "student.lookup",
+    "progress_card.view",
+    "catalog.correct",
+    "catalog.manage",
+)
+_CONTEXT_FIELDS = {
+    "branch": {"institute_id": "institute_id", "branch_id": "_id"},
+    "course": {"institute_id": "institute_id", "course_id": "_id"},
+    "subject": {"institute_id": "institute_id", "course_id": "course_id", "subject_id": "_id"},
+    "batch": {
+        "institute_id": "institute_id",
+        "branch_id": "branch_id",
+        "course_id": "course_id",
+        "batch_id": "_id",
+    },
+    "paper": {"institute_id": "institute_id", "subject_id": "subject_id", "paper_id": "_id"},
+}
+
+
+def _option_resource(dimension: str, row: dict, institute_id: str, subject_course: dict) -> dict:
+    resource = {"institute_id": institute_id}
+    if dimension == "branch":
+        resource["branch_id"] = row["_id"]
+    elif dimension == "course":
+        resource["course_id"] = row["_id"]
+    elif dimension == "batch":
+        resource["branch_id"] = row.get("branch_id")
+        resource["course_id"] = row.get("course_id")
+        resource["batch_id"] = row["_id"]
+    elif dimension == "subject":
+        resource["course_id"] = row.get("course_id")
+        resource["subject_id"] = row["_id"]
+    elif dimension == "paper":
+        resource["subject_id"] = row.get("subject_id")
+        resource["course_id"] = subject_course.get(row.get("subject_id"))
+        resource["paper_id"] = row["_id"]
+    return resource
+
+
+def _restrict_batches(query: dict, field: str, batch_id: str, period_ids: list[str] | None) -> None:
+    if period_ids is None:
+        if batch_id:
+            query[field] = batch_id
+        return
+    allowed = period_ids
+    if batch_id:
+        allowed = [batch_id] if batch_id in set(period_ids) else []
+    query[field] = {"$in": allowed}
+
+
+async def resolve_academic(
+    request: Request, user: dict, action: str, branch_id: str, course_id: str, batch_id: str, period: str
+) -> tuple[dict, list[str], list[str] | None]:
+    """Keep context values the caller may use. `period` is a batch session_key, not a new field."""
+    applied: dict[str, str] = {}
+    dropped: list[str] = []
+    institute_id = user["institute_id"]
+    grants = user["grants"]
+    if branch_id:
+        if allows(grants, action, {"institute_id": institute_id, "branch_id": branch_id}, True):
+            applied["branch_id"] = branch_id
+        else:
+            dropped.append("branch_id")
+    if course_id:
+        if allows(grants, action, {"institute_id": institute_id, "course_id": course_id}, True):
+            applied["course_id"] = course_id
+        else:
+            dropped.append("course_id")
+    batch = None
+    if batch_id:
+        batch = await db(request).batches.find_one({"_id": batch_id, "institute_id": institute_id})
+        resource = {
+            "institute_id": institute_id,
+            "branch_id": (batch or {}).get("branch_id"),
+            "course_id": (batch or {}).get("course_id"),
+            "batch_id": batch_id,
+        }
+        fits = bool(batch) and allows(grants, action, resource, True)
+        if fits and applied.get("branch_id") and batch.get("branch_id") != applied["branch_id"]:
+            fits = False
+        if fits and applied.get("course_id") and batch.get("course_id") != applied["course_id"]:
+            fits = False
+        if fits and period and batch.get("session_key") != period:
+            fits = False
+        if fits:
+            applied["batch_id"] = batch_id
+        else:
+            dropped.append("batch_id")
+    if period:
+        applied["period"] = period
+    period_ids = None
+    if period:
+        query: dict = {"institute_id": institute_id, "session_key": period}
+        if applied.get("branch_id"):
+            query["branch_id"] = applied["branch_id"]
+        if applied.get("course_id"):
+            query["course_id"] = applied["course_id"]
+        period_ids = [
+            row["_id"]
+            for row in await db(request).batches.find(query, {"_id": 1}).to_list(length=500)
+        ]
+    return applied, dropped, period_ids
+
+
+def _href(path: str, **values: str) -> str:
+    kept = {key: value for key, value in values.items() if value}
+    if not kept:
+        return path
+    return f"{path}?{urlencode(kept)}"
+
+
 @router.get("/context/options")
 async def context_options(request: Request, dimension: str, q: str = "") -> dict:
     user = await current_user(request)
@@ -1328,24 +1449,11 @@ async def context_options(request: Request, dimension: str, q: str = "") -> dict
         ]}
     if collection_name is None:
         raise AppError(422, "context.unknown", "Choose a known context level.")
-    field = {
-        "branch": "branch_id",
-        "course": "course_id",
-        "subject": "subject_id",
-        "batch": "batch_id",
-        "paper": "paper_id",
-    }[dimension]
-    clause = mongo_clause(
-        user["grants"],
-        "dashboard.view",
-        {"institute_id": "institute_id", field: "_id"},
-    )
-    upload_clause = mongo_clause(
-        user["grants"],
-        "marksheet.upload",
-        {"institute_id": "institute_id", field: "_id"},
-    )
-    query = {"institute_id": user["institute_id"], "$or": [clause, upload_clause]}
+    field_map = _CONTEXT_FIELDS[dimension]
+    query = {
+        "institute_id": user["institute_id"],
+        "$or": [mongo_clause(user["grants"], action, field_map) for action in _CONTEXT_ACTIONS],
+    }
     if q:
         query["name_key"] = {"$regex": name_key(q)}
     rows = await db(request)[collection_name].find(query).limit(200).to_list(length=200)
@@ -1359,14 +1467,106 @@ async def context_options(request: Request, dimension: str, q: str = "") -> dict
     }
     items = []
     for row in rows:
+        resource = _option_resource(dimension, row, user["institute_id"], subject_course)
+        if not any(allows(user["grants"], action, resource, True) for action in _CONTEXT_ACTIONS):
+            continue
         label = row.get("name") or (f"Paper {row['number']}" if row.get("number") is not None else row["_id"])
-        parents = {key: row[key] for key in ("branch_id", "course_id", "subject_id") if row.get(key)}
+        parents = {key: row[key] for key in ("branch_id", "course_id", "subject_id", "session_key") if row.get(key)}
         if dimension == "course":
             parents["branch_ids"] = branches_for_course.get(row["_id"], [])
         if dimension == "paper" and row.get("subject_id"):
             parents["course_id"] = subject_course.get(row["subject_id"])
         items.append({"id": row["_id"], "label": label, "parents": parents})
     return {"items": items}
+
+
+@router.get("/dashboard")
+async def dashboard(
+    request: Request, branch_id: str = "", course_id: str = "", batch_id: str = "", period: str = ""
+) -> dict:
+    user = await current_user(request)
+    from app.importing.routes import marksheet_visible
+    from app.intake import applied_intake_course, enquiry_awaiting_follow_up, intake_course_visible
+
+    academic, dropped, period_ids = await resolve_academic(
+        request, user, "marksheet.view", branch_id, course_id, batch_id, period
+    )
+    intake_course, intake_dropped = applied_intake_course(user["grants"], course_id)
+    if intake_dropped:
+        dropped.append("course_id")
+    items = []
+    if any("student.lookup" in (grant.get("actions") or []) for grant in user["grants"]):
+        today = _now().date().isoformat()
+        enquiries = await db(request).enquiries.find({"institute_id": user["institute_id"]}).to_list(length=500)
+        enquiry_count = 0
+        for row in enquiries:
+            if not intake_course_visible(user["grants"], row.get("course_id") or ""):
+                continue
+            if intake_course and (row.get("course_id") or "") != intake_course:
+                continue
+            if enquiry_awaiting_follow_up(row, today):
+                enquiry_count += 1
+        admissions = await db(request).admissions.find({"institute_id": user["institute_id"]}).to_list(length=500)
+        admission_count = 0
+        for row in admissions:
+            if not intake_course_visible(user["grants"], row.get("course_id") or ""):
+                continue
+            if intake_course and (row.get("course_id") or "") != intake_course:
+                continue
+            if (row.get("status") or "open") == "open":
+                admission_count += 1
+        items.append({
+            "key": "enquiries",
+            "count": enquiry_count,
+            "label": "Enquiries awaiting follow-up",
+            "detail": "Not yet an admission, and the latest follow-up is missing or due.",
+            "href": _href("/students/enquiries", follow_up="due", course_id=intake_course),
+        })
+        items.append({
+            "key": "admissions",
+            "count": admission_count,
+            "label": "Admissions awaiting conversion",
+            "detail": "Open admissions. Conversion into a batch is the next action.",
+            "href": _href("/students/admissions", status="open", course_id=intake_course),
+        })
+    if any("marksheet.view" in (grant.get("actions") or []) for grant in user["grants"]):
+        query: dict = {"institute_id": user["institute_id"], "status": "submitted"}
+        for field in ("branch_id", "course_id"):
+            if academic.get(field):
+                query[field] = academic[field]
+        _restrict_batches(query, "batch_ids", academic.get("batch_id", ""), period_ids)
+        sheets = await db(request).marksheets.find(query).to_list(length=500)
+        review_count = sum(1 for sheet in sheets if marksheet_visible(user, sheet))
+        items.append({
+            "key": "marksheets",
+            "count": review_count,
+            "label": "Marksheets awaiting review",
+            "detail": "Submitted marksheets. Drafts are not in review yet.",
+            "href": _href(
+                "/marksheets",
+                status="submitted",
+                branch_id=academic.get("branch_id", ""),
+                course_id=academic.get("course_id", ""),
+                batch_id=academic.get("batch_id", ""),
+                period=academic.get("period", ""),
+            ),
+        })
+    if any(
+        action in (grant.get("actions") or [])
+        for grant in user["grants"]
+        for action in ("marksheet.upload", "marksheet.view")
+    ):
+        failed = await db(request).import_jobs.count_documents(
+            {"institute_id": user["institute_id"], "state": "failed"}
+        )
+        items.append({
+            "key": "imports",
+            "count": failed,
+            "label": "Failed imports",
+            "detail": "Import jobs whose state is failed. They are not narrowed by branch.",
+            "href": "/import?state=failed",
+        })
+    return {"context": academic, "dropped": sorted(set(dropped)), "items": items}
 
 
 @router.get("/views/{level}")
@@ -1383,6 +1583,7 @@ async def view(
     exam_date_from: str = "",
     exam_date_to: str = "",
     attempt: str = "",
+    period: str = "",
     page: int = 1,
     attention_page: int = 1,
 ) -> dict:
@@ -1391,6 +1592,12 @@ async def view(
         raise AppError(404, "not_found", "That record was not found.")
     if not any("dashboard.view" in grant["actions"] for grant in user["grants"]):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    academic, _dropped, period_ids = await resolve_academic(
+        request, user, "dashboard.view", branch_id, course_id, batch_id, period
+    )
+    branch_id = academic.get("branch_id", "")
+    course_id = academic.get("course_id", "")
+    batch_id = academic.get("batch_id", "")
     start, end = _period(exam_date_from, exam_date_to)
     filters = {
         "branch_id": branch_id,
@@ -1422,9 +1629,10 @@ async def view(
         },
     )
     enrollment_query = {"institute_id": user["institute_id"], **_and(enrollment_clause)}
-    for field in ("branch_id", "course_id", "batch_id"):
+    for field in ("branch_id", "course_id"):
         if filters[field]:
             enrollment_query[field] = filters[field]
+    _restrict_batches(enrollment_query, "batch_id", filters.get("batch_id", ""), period_ids)
     enrollment_rows = await _every(db(request).enrollments.find(enrollment_query))
     student_ids = {item["student_id"] for item in enrollment_rows}
     from app.calculating import aggregate, public_bands
@@ -1455,9 +1663,10 @@ async def view(
         },
     )
     result_query = {"institute_id": user["institute_id"], "active": {"$ne": False}, **_and(result_clause)}
-    for field in ("branch_id", "course_id", "batch_id", "subject_id", "paper_id"):
+    for field in ("branch_id", "course_id", "subject_id", "paper_id"):
         if filters.get(field):
             result_query[field] = filters[field]
+    _restrict_batches(result_query, "batch_id", filters.get("batch_id", ""), period_ids)
     stored = await _every(db(request).results.find(result_query))
     rows = [row for row in await hydrate(db(request), stored) if row.get("published") and matches(row, filters)]
     rows = authorized(rows, user["grants"], "dashboard.view")
@@ -1649,12 +1858,19 @@ async def list_students(
     exam_date_from: str = "",
     exam_date_to: str = "",
     attempt: str = "",
+    period: str = "",
     sort: str = "name",
     direction: str = "asc",
     page: int = 0,
     page_size: int = 8,
 ) -> dict:
     user = await current_user(request)
+    academic, _dropped, period_ids = await resolve_academic(
+        request, user, "student.lookup", branch_id, course_id, batch_id, period
+    )
+    branch_id = academic.get("branch_id", "")
+    course_id = academic.get("course_id", "")
+    batch_id = academic.get("batch_id", "")
     clause = mongo_clause(
         user["grants"],
         "student.lookup",
@@ -1668,9 +1884,10 @@ async def list_students(
     if not any("student.lookup" in grant["actions"] for grant in user["grants"]):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
     enrollment_query: dict = {"institute_id": user["institute_id"], **clause}
-    for field, value in (("branch_id", branch_id), ("course_id", course_id), ("batch_id", batch_id)):
+    for field, value in (("branch_id", branch_id), ("course_id", course_id)):
         if value:
             enrollment_query[field] = value
+    _restrict_batches(enrollment_query, "batch_id", batch_id, period_ids)
     enrollments = await db(request).enrollments.find(enrollment_query).to_list(length=1000)
     facts = await directory_facts(db(request), user["institute_id"])
     enrollments = [

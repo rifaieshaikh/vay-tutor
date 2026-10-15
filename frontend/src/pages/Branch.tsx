@@ -4,7 +4,7 @@ import { api, Session } from "../api";
 import { notify } from "../notify";
 import { Icon, Place, PlaceFacts, StudentDialog } from "./Catalog";
 
-type Batch = { id: string; name: string; started_on: string | null; ended_on: string | null; timings: string | null; archived: boolean };
+type Batch = { id: string; name: string; started_on: string | null; ended_on: string | null; timings: string | null; session_key?: string | null; archived: boolean };
 type CourseOffer = { id: string; name: string; batches: Batch[] };
 type BranchRecord = Place & { id: string; name: string; archived: boolean; courses: CourseOffer[]; student_count: number };
 type CourseOption = { id: string; name: string };
@@ -93,7 +93,7 @@ export function BranchPage({ session }: { session: Session }) {
                     <tbody>
                       {course.batches.map((row) => (
                         <tr key={row.id}>
-                          <td>{row.name}</td>
+                          <td><Link to={`/batches/${row.id}?branch_id=${branch.id}&course_id=${course.id}${row.session_key ? `&period=${row.session_key}` : ""}&batch_id=${row.id}`}>{row.name}</Link></td>
                           <td>{row.started_on || "Not recorded"}</td>
                           <td>{row.ended_on || "Not recorded"}</td>
                           <td>{row.timings || "Not recorded"}</td>

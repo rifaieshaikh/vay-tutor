@@ -296,3 +296,25 @@ Settings hold policy version 1: bands, dense rank, weighted aggregate, latest-at
 DEC-01 through DEC-06, UX-01, and UX-02 are decided in this document. The acceptance dataset is the four sample workbooks, read with the sheet table in DEC-04. Responsible roles are assigned above.
 
 Implementation of the application is still not started. M1 architecture is recorded in [m1-architecture.md](m1-architecture.md). Cloud provider provisioning stays closed until Operations chooses a provider, region, and budget.
+
+## IMS-01 — Decisions changed on 15 October 2026
+
+The sections above stay the historical baseline. This addendum records what the institute-management alignment changes. The worked model is [ims-baseline.md](ims-baseline.md).
+
+**Changed**
+
+- Manual academic setup, enquiries, admissions, enrollment, and manual marksheets are in scope. Import is no longer the only creation path. UX-01 and the product requirements no longer treat Import Marklist as the required starting point or the empty-catalog prerequisite. An unambiguous workbook still needs no per-student form.
+- UX-02’s “no create marksheet action” is withdrawn. A manual marksheet is allowed. It still begins as a draft and uses the DEC-05 publication rules.
+- Admissions are no longer deferred. An enquiry converts to one admission. An admission converts to one student and one enrollment.
+- DEC-03’s rule that the same normalized name in another batch or branch is always a different student applies to marklist rows that have not been resolved. It does not apply after an operator attaches an admission to an existing student by name and phone. Same-name ambiguity still requires a choice. Import does not auto-merge across batches.
+- The homepage and primary navigation are the eight institute-management groups, specified in the product requirements. Delivery of that navigation is later work. Bookmarks to current pages remain valid.
+- A teaching assignment is not login access. Saving subjects for a teacher who cannot log in must not write a grant.
+
+**Retained**
+
+- DEC-01 terminology, including paper under subject, and one shared assessment for mixed batches with one enrollment per result row (DEC-02 and DEC-04).
+- DEC-03 for marklists: generated `IAM-` codes, exact contextual name match, blocked ambiguous rows, no automatic cross-batch merge, and elevated audited merges.
+- DEC-05 publication, bands, ranking, coverage, draft exclusion, and one active revision.
+- DEC-06 deployment, one institute per installation, and no local/cloud sync.
+- Tuple-scoped grants, disjoint-grant isolation, hidden aggregates, and revocation.
+- Historical enrollments and results on transfer, return, rename, and archive. Referenced records are not deleted. Import provenance stays on the job and the marksheet.

@@ -2,19 +2,21 @@
 
 Version: 1.1 · Date: 7 October 2026 · Status: M0 approved in [m0-decisions.md](m0-decisions.md). M1 architecture in [m1-architecture.md](m1-architecture.md).
 
+**Institute management alignment (15 October 2026).** Vay Tutor is organized as an institute management system: Dashboard, Admissions, Students, Academics, Staff, Assessments, Reports, and Administration. Authorized staff create and maintain branches, courses, offerings, batches, enquiries, admissions, enrollments, and teacher records directly. Marklist import remains a way to create and reuse those records, and it remains the way historical workbooks enter. Import is not a prerequisite for academic setup or enrollment. The model, permission examples, and migration checks are in [ims-baseline.md](ims-baseline.md). Which earlier decisions changed is in [m0-decisions.md](m0-decisions.md) under IMS-01. Publication rules, marklist identity rules, tuple-scoped access, and historical enrollments and results stay in force. Fees, attendance, timetabling, payroll, inventory, and parent or student portals stay out of this restructuring.
+
 ## 1. Purpose and first-release outcome
 
-Provide one reliable academic performance system for an institution operating multiple branches. The first release covers marksheet collection, student progress cards, academic performance views, and user administration with granular access control. React frontend, FastAPI backend, MongoDB storage, Windows and macOS installers for both full application and client, and cloud backend deployment are first-release requirements.
+Provide one reliable institute management system for an institution operating multiple branches. The first release covers admissions, student identity and enrollment, academic structure, staff and teaching assignments, marksheet collection, student progress cards, academic performance views, and user administration with granular access control. React frontend, FastAPI backend, MongoDB storage, Windows and macOS installers for both full application and client, and cloud backend deployment are first-release requirements.
 
 This document defines the product and delivery plan. It does not implement the application. M0 decisions in [m0-decisions.md](m0-decisions.md) are the approved baseline and supersede proposed defaults in this document where they differ. The cloud provider, region, and budget remain an Operations gate before cloud provisioning.
 
-An authorized staff member must be able to start with an empty academic catalog, select context at multiple levels, and import an Excel marklist containing multiple sheets. The import automatically creates missing branches, courses, branch offerings, batches, subjects, papers, exam types, assessments, attempts, students and enrollments, and reuses matching existing records. No separate academic setup or student-roster upload is a prerequisite. Only missing or ambiguous information requires resolution in the import flow. Published results generate progress cards and academic views. Management must be able to drill from institute performance to branch, course, batch, subject, paper, assessment, and individual student, within their access scope.
+An authorized staff member must be able to create a branch, offer a course there, and open a batch without importing marks. The same person must be able to record an enquiry, admit the prospect, and enroll that student. Separately, staff must still be able to start from an empty catalog, select context at multiple levels, and import an Excel marklist containing multiple sheets. The import automatically creates missing branches, courses, branch offerings, batches, subjects, papers, exam types, assessments, attempts, students and enrollments, and reuses matching existing records. A student roster upload is not a prerequisite for import. Only missing or ambiguous information requires resolution in the import flow. Published results generate progress cards and academic views. Management must be able to drill from institute performance to branch, course, batch, subject, paper, assessment, and individual student, within their access scope.
 
 ## 2. Scope and boundaries
 
-**Required in release 1:** institute/account bootstrap; marklist-only academic intake through multi-sheet XLSX imports with multiple selected context levels; automatic creation and reuse of all relevant academic details, students and enrollments; review, publication and corrections; progress cards; all six requested academic views; scoped roles and permissions; audit history; PDF and XLSX exports; browser and desktop access; full local installation; client installation; cloud deployment; backup, restore and upgrade procedures. Academic structure and student screens support browsing and correcting imported records rather than a required setup sequence.
+**Required in release 1:** institute/account bootstrap; manual academic setup for branches, courses, offerings, batches, and curriculum; enquiries, admissions, and enrollment onto an existing student identity; teacher records kept separate from login access; marklist intake through multi-sheet XLSX imports with multiple selected context levels; automatic creation and reuse of all relevant academic details, students and enrollments during import; manual marksheet creation into the same draft and publication rules; review, publication and corrections; progress cards; all six requested academic views; scoped roles and permissions; audit history; PDF and XLSX exports; browser and desktop access; full local installation; client installation; cloud deployment; backup, restore and upgrade procedures. Academic setup and import are both valid. Neither is a required prelude to the other.
 
-**Deferred:** separate manual marksheet creation, standalone academic setup/roster-import workflows, fees, admissions workflows beyond imported student creation, timetable, transport, payroll, learning content, online exam delivery, biometric attendance, parent/student accounts, automatic messaging, predictive AI, and synchronization between independent local and cloud databases. “360 view” in this release means academic performance and data completeness, not a complete ERP profile.
+**Deferred:** fees, timetable, transport, payroll, inventory, learning content, online exam delivery, biometric attendance, parent/student accounts, automatic messaging, predictive AI, and synchronization between independent local and cloud databases. “360 view” in this release means academic performance and data completeness, not a complete ERP profile.
 
 ## 3. Reference files and resulting requirements
 
@@ -46,19 +48,21 @@ Product consequences:
 | Institute administrator | Set up the institution, academic catalog, users, roles and policies; oversee all authorized branches. |
 | Branch administrator | Manage assigned branch rosters, assessments, imports and academic reports. |
 | Academic coordinator | Review and publish results; compare performance in assigned courses and batches. |
-| Teacher or marks uploader | View and/or upload results for specifically assigned branch/course/subject combinations. |
+| Admissions operator | Record enquiries and admissions, and enroll a prospect into an authorized batch. |
+| Teacher or marks uploader | View and/or upload results for specifically assigned branch/course/subject combinations. A teaching assignment alone does not grant this access. |
 | Management viewer | Read authorized dashboards and progress cards; export only when separately permitted. |
 | Installation/operator administrator | Configure endpoints, upgrades, backups and restore; this technical responsibility does not automatically grant academic access. |
 
 Key journeys:
 
-1. Administrator bootstraps the institute and users; no branch, course, batch, subject, paper or student pre-entry is required.
-2. Staff opens Import Marklist, selects any known context levels, uploads a workbook, and sees automatically detected details and proposed existing/new records. The importer creates all missing details and students when the import is committed, after resolving only conflicts or missing information, then submits a draft.
-3. Coordinator reviews the draft, confirms calculation rules and cohort, and publishes. Publication updates cards and dashboards together.
-4. Teacher opens an authorized student's card, reviews exam history and subject trends, and exports an authorized report.
-5. Management opens institute overview and drills into a branch, course, batch, subject and paper without losing filters.
-6. Administrator grants upload permission for one subject in one branch/course, verifies effective access, and later revokes it.
-7. Authorized coordinator corrects published marks with a reason; the application keeps the previous revision and regenerates affected outputs.
+1. Administrator bootstraps the institute and users. Branch, course, batch, subject, paper, and student records may be created afterwards, or left for import to create.
+2. Staff opens Academics and creates a branch offering and a batch, or opens Import Marklist, selects any known context levels, uploads a workbook, and sees automatically detected details and proposed existing/new records. The importer creates all missing details and students when the import is committed, after resolving only conflicts or missing information, then submits a draft.
+3. Admissions staff record an enquiry, follow it up, convert it to an admission, and enroll the person in a batch. A returning student is attached to the existing identity. A transfer ends one enrollment and opens another without a second person.
+4. Coordinator reviews the draft, confirms calculation rules and cohort, and publishes. Publication updates cards and dashboards together.
+5. Teacher opens an authorized student's card, reviews exam history and subject trends, and exports an authorized report.
+6. Management opens institute overview and drills into a branch, course, batch, subject and paper without losing filters.
+7. Administrator grants upload permission for one subject in one branch/course, verifies effective access, and later revokes it. Assigning that subject as teaching work is a separate act and does not itself grant the permission.
+8. Authorized coordinator corrects published marks with a reason; the application keeps the previous revision and regenerates affected outputs.
 
 ## 5. Academic model and terminology
 
@@ -73,8 +77,11 @@ Key journeys:
 | Exam type | Configurable category such as unit, part, chapter, mock or final. MCQ/descriptive is a separate assessment format. |
 | Assessment | A particular exam occurrence, with title, exam type, format, date, paper, maximum score and eligible batches. Topic labels and series are optional metadata. |
 | Attempt | Original attempt or retest linked to its original assessment. Retests may have different maximum scores. |
-| Student | Stable institute student ID, name and minimal necessary profile information. Automatically created during import, using a supplied ID or a generated ID. Names may have reviewed aliases. |
-| Enrollment | Student membership in a branch/course/batch with effective dates and applicable subjects. Transfers retain historical enrollment. |
+| Student | Stable institute student ID, name and profile. Created by admission conversion, by manual enrollment of a new person, or automatically during import, using a supplied ID or a generated ID. Names may have reviewed aliases. One person has one student record across enrollments. |
+| Enrollment | Student membership in a branch/course/batch with effective dates. A transfer or a return adds history; it does not replace the person. |
+| Enquiry | A prospect and follow-up, linked to at most one admission. |
+| Admission | An application for a course. Conversion enrolls one student into one batch and keeps the link. |
+| Teacher | A staff identity and teaching assignments. Login access is a user and grants, not a consequence of the assignment. |
 | Marksheet | Results for an assessment/attempt and defined cohort, with draft/published status and revisions. A workbook can produce multiple marksheets. |
 | Result | Student, enrollment, assessment/attempt, score or status, source provenance and revision. |
 | Import job | Source file, sheet/row/column locations, mappings, validation decisions, status and submitting user. |
@@ -89,15 +96,15 @@ All requirements in this section are first-release requirements unless stated ot
 
 ### 6.1 Automatic academic and student creation
 
-- **SET-01:** Import automatically creates missing branches, courses, offerings, batches, subjects, papers and exam types in their resolved parent context. Reuse matching records instead of duplicating them. Users may inspect, correct, rename and deactivate imported details with appropriate permission. Prevent invalid combinations, such as a paper outside the selected course.
-- **SET-02:** Import automatically creates missing students and enrollments. Generate stable institute student IDs if the workbook lacks IDs; retain source names and identifiers. Detect conflicting IDs, ambiguous name matches and duplicate source rows. Student merges require elevated permission, an impact preview and an audit trail; an unmatched student does not require a separate roster workflow.
+- **SET-01:** Authorized staff create and edit branches, courses, offerings, batches, subjects, and papers directly. Import also creates missing branches, courses, offerings, batches, subjects, papers and exam types in their resolved parent context. Both paths reuse matching records instead of duplicating them. Users may inspect, correct, rename and deactivate details with appropriate permission. Prevent invalid combinations, such as a paper outside the selected course.
+- **SET-02:** Import automatically creates missing students and enrollments. Admission conversion and manual enrollment create or reuse the same student identity. Generate stable institute student IDs when no ID is supplied; retain source names and identifiers. Detect conflicting IDs, ambiguous name matches and duplicate source rows. Student merges require elevated permission, an impact preview and an audit trail. Import of an unmatched marklist row does not require a prior roster. A repeated conversion does not create a second student or a second enrollment in the same batch.
 - **SET-03:** Preserve historical marks and enrollment context when catalog entries are renamed, archived or students transfer. Referenced master data cannot be silently deleted.
 - **SET-04:** Configure performance bands, passing thresholds, ranking and aggregation policy with effective versions. Risk bands and official pass/fail criteria are separate concepts.
 
 ### 6.2 Assessment and marksheet management
 
 - **MRK-01:** Resolve branch, course, eligible batch(es), subject, paper, exam type, assessment title, exam date, attempt and positive maximum marks from selected levels and workbook contents before publication. The importer creates missing assessment and attempt records. Request absent required values within the import flow; do not require prior setup.
-- **MRK-02:** Create marksheets exclusively through Excel marklist import in release 1. Preserve decimal scores and explicit statuses; allow authorized correction of imported drafts/results. Drafts do not affect published analytics.
+- **MRK-02:** Create marksheets through Excel marklist import or through an authorized manual marksheet. Both enter as drafts and follow the same publication, correction, and withdrawal rules. Preserve decimal scores and explicit statuses. Drafts do not affect published analytics.
 - **MRK-03:** Show a searchable marksheet register with branch/course/batch/subject/paper/date/type/status filters, source, uploader, reviewer and revision.
 - **MRK-04:** Support draft → submitted → published, with return-to-draft on rejection. Authorized self-publication is allowed only if institute policy enables it; default is separate upload and publish permissions.
 - **MRK-05:** Correct or withdraw published results with a required reason, revision history and permission. Only one active published revision may contribute to analytics. Concurrent edits must warn about conflicts.
@@ -207,7 +214,7 @@ Custom roles must be supported. Role names do not bypass record-level checks.
 
 ## 9. Application experience
 
-Primary navigation: Overview; Import Marklist; Marksheets; Progress Cards; Academic Views; Students; Users and Access; Audit; Settings. Import Marklist is the primary academic intake action and the empty-state starting point. Imported structure/assessments are browsable from academic views with authorized corrections; users are not sent through separate setup or roster screens before importing. Navigation is permission-aware.
+Primary navigation is grouped by responsibility: Dashboard; Admissions; Students; Academics; Staff; Assessments; Reports; Administration. Enquiries and admissions sit under Admissions. Branches, courses, offerings, and batches sit under Academics. Import and marksheets sit under Assessments. Cards and academic views sit under Reports. Accounts, access, audit, and settings sit under Administration. The dashboard is the starting point and lists pending work the user is allowed to open. Import remains available for marklists, including a workbook imported into an empty catalog, and users are not forced through setup before importing. Current routes stay valid until the navigation change is delivered. Navigation is permission-aware, and an empty group is hidden.
 
 The import wizard follows select known levels/upload → automatic detection and create/reuse plan → resolve exceptions → preview → import/submit. Whole-workbook defaults and per-sheet overrides share the same dependent context selectors. Unambiguous files proceed without individual academic/student creation forms. Reviewers publish from a separate review screen. A marksheet page exposes its source, state, validation summary and revision history. Filters show academic context in plain language. Errors explain how to resolve the issue while preserving selected levels and mappings.
 
@@ -297,7 +304,7 @@ Release gates: product confirms policy decisions; academic owner approves reconc
 
 ## 13. Delivery plan
 
-All milestones contribute to the first release. Desktop and cloud validation start early because they affect authentication, storage, job processing and operations.
+All milestones contribute to the first release. Desktop and cloud validation start early because they affect authentication, storage, job processing and operations. The active organizing plan for institute management is [institute-management-task-list.md](institute-management-task-list.md). It does not drop the outstanding distribution, recovery, or release milestones below.
 
 | Milestone | Deliverable | Exit criteria / dependencies |
 |---|---|---|

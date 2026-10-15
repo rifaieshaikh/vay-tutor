@@ -586,14 +586,17 @@ async def cancel_import(request: Request, import_id: str) -> dict:
 
 
 @router.get("/imports")
-async def list_imports(request: Request) -> dict:
+async def list_imports(request: Request, state: str = "") -> dict:
     user = await current_user(request)
     if not any(
         "marksheet.upload" in grant["actions"] or "marksheet.view" in grant["actions"] for grant in user["grants"]
     ):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    query: dict = {"institute_id": user["institute_id"]}
+    if state:
+        query["state"] = state
     items = []
-    cursor = db(request).import_jobs.find({"institute_id": user["institute_id"]}).sort("created_at", -1)
+    cursor = db(request).import_jobs.find(query).sort("created_at", -1)
     async for job in cursor:
         items.append(
             {
@@ -789,6 +792,16 @@ async def add_result(request: Request, marksheet_id: str, body: ResultCreate) ->
     return {"id": result_id, "edit_version": version}
 
 
+def marksheet_visible(user: dict, sheet: dict) -> bool:
+    resource = {
+        "institute_id": sheet["institute_id"],
+        "branch_id": sheet.get("branch_id"),
+        "course_id": sheet.get("course_id"),
+        "subject_id": sheet.get("subject_id"),
+    }
+    return allows(user["grants"], "marksheet.view", resource)
+
+
 @router.get("/marksheets")
 async def list_marksheets(
     request: Request,
@@ -802,26 +815,33 @@ async def list_marksheets(
     exam_date: str = "",
     exam_date_from: str = "",
     exam_date_to: str = "",
+    period: str = "",
     q: str = "",
     sort: str = "title",
     page: int = 0,
     page_size: int = 8,
 ) -> dict:
+    from app.http import _restrict_batches, resolve_academic
+
     user = await current_user(request)
     if not any("marksheet.view" in grant["actions"] for grant in user["grants"]):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    academic, _dropped, period_ids = await resolve_academic(
+        request, user, "marksheet.view", branch_id, course_id, batch_id, period
+    )
     query: dict = {"institute_id": user["institute_id"]}
     for field, value in (
         ("status", status),
         ("exam_type", exam_type),
-        ("branch_id", branch_id),
-        ("course_id", course_id),
+        ("branch_id", academic.get("branch_id", "")),
+        ("course_id", academic.get("course_id", "")),
         ("subject_id", subject_id),
         ("paper_id", paper_id),
         ("exam_date", exam_date),
     ):
         if value:
             query[field] = value
+    _restrict_batches(query, "batch_ids", academic.get("batch_id", ""), period_ids)
     if not exam_date and (exam_date_from or exam_date_to):
         window = {}
         if exam_date_from:
@@ -829,8 +849,6 @@ async def list_marksheets(
         if exam_date_to:
             window["$lte"] = exam_date_to
         query["exam_date"] = window
-    if batch_id:
-        query["batch_ids"] = batch_id
     named_sheets: set[str] = set()
     if q:
         matched_students = (
@@ -856,13 +874,7 @@ async def list_marksheets(
     names = {}
     cursor = db(request).marksheets.find(query)
     async for sheet in cursor:
-        resource = {
-            "institute_id": sheet["institute_id"],
-            "branch_id": sheet.get("branch_id"),
-            "course_id": sheet.get("course_id"),
-            "subject_id": sheet.get("subject_id"),
-        }
-        if not allows(user["grants"], "marksheet.view", resource):
+        if not marksheet_visible(user, sheet):
             continue
         summary = _marksheet_summary(sheet)
         haystack = " ".join(
@@ -1685,6 +1697,8 @@ async def add_student_enrollment(request: Request, student_id: str, body: Enroll
     batch = await db(request).batches.find_one({"_id": body.batch_id, "institute_id": user["institute_id"]})
     if batch is None or batch.get("branch_id") != body.branch_id or batch.get("course_id") != body.course_id:
         raise AppError(422, "enrollment.context", "Choose a branch, course, and batch that belong together.")
+    if batch.get("ended_on"):
+        raise AppError(422, "batch.closed", "This batch is closed. New enrollments stay out.")
     resource = {
         "institute_id": user["institute_id"],
         "branch_id": body.branch_id,
@@ -1887,6 +1901,7 @@ def _catalog_row(item: dict) -> dict:
         "ended_on",
         "timings",
         "notes",
+        "session_key",
     ):
         if item.get(key) is not None:
             row[key] = item[key]

@@ -4,7 +4,7 @@ import { ApiError, api } from "../api";
 import { notify } from "../notify";
 import { Option, optionFits } from "../filters";
 import { BandMark } from "../bands";
-import { StudentEnrollment, recordedDate, recordedName, recordedStatus, safeStudentList } from "../students";
+import { StudentEnrollment, recordedDate, recordedName, recordedStatus, safeBatchWorkspace, safeStudentList } from "../students";
 import { QuestionControl } from "./Intake";
 
 type AcademicRecord = { qualification: string; stream: string; institution: string; mark: string; year_of_passing: string; board: string };
@@ -293,7 +293,8 @@ export function StudentPage() {
   const branch = params.get("branch_id") || "";
   const course = params.get("course_id") || "";
   const batch = params.get("batch_id") || "";
-  const back = safeStudentList(params.get("returnTo")) || "/students";
+  const batchBack = safeBatchWorkspace(params.get("returnTo"));
+  const back = batchBack || safeStudentList(params.get("returnTo")) || "/students";
   const [record, setRecord] = useState<StudentDetail | null>(null);
   const [loadedFor, setLoadedFor] = useState("");
   const [phase, setPhase] = useState<"loading" | "ready" | "unavailable" | "error">("loading");
@@ -763,7 +764,7 @@ export function StudentPage() {
 
   return (
     <section className="panel wide student-record" aria-busy={phase === "loading"}>
-      <Link className="quiet back-link" to={back} onClick={(event) => { if (!discardPrompt()) event.preventDefault(); }}>← Students</Link>
+      <Link className="quiet back-link" to={back} onClick={(event) => { if (!discardPrompt()) event.preventDefault(); }}>{batchBack ? "← Batch" : "← Students"}</Link>
       {phase === "loading" ? <h1>Loading this student…</h1> : null}
       {phase === "unavailable" ? (
         <>

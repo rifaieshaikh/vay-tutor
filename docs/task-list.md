@@ -1,6 +1,6 @@
 # Release 1 task list
 
-> **Current restructuring plan (15 October 2026):** See [Institute management restructuring task list](institute-management-task-list.md) for the transition to an institute management system. It replaces the import-first organizing direction for that work; the completion records and outstanding release obligations below remain historical inputs. IMS-01 reconciles the affected requirements and planning rules.
+> **Current restructuring plan (15 October 2026):** See [Institute management restructuring task list](institute-management-task-list.md) for the transition to an institute management system. It replaces the import-first organizing direction for that work; the completion records and outstanding release obligations below remain historical inputs. Phase 1 was accepted on 15 October 2026. The baseline is [ims-baseline.md](ims-baseline.md), and the decision changes are the IMS-01 addendum in [m0-decisions.md](m0-decisions.md).
 
 Date: 7 October 2026 · Baseline: [Product requirements v1.1](product-requirements.md) · M0: [Approved decisions](m0-decisions.md) · M1: [Architecture](m1-architecture.md)
 

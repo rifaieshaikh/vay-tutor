@@ -41,7 +41,7 @@ type Result = {
 type Detail = Marksheet & { attempt_kind?: string; available_students?: Person[]; results: Result[]; bands?: Band[] | null };
 type Draft = { score: string; status: string };
 
-const FILTER_KEYS = ["q", "status", "exam_type", "branch_id", "course_id", "batch_id", "subject_id", "paper_id", "exam_date_from", "exam_date_to", "sort", "page"];
+const FILTER_KEYS = ["q", "status", "exam_type", "branch_id", "course_id", "batch_id", "period", "subject_id", "paper_id", "exam_date_from", "exam_date_to", "sort", "page"];
 const ADVANCED_KEYS = ["exam_type", "branch_id", "course_id", "paper_id", "exam_date_from", "exam_date_to"];
 const STATUS_OPTIONS = [
   { id: "draft", label: "Draft" },
@@ -136,6 +136,10 @@ function Dialog({ title, onClose, children }: { title: string; onClose: () => vo
 
 function cardReturn(value: string | null) {
   if (!value || value.startsWith("//") || value.includes("://")) return "";
+  if (value.startsWith("/batches/")) {
+    const path = value.split("?")[0];
+    if (/^\/batches\/[A-Za-z0-9]+$/.test(path)) return value;
+  }
   if (value.startsWith("/cards") || value.startsWith("/views")) return value;
   return "";
 }
@@ -528,7 +532,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
   listParams.delete("returnTo");
   const listQuery = listParams.toString();
   const back = returned || `/marksheets${listQuery ? `?${listQuery}` : ""}`;
-  const backLabel = returned?.startsWith("/views") ? "← Academic view" : returned ? "← Progress card" : "← Marksheets";
+  const backLabel = returned?.startsWith("/batches/") ? "← Batch" : returned?.startsWith("/views") ? "← Academic view" : returned ? "← Progress card" : "← Marksheets";
 
   async function reload() {
     const fresh = await api<Detail>(`/api/v1/marksheets/${marksheetId}`);

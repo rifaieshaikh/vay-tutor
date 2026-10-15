@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "../api";
 import { notify } from "../notify";
 import { Option, clearIncompatible, optionFits } from "../filters";
+import { safeBatchWorkspace } from "../students";
 import { Icon, StudentDialog } from "./Catalog";
 
 type UserGrant = { role: string; scope: Record<string, string | null>; unit_ids?: string[] };
@@ -854,6 +855,8 @@ export function TeachersPage() {
 
 export function TeacherPage() {
   const { teacherId = "" } = useParams();
+  const [params] = useSearchParams();
+  const batchBack = safeBatchWorkspace(params.get("returnTo"));
   const [preview, setPreview] = useState<TeacherRecord | null>(null);
   const [catalog, setCatalog] = useState<TeachingCatalog>({ courses: [], subjects: [], papers: [] });
   const [editing, setEditing] = useState<string | null>(null);
@@ -907,7 +910,7 @@ export function TeacherPage() {
 
   return (
     <section className="panel wide">
-      <p className="meta"><Link to="/teachers">Teachers</Link></p>
+      {batchBack ? <Link className="quiet back-link" to={batchBack}>← Batch</Link> : <p className="meta"><Link to="/teachers">Teachers</Link></p>}
       <div className="title-row">
         <div>
           <p className="eyebrow">Teacher</p>

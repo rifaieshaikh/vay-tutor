@@ -173,8 +173,7 @@ Each document stores `institute_id` except `institutes` itself. Academic documen
 | `batches` | Session key `2026-09` or `2027-01`, display name, offering. | offering + session key |
 | `subjects` | Accounting, Business Law, QT, Economics. | course + `name_key` |
 | `papers` | Number plus subject. | subject + number |
-| `exam_types` | `unit`, `part`, `chapter`. | institute + code |
-| `assessments` | Title, title key, type, format, maximum, eligible batch ids, optional date, topic, series. | the identity key below |
+| `assessments` | Title, title key, type, format, maximum, eligible batch ids, optional date, topic, series. `exam_type` is a field (`unit`, `part`, or `chapter`), not a collection. | the identity key below |
 | `attempts` | `original` or `retest`, link to the original attempt, its own maximum. | assessment + kind + retest sequence |
 | `students` | `student_code` (`IAM-000001`), display name, `name_key`. | `student_code` |
 | `aliases` | Approved alternate `name_key` for one student, used only in that student's enrollment contexts. | student + `name_key` |
@@ -182,12 +181,19 @@ Each document stores `institute_id` except `institutes` itself. Academic documen
 | `enrollment_names` | `name_key` reserved inside one batch. | batch + `name_key` |
 | `marksheets` | Assessment, attempt, eligible batches, status, active revision, source job. No embedded result rows. | one draft or active published row per assessment + attempt + cohort key |
 | `results` | One student enrollment, score or status, revision, active flag, source coordinates. | marksheet + enrollment + revision |
-| `roster_snapshots` | Confirmed eligible enrollment ids for a batch and time. Separate collection, not an array that grows without a bound on the batch document. Membership is its own documents: `roster_members`. | snapshot + enrollment |
+| `rosters` | Confirmed student ids for one batch. This is the implementation of the roster snapshot. It is one document per batch, not a `roster_members` collection. | batch |
 | `policies` | Versioned calculation policy. | institute + version |
-| `assessment_links` | Explicit comparability between two assessments. Default `comparable: false`. | pair of assessment ids |
+| `assessment_links` | Specified for an explicit cross-branch comparison. Not written by the application yet. Default remains not comparable. | pair of assessment ids |
 | `import_jobs` | File id, actor, state, plan, decisions, sheet outcomes, file hash. | — |
 | `files` | Storage key, media type, byte size, sha256, retention. Bytes are not in MongoDB. | sha256 + institute, for duplicate detection |
 | `jobs` | Durable work item, lease, attempts, result file id. | — |
+| `teachers` | Staff identity, optional `user_id`, and teaching assignments when the person has no login. | institute + `user_id` when a login exists |
+| `enquiries` | Prospect, course of interest, follow-ups, and at most one `admission_id`. | — |
+| `admissions` | Application, `open` or `converted`, optional `student_id` and `enquiry_id`. | — |
+| `course_questions` | Questions on a course admission profile. | — |
+| `form_questions` | Questions shared by the enquiry or admission form. | — |
+
+Chapters and modules are items on the subject document. `aliases` stores approved alternate names.
 
 `name_key` is trim, collapsed internal whitespace, and Unicode case fold. Display strings keep the first-seen spelling.
 
@@ -393,6 +399,20 @@ Until that choice is made, M2 and M3 do not add a cloud account, a region, or a 
 
 The operator turns LAN listening on during first-site setup. The installer does not open MongoDB to the LAN as part of that switch.
 
+## Institute management additions (15 October 2026)
+
+ARC-01 through ARC-06 stay in force, including publication transactions, tuple grants, private files, and the packaging split. The product organization and the extra collections are specified in [ims-baseline.md](ims-baseline.md). This section records how the running application sits on that contract.
+
+Manual creation and import are both writers. Catalog posts create branches, courses, offerings, batches, and curriculum. Intake posts create enquiries and admissions. Admission conversion and `POST /students/{id}/enrollments` write the student and enrollment. `POST /marksheets` creates a draft marksheet. Import commit remains atomic per sheet and still creates a draft. Neither path deletes the other’s pre-existing records when it rolls back.
+
+Teacher documents are staff records. `PUT /teachers/{id}/teaching` stores assignments and does not write grants when the teacher has no user. `PUT /users/{id}/teaching` currently replaces that user’s `teacher` grants. The target in the baseline is to stop treating that call as permission assignment. Until that change, the route remains a grant write and must keep the delegation checks.
+
+Enquiry and admission lists currently check that the caller has `student.lookup` or `student.manage` somewhere. They do not yet apply `mongo_clause` for the scope tuple. The baseline’s admissions-operator example is the contract. New admissions queries follow that contract rather than the looser check.
+
+Directory and intake lists use `page` and `page_size`. Marksheet and job lists keep the cursor contract in ARC-01. Adding a field on these resources is compatible. Removing a published field is a `/api/v2` change.
+
+`schema_meta.version` stays 1. Startup creates the teacher, enquiry, admission, and question indexes before the version gate. That does not rewrite documents. No further migration is authorized by this section. Checks and the backup recovery path are in the baseline.
+
 ## Milestone exit
 
-ARC-01 through ARC-06 are decided here. Feature work in M2 can use this contract, this data model, and this packaging split. Signed installers, the live packaging proof, and cloud hosting remain later milestones.
+ARC-01 through ARC-06 are decided here. Feature work in M2 can use this contract, this data model, and this packaging split. Signed installers, the live packaging proof, and cloud hosting remain later milestones. The 15 October 2026 section adds the institute-management collections and the manual-creation writers. It does not reopen packaging or cloud hosting.

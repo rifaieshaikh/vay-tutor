@@ -77,7 +77,7 @@ type Card = {
 };
 type ExportJob = { format: "pdf" | "xlsx"; state: "queued" | "running" | "ready" | "failed"; fileId?: string | null; filename?: string | null; error?: string };
 
-const REPORT_FILTERS = ["branch_id", "course_id", "batch_id", "subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"] as const;
+const REPORT_FILTERS = ["branch_id", "course_id", "batch_id", "period", "subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"] as const;
 const FILTER_LABELS: Record<string, string> = {
   q: "Student",
   branch_id: "Branch",

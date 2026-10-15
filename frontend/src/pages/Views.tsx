@@ -102,7 +102,7 @@ const FILTERS = [
   ["paper_id", "Paper", "paper"],
   ["exam_type", "Exam type", "exam_type"],
 ] as const;
-const FILTER_KEYS = ["branch_id", "course_id", "batch_id", "subject_id", "paper_id", "exam_type", "attempt", "exam_date_from", "exam_date_to"] as const;
+const FILTER_KEYS = ["branch_id", "course_id", "batch_id", "period", "subject_id", "paper_id", "exam_type", "attempt", "exam_date_from", "exam_date_to"] as const;
 const CRUMBS: { level: (typeof LEVELS)[number]; field: string; dimension: string }[] = [
   { level: "branch", field: "branch_id", dimension: "branch" },
   { level: "course", field: "course_id", dimension: "course" },

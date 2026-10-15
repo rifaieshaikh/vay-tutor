@@ -80,6 +80,7 @@ const STATUS_LABEL: Record<string, string> = {
   ready: "Ready to import",
   cancelled: "Cancelled",
   committing: "Importing",
+  failed: "Failed",
 };
 
 function rowCodes(sheet: Sheet, student: Student, blockers: Blocker[]) {
@@ -393,14 +394,17 @@ export function ImportPage() {
   const [confirmUpdates, setConfirmUpdates] = useState(false);
   const saveChain = useRef(Promise.resolve());
 
+  const stateFilter = params.get("state") || "";
+
   async function loadHistory() {
-    const loaded = await api<{ items: HistoryItem[] }>("/api/v1/imports");
+    const search = stateFilter ? `?state=${encodeURIComponent(stateFilter)}` : "";
+    const loaded = await api<{ items: HistoryItem[] }>(`/api/v1/imports${search}`);
     setHistory(loaded.items);
   }
 
   useEffect(() => {
     loadHistory().catch((reason: Error) => setError(reason.message));
-  }, []);
+  }, [stateFilter]);
 
   useEffect(() => {
     if (params.get("new") !== "1") return;
@@ -561,14 +565,15 @@ export function ImportPage() {
     <section className="panel wide">
       <div className="page-title">
         <div>
-          <p className="eyebrow">Import Marklist</p>
+          <p className="eyebrow">Assessments</p>
           <h1>Import history</h1>
+          {stateFilter === "failed" ? <p className="page-lead">Failed imports.</p> : null}
         </div>
         <button type="button" onClick={() => { setPreview(null); setStep(0); setError(""); setOpen(true); }}>Import marklist</button>
       </div>
       <p>Each workbook stays in this list. Opening the import wizard does not remove earlier imports. Close the window and the history is still here.</p>
       {error && !open ? <p className="error" role="alert">{error}</p> : null}
-      {history.length === 0 ? <p>No imports yet.</p> : (
+      {history.length === 0 ? <p>{stateFilter === "failed" ? "No failed imports." : "No imports yet."}</p> : (
         <div className="table-wrap">
           <table className="history">
             <caption>Workbooks uploaded for this institute</caption>

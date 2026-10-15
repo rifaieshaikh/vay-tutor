@@ -20,6 +20,7 @@ type Row = {
   started_on?: string;
   ended_on?: string;
   timings?: string;
+  session_key?: string;
   units?: Unit[];
 };
 type Offering = { id: string; branch_id?: string; course_id?: string };
@@ -425,7 +426,8 @@ export function StudentsPage({ session }: { session: Session }) {
   const [listNonce, setListNonce] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const listKey = [applied.q, applied.branch_id, applied.course_id, applied.batch_id, sort, direction, page, listNonce].join("|");
+  const period = params.get("period") || "";
+  const listKey = [applied.q, applied.branch_id, applied.course_id, applied.batch_id, period, sort, direction, page, listNonce].join("|");
 
   useEffect(() => {
     setDraft(readStudentFilters(params));
@@ -449,6 +451,7 @@ export function StudentsPage({ session }: { session: Session }) {
     if (applied.branch_id) search.set("branch_id", applied.branch_id);
     if (applied.course_id) search.set("course_id", applied.course_id);
     if (applied.batch_id) search.set("batch_id", applied.batch_id);
+    if (period) search.set("period", period);
     if (sort !== "name") search.set("sort", sort);
     if (direction === "desc") search.set("direction", "desc");
     search.set("page", String(page));
@@ -492,6 +495,7 @@ export function StudentsPage({ session }: { session: Session }) {
     if (draft.branch_id) next.set("branch_id", draft.branch_id);
     if (draft.course_id) next.set("course_id", draft.course_id);
     if (draft.batch_id) next.set("batch_id", draft.batch_id);
+    if (period) next.set("period", period);
     writeSort(next, sort, direction);
     setError("");
     setFiltersOpen(false);
@@ -519,6 +523,7 @@ export function StudentsPage({ session }: { session: Session }) {
     if (nextFilters.branch_id) next.set("branch_id", nextFilters.branch_id);
     if (nextFilters.course_id) next.set("course_id", nextFilters.course_id);
     if (nextFilters.batch_id) next.set("batch_id", nextFilters.batch_id);
+    if (period) next.set("period", period);
     writeSort(next, sort, direction);
     write(next);
   }
@@ -578,6 +583,7 @@ export function StudentsPage({ session }: { session: Session }) {
     if (applied.branch_id) next.set("branch_id", applied.branch_id);
     if (applied.course_id) next.set("course_id", applied.course_id);
     if (applied.batch_id) next.set("batch_id", applied.batch_id);
+    if (period) next.set("period", period);
     next.set("returnTo", listPath());
     return `/cards?${next.toString()}`;
   }
@@ -839,7 +845,7 @@ export function InstitutePage({ session }: { session: Session }) {
           </div>
         ) : null}
       </div>
-      {branches.length === 0 ? <p>No branches yet. Import a marklist to create these records.</p> : (
+      {branches.length === 0 ? <p>No branches yet.</p> : (
         <div className="table-wrap">
           <table className="people-table">
             <caption className="sr-only">Branches for {institute.name}.</caption>
@@ -1016,7 +1022,7 @@ export function CoursesPage({ session }: { session: Session }) {
           </div>
         ) : null}
       </div>
-      {courses.length === 0 ? <p>No courses yet. Import a marklist to create these records.</p> : (
+      {courses.length === 0 ? <p>No courses yet.</p> : (
         <div className="table-wrap">
           <table className="people-table">
             <caption className="sr-only">Courses.</caption>
@@ -1295,16 +1301,36 @@ export function BatchesPage({ session }: { session: Session }) {
   if (!catalog) {
     return <section className="panel">{error ? <p className="error" role="alert">{error}</p> : <p>Loading batches…</p>}</section>;
   }
-  const requested = params.get("course") || "";
+  const requested = params.get("course_id") || params.get("course") || "";
   const courseId = catalog.courses.some((row) => row.id === requested) ? requested : "";
-  const batches = byName(catalog.batches.filter((row) => !courseId || row.course_id === courseId));
+  const branchId = params.get("branch_id") || "";
+  const batchId = params.get("batch_id") || "";
+  const period = params.get("period") || "";
+  const batches = byName(catalog.batches.filter((row) => {
+    if (courseId && row.course_id !== courseId) return false;
+    if (branchId && row.branch_id !== branchId) return false;
+    if (batchId && row.id !== batchId) return false;
+    if (period && row.session_key !== period) return false;
+    return true;
+  }));
   const courseName = (id?: string) => catalog.courses.find((row) => row.id === id)?.name || "Not recorded";
   const branchName = (id?: string) => catalog.branches.find((row) => row.id === id)?.name || "Not recorded";
+  function batchHref(row: Row) {
+    const next = new URLSearchParams();
+    if (row.branch_id) next.set("branch_id", row.branch_id);
+    if (row.course_id) next.set("course_id", row.course_id);
+    next.set("batch_id", row.id);
+    if (row.session_key) next.set("period", row.session_key);
+    return `/batches/${row.id}?${next.toString()}`;
+  }
 
   function chooseCourse(id: string) {
     const next = new URLSearchParams(params);
-    if (id) next.set("course", id);
-    else next.delete("course");
+    next.delete("course");
+    if (id) next.set("course_id", id);
+    else next.delete("course_id");
+    const selected = catalog?.batches.find((row) => row.id === next.get("batch_id"));
+    if (selected && id && selected.course_id !== id) next.delete("batch_id");
     setParams(next, { replace: true });
   }
 
@@ -1333,7 +1359,7 @@ export function BatchesPage({ session }: { session: Session }) {
           </div>
         ) : null}
       </div>
-      {batches.length === 0 ? <p>No batches yet. Import a marklist to create these records.</p> : (
+      {batches.length === 0 ? <p>{courseId || branchId || batchId || period ? "No batches match this context." : "No batches yet."}</p> : (
         <div className="table-wrap">
           <table className="people-table">
             <caption className="sr-only">Batches.</caption>
@@ -1352,7 +1378,7 @@ export function BatchesPage({ session }: { session: Session }) {
             <tbody>
               {batches.map((row) => (
                 <tr key={row.id}>
-                  <td>{row.name}</td>
+                  <td><Link to={batchHref(row)}>{row.name}</Link></td>
                   <td>{row.course_id ? <Link to={`/courses/${row.course_id}`}>{courseName(row.course_id)}</Link> : "Not recorded"}</td>
                   <td>{row.branch_id ? <Link to={`/institute/branches/${row.branch_id}`}>{branchName(row.branch_id)}</Link> : "Not recorded"}</td>
                   <td>{row.started_on || "Not recorded"}</td>

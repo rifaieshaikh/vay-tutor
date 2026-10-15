@@ -14,6 +14,20 @@ export type StudentEnrollment = {
 
 export type StudentFilters = { q: string; branch_id: string; course_id: string; batch_id: string };
 
+export function safeBatchWorkspace(value: string | null) {
+  if (!value || value.startsWith("//") || value.includes("://") || value.includes("\\")) return "";
+  const [path, query = ""] = value.split("?");
+  if (!/^\/batches\/[A-Za-z0-9]+$/.test(path)) return "";
+  const incoming = new URLSearchParams(query);
+  const next = new URLSearchParams();
+  for (const key of ["branch_id", "course_id", "batch_id", "period", "student_page", "assessment_page"]) {
+    const item = incoming.get(key) || "";
+    if (item && !item.includes("/")) next.set(key, item);
+  }
+  const search = next.toString();
+  return search ? `${path}?${search}` : path;
+}
+
 export function safeStudentList(value: string | null) {
   if (!value || !value.startsWith("/students") || value.startsWith("//") || value.includes("://") || value.includes("\\")) return "";
   const path = value.split("?")[0];

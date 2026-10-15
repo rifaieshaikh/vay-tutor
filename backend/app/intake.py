@@ -817,11 +817,47 @@ async def delete_form_question(request: Request, question_id: str) -> dict:
     return {"id": question_id}
 
 
+def intake_course_visible(grants: list, course_id: str) -> bool:
+    """An enquiry or admission has a course and no branch. A grant's branch does not hide it."""
+    for grant in grants:
+        if "student.lookup" not in (grant.get("actions") or []):
+            continue
+        scoped = (grant.get("scope") or {}).get("course_id")
+        if scoped and scoped != course_id:
+            continue
+        if scoped and not course_id:
+            continue
+        return True
+    return False
+
+
+def applied_intake_course(grants: list, course_id: str) -> tuple[str, bool]:
+    if not course_id:
+        return "", False
+    if intake_course_visible(grants, course_id):
+        return course_id, False
+    return "", True
+
+
+def enquiry_awaiting_follow_up(row: dict, today: str) -> bool:
+    if row.get("admission_id"):
+        return False
+    follow_ups = list(row.get("follow_ups") or [])
+    if not follow_ups:
+        return True
+    next_on = str(follow_ups[-1].get("next_on") or "")
+    return not next_on or next_on <= today
+
+
 @router.get("/enquiries")
-async def list_enquiries(request: Request, q: str = "", page: int = 1, page_size: int = 20) -> dict:
+async def list_enquiries(
+    request: Request, q: str = "", page: int = 1, page_size: int = 20, follow_up: str = "", course_id: str = ""
+) -> dict:
     user = await current_user(request)
     _reader(user)
-    return await _list_people(request, user, "enquiries", q, page, page_size)
+    return await _list_people(
+        request, user, "enquiries", q, page, page_size, follow_up=follow_up, course_id=course_id
+    )
 
 
 @router.post("/enquiries")
@@ -1077,10 +1113,14 @@ async def commit_enquiries(request: Request, body: EnquiryCommit) -> dict:
 
 
 @router.get("/admissions")
-async def list_admissions(request: Request, q: str = "", page: int = 1, page_size: int = 20) -> dict:
+async def list_admissions(
+    request: Request, q: str = "", page: int = 1, page_size: int = 20, status: str = "", course_id: str = ""
+) -> dict:
     user = await current_user(request)
     _reader(user)
-    return await _list_people(request, user, "admissions", q, page, page_size)
+    return await _list_people(
+        request, user, "admissions", q, page, page_size, status=status, course_id=course_id
+    )
 
 
 @router.post("/admissions")
@@ -1447,11 +1487,30 @@ async def _admission(request: Request, user: dict, admission_id: str) -> dict:
     return row
 
 
-async def _list_people(request: Request, user: dict, collection: str, q: str, page: int, page_size: int) -> dict:
+async def _list_people(
+    request: Request,
+    user: dict,
+    collection: str,
+    q: str,
+    page: int,
+    page_size: int,
+    follow_up: str = "",
+    status: str = "",
+    course_id: str = "",
+) -> dict:
     size = min(max(page_size, 1), 100)
     number = max(page, 1)
     query: dict = {"institute_id": user["institute_id"]}
     rows = await db(request)[collection].find(query).sort("created_at", -1).to_list(length=500)
+    rows = [row for row in rows if intake_course_visible(user["grants"], row.get("course_id") or "")]
+    selected_course, _dropped = applied_intake_course(user["grants"], course_id)
+    if selected_course:
+        rows = [row for row in rows if (row.get("course_id") or "") == selected_course]
+    if collection == "enquiries" and follow_up == "due":
+        today = _now().date().isoformat()
+        rows = [row for row in rows if enquiry_awaiting_follow_up(row, today)]
+    if collection == "admissions" and status:
+        rows = [row for row in rows if (row.get("status") or "open") == status]
     needle = q.casefold().strip()
     if needle:
         rows = [row for row in rows if needle in _search_text(row)]

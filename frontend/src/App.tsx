@@ -4,6 +4,7 @@ import { api, Health, Session } from "./api";
 import { AccessPage, TeacherPage, TeachersPage, UserAccessPage } from "./pages/Access";
 import { AuditPage } from "./pages/Audit";
 import { CoursePage, CoursesPage, InstitutePage, StudentsPage, BatchesPage } from "./pages/Catalog";
+import { BatchPage } from "./pages/Batch";
 import { BranchPage } from "./pages/Branch";
 import { AdmissionPage, AdmissionsPage, EnquiriesPage, EnquiryPage } from "./pages/Intake";
 import { StudentPage } from "./pages/Student";
@@ -61,7 +62,7 @@ export function App() {
   return (
     <Shell session={session} onChange={refresh}>
       <Routes>
-        <Route path="/" element={<OverviewPage canImport={can("marksheet.upload")} />} />
+        <Route path="/" element={<OverviewPage />} />
         <Route path="/import" element={can("marksheet.upload") ? <ImportPage /> : <Navigate to="/" replace />} />
         <Route path="/marksheets" element={can("marksheet.view") ? <MarksheetsPage canAdd={can("marksheet.upload")} /> : <Navigate to="/" replace />} />
         <Route path="/marksheets/:marksheetId" element={can("marksheet.view") ? <MarksheetPage canSetBands={can("marksheet.edit_draft") || can("marksheet.correct")} /> : <Navigate to="/" replace />} />
@@ -80,6 +81,7 @@ export function App() {
         <Route path="/courses" element={can("student.lookup") ? <CoursesPage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/courses/:courseId" element={can("student.lookup") ? <CoursePage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/batches" element={can("student.lookup") ? <BatchesPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/batches/:batchId" element={can("student.lookup") ? <BatchPage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/access" element={can("user.manage") ? <AccessPage /> : <Navigate to="/" replace />} />
         <Route path="/access/:userId" element={can("user.manage") ? <UserAccessPage /> : <Navigate to="/" replace />} />
         <Route path="/audit" element={can("audit.view") ? <AuditPage /> : <Navigate to="/" replace />} />

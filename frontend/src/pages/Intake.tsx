@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api, Session } from "../api";
 import { Option, optionFits } from "../filters";
 import { IntakeTabs } from "../intakeTabs";
@@ -246,6 +246,9 @@ function FormQuestions({ form, canEdit }: { form: "enquiry" | "admission"; canEd
 }
 
 export function EnquiriesPage({ session }: { session: Session }) {
+  const [params] = useSearchParams();
+  const followUp = params.get("follow_up") || "";
+  const courseId = params.get("course_id") || "";
   const canManage = session.actions.includes("student.manage");
   const canEditQuestions = session.actions.includes("catalog.correct") || session.actions.includes("catalog.manage");
   const [items, setItems] = useState<Enquiry[]>([]);
@@ -258,8 +261,12 @@ export function EnquiriesPage({ session }: { session: Session }) {
   const [loading, setLoading] = useState(true);
 
   function load(search = query) {
+    const searchParams = new URLSearchParams();
+    if (search) searchParams.set("q", search);
+    if (followUp) searchParams.set("follow_up", followUp);
+    if (courseId) searchParams.set("course_id", courseId);
     setLoading(true);
-    api<{ items: Enquiry[]; total: number }>(`/api/v1/enquiries?q=${encodeURIComponent(search)}`)
+    api<{ items: Enquiry[]; total: number }>(`/api/v1/enquiries?${searchParams.toString()}`)
       .then((result) => {
         setItems(result.items);
         setTotal(result.total);
@@ -272,14 +279,15 @@ export function EnquiriesPage({ session }: { session: Session }) {
   useEffect(() => {
     load("");
     api<{ courses: CourseOption[] }>("/api/v1/catalog").then((catalog) => setCourses(coursesOf(catalog))).catch(() => undefined);
-  }, []);
+  }, [followUp, courseId]);
 
   return (
     <section className="panel wide">
       <div className="page-title">
         <div>
-          <p className="eyebrow">People</p>
+          <p className="eyebrow">Admissions</p>
           <h1>Enquiry</h1>
+          {followUp === "due" ? <p className="page-lead">Enquiries awaiting follow-up.</p> : null}
         </div>
         {canManage ? (
           <div className="actions">
@@ -534,6 +542,9 @@ function EnquiryForm({ courses, initial, onClose, onSaved }: { courses: CourseOp
 }
 
 export function AdmissionsPage({ session }: { session: Session }) {
+  const [params] = useSearchParams();
+  const status = params.get("status") || "";
+  const courseId = params.get("course_id") || "";
   const canManage = session.actions.includes("student.manage");
   const canEditQuestions = session.actions.includes("catalog.correct") || session.actions.includes("catalog.manage");
   const [items, setItems] = useState<Admission[]>([]);
@@ -546,8 +557,12 @@ export function AdmissionsPage({ session }: { session: Session }) {
   const [loading, setLoading] = useState(true);
 
   function load(search = query) {
+    const searchParams = new URLSearchParams();
+    if (search) searchParams.set("q", search);
+    if (status) searchParams.set("status", status);
+    if (courseId) searchParams.set("course_id", courseId);
     setLoading(true);
-    api<{ items: Admission[]; total: number }>(`/api/v1/admissions?q=${encodeURIComponent(search)}`)
+    api<{ items: Admission[]; total: number }>(`/api/v1/admissions?${searchParams.toString()}`)
       .then((result) => {
         setItems(result.items);
         setTotal(result.total);
@@ -560,14 +575,15 @@ export function AdmissionsPage({ session }: { session: Session }) {
   useEffect(() => {
     load("");
     api<{ courses: CourseOption[] }>("/api/v1/catalog").then((catalog) => setCourses(coursesOf(catalog))).catch(() => undefined);
-  }, []);
+  }, [status, courseId]);
 
   return (
     <section className="panel wide">
       <div className="page-title">
         <div>
-          <p className="eyebrow">People</p>
+          <p className="eyebrow">Admissions</p>
           <h1>Admissions</h1>
+          {status === "open" ? <p className="page-lead">Admissions awaiting conversion.</p> : null}
         </div>
         {canManage ? (
           <div className="actions">

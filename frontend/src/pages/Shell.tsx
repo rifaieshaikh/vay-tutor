@@ -1,22 +1,58 @@
-import { ReactNode, useState } from "react";
-import { NavLink } from "react-router-dom";
+import { ReactNode, useEffect, useState } from "react";
+import { NavLink, useLocation, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
+import { ContextBar, contextSearch, showsContext } from "../context";
+import { Breadcrumbs, pageOrientation } from "../orientation";
 
-const LINKS = [
-  { to: "/", label: "Overview", action: "dashboard.view" },
-  { to: "/import", label: "Import Marklist", action: "marksheet.upload" },
-  { to: "/marksheets", label: "Marksheets", action: "marksheet.view" },
-  { to: "/cards", label: "Progress Cards", action: "progress_card.view" },
-  { to: "/views", label: "Academic Views", action: "dashboard.view" },
-  { to: "/students", label: "Students", action: "student.lookup" },
-  { to: "/teachers", label: "Teachers", action: "user.manage" },
-  { to: "/institute", label: "Institute", action: "student.lookup" },
-  { to: "/courses", label: "Courses", action: "student.lookup" },
-  { to: "/batches", label: "Batches", action: "student.lookup" },
-  { to: "/access", label: "Users and Access", action: "user.manage" },
-  { to: "/audit", label: "Audit", action: "audit.view" },
-  { to: "/settings", label: "Settings", action: "dashboard.view" },
+type Item = { to: string; label: string; action: string; end?: boolean };
+
+const GROUPS: { label: string; items: Item[] }[] = [
+  { label: "Dashboard", items: [{ to: "/", label: "Dashboard", action: "dashboard.view", end: true }] },
+  {
+    label: "Admissions",
+    items: [
+      { to: "/students/enquiries", label: "Enquiries", action: "student.lookup" },
+      { to: "/students/admissions", label: "Admissions", action: "student.lookup" },
+    ],
+  },
+  { label: "Students", items: [{ to: "/students", label: "Students", action: "student.lookup", end: true }] },
+  {
+    label: "Academics",
+    items: [
+      { to: "/institute", label: "Institute", action: "student.lookup" },
+      { to: "/courses", label: "Courses", action: "student.lookup" },
+      { to: "/batches", label: "Batches", action: "student.lookup" },
+    ],
+  },
+  { label: "Staff", items: [{ to: "/teachers", label: "Teachers", action: "user.manage" }] },
+  {
+    label: "Assessments",
+    items: [
+      { to: "/import", label: "Import Marklist", action: "marksheet.upload", end: true },
+      { to: "/marksheets", label: "Marksheets", action: "marksheet.view" },
+    ],
+  },
+  {
+    label: "Reports",
+    items: [
+      { to: "/cards", label: "Progress Cards", action: "progress_card.view", end: true },
+      { to: "/views", label: "Academic Views", action: "dashboard.view", end: true },
+    ],
+  },
+  {
+    label: "Administration",
+    items: [
+      { to: "/access", label: "Users and Access", action: "user.manage" },
+      { to: "/audit", label: "Audit", action: "audit.view", end: true },
+      { to: "/settings", label: "Settings", action: "dashboard.view", end: true },
+    ],
+  },
 ];
+
+function itemActive(pathname: string, item: Item) {
+  if (item.end || item.to === "/") return pathname === item.to;
+  return pathname === item.to || pathname.startsWith(`${item.to}/`);
+}
 
 export function Shell({
   session,
@@ -28,7 +64,17 @@ export function Shell({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
-  const visible = LINKS.filter((link) => session.actions.includes(link.action));
+  const { pathname } = useLocation();
+  const [params] = useSearchParams();
+  const search = contextSearch(params).toString();
+  const groups = GROUPS.map((group) => ({
+    ...group,
+    items: group.items.filter((item) => session.actions.includes(item.action)),
+  })).filter((group) => group.items.length > 0);
+
+  useEffect(() => {
+    document.title = `${pageOrientation(pathname).title} · Vay Tutor`;
+  }, [pathname]);
 
   async function logout() {
     await api("/api/v1/auth/logout", { method: "POST" });
@@ -51,13 +97,28 @@ export function Shell({
       </header>
       <div className="frame">
         <nav className={open ? "nav open" : "nav"} aria-label="Primary">
-          {visible.map((link) => (
-            <NavLink key={link.to} to={link.to} end={link.to === "/"} className={link.to === "/import" ? "import-link" : undefined} onClick={() => setOpen(false)}>
-              {link.label}
-            </NavLink>
+          {groups.map((group) => (
+            <div className="nav-group" key={group.label}>
+              <p className="nav-label">{group.label}</p>
+              {group.items.map((item) => (
+                <NavLink
+                  key={item.to}
+                  to={{ pathname: item.to, search }}
+                  end={item.end || item.to === "/"}
+                  className={itemActive(pathname, item) ? "active" : undefined}
+                  onClick={() => setOpen(false)}
+                >
+                  {item.label}
+                </NavLink>
+              ))}
+            </div>
           ))}
         </nav>
-        <main>{children}</main>
+        <main>
+          <Breadcrumbs />
+          {showsContext(pathname) ? <ContextBar /> : null}
+          {children}
+        </main>
       </div>
     </div>
   );
