@@ -1,22 +1,24 @@
 import { useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { api, Health, Session } from "./api";
-import { AccessPage, TeacherPage, TeachersPage, UserAccessPage } from "./pages/Access";
-import { AuditPage } from "./pages/Audit";
-import { CoursePage, CoursesPage, InstitutePage, StudentsPage, BatchesPage } from "./pages/Catalog";
-import { BatchPage } from "./pages/Batch";
-import { BranchPage } from "./pages/Branch";
-import { AdmissionPage, AdmissionsPage, EnquiriesPage, EnquiryPage } from "./pages/Intake";
-import { StudentPage } from "./pages/Student";
-import { CardsPage } from "./pages/Cards";
-import { ImportPage } from "./pages/Import";
-import { ViewsPage } from "./pages/Views";
+import { AccessPage, UserAccessPage } from "./administration/access";
+import { AuditPage } from "./administration/audit";
+import { SettingsPage } from "./administration/settings";
+import { AdmissionPage, AdmissionsPage, EnquiriesPage, EnquiryPage } from "./admissions/pages";
+import { BatchPage } from "./academics/batch";
+import { BranchPage } from "./academics/branch";
+import { BatchesPage, CoursePage, CoursesPage, InstitutePage } from "./academics/catalog";
+import { ImportPage } from "./assessments/import";
+import { MarksheetPage, MarksheetsPage } from "./assessments/marksheets";
 import { LoginPage } from "./pages/Login";
 import { OverviewPage } from "./pages/Overview";
-import { MarksheetPage, MarksheetsPage } from "./pages/Marksheets";
-import { SettingsPage } from "./pages/Settings";
 import { SetupPage } from "./pages/Setup";
 import { Shell } from "./pages/Shell";
+import { CardsPage } from "./reports/cards";
+import { ViewsPage } from "./reports/views";
+import { TeacherPage, TeachersPage } from "./staff/teachers";
+import { StudentsPage } from "./students/directory";
+import { StudentPage } from "./students/profile";
 
 export function App() {
   const [health, setHealth] = useState<Health | null>(null);

@@ -9,14 +9,21 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.catalog_pages import router as catalog_router
+from app.academics.catalog import router as catalog_router
+from app.academics.questions import router as question_router
+from app.administration.routes import router as administration_router
+from app.admissions.routes import router as admissions_router
+from app.assessments.review import router as review_router
+from app.assessments.routes import router as assessment_router
 from app.config import load_settings
+from app.dashboard.routes import router as dashboard_router
 from app.db import connect, ensure_schema
 from app.errors import AppError, app_error_handler, error_body
-from app.http import router
-from app.importing.routes import router as import_router
-from app.intake import router as intake_router
 from app.jobs import process_due_jobs
+from app.reports.routes import router as reports_router
+from app.staff.routes import router as staff_router
+from app.students.directory_routes import router as student_directory_router
+from app.students.routes import router as student_router
 
 log = logging.getLogger("vay")
 
@@ -75,10 +82,17 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.include_router(router)
-    app.include_router(import_router)
+    app.include_router(administration_router)
+    app.include_router(staff_router)
+    app.include_router(dashboard_router)
     app.include_router(catalog_router)
-    app.include_router(intake_router)
+    app.include_router(question_router)
+    app.include_router(admissions_router)
+    app.include_router(student_directory_router)
+    app.include_router(student_router)
+    app.include_router(assessment_router)
+    app.include_router(review_router)
+    app.include_router(reports_router)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):

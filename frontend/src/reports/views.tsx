@@ -4,7 +4,7 @@ import { api } from "../api";
 import { notify } from "../notify";
 import { CONTEXT_FIELDS, Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
 import { Band, BandMark, bandTone } from "../bands";
-import { Icon } from "./Catalog";
+import { Icon } from "../ui";
 
 type Section = { id: string; label: string; students: number; results: number; percentage: number | null; band: string | null; band_name?: string | null; band_place?: string | null; coverage: string; missing?: number; absent?: number; marksheet_ids?: string[] };
 type Standing = {

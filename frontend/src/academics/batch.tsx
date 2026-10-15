@@ -66,6 +66,7 @@ export function BatchPage({ session }: { session: Session }) {
   const assessmentPage = Math.max(1, Number(params.get("assessment_page")) || 1);
   const canAssign = session.actions.includes("user.manage");
   const canEnroll = session.actions.includes("student.manage");
+  const canImport = session.actions.includes("marksheet.upload");
   const [board, setBoard] = useState<Workspace | null>(null);
   const [teachers, setTeachers] = useState<TeacherOption[]>([]);
   const [error, setError] = useState("");
@@ -384,7 +385,14 @@ export function BatchPage({ session }: { session: Session }) {
           </p>
         </>
       )}
-      <p><Link to={`/marksheets?${contextQuery(board)}`}>Open marksheets</Link></p>
+      <p>
+        <Link to={`/marksheets?${contextQuery(board)}`}>Open marksheets</Link>
+        {" · "}
+        <Link to={`/cards?${contextQuery(board)}`}>Open progress cards</Link>
+        {" · "}
+        <Link to={`/views?${contextQuery(board)}`}>Open academic views</Link>
+        {canImport ? <>{" · "}<Link to={`/import?${contextQuery(board)}`}>Import marklist</Link></> : null}
+      </p>
     </section>
   );
 }

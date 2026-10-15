@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
-import { Icon, StudentDialog } from "./Catalog";
+import { Icon, StudentDialog } from "../ui";
 
 type Event = {
   id: string;

@@ -2,7 +2,8 @@ import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, Session } from "../api";
 import { notify } from "../notify";
-import { Icon, Place, PlaceFacts, StudentDialog } from "./Catalog";
+import { Place, PlaceFacts } from "./catalog";
+import { Icon, StudentDialog } from "../ui";
 
 type Batch = { id: string; name: string; started_on: string | null; ended_on: string | null; timings: string | null; session_key?: string | null; archived: boolean };
 type CourseOffer = { id: string; name: string; batches: Batch[] };

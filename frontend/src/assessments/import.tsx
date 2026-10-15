@@ -2,7 +2,7 @@ import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "reac
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { notify } from "../notify";
-import { Icon } from "./Catalog";
+import { Icon } from "../ui";
 
 type Student = {
   row: number;
@@ -395,6 +395,8 @@ export function ImportPage() {
   const saveChain = useRef(Promise.resolve());
 
   const stateFilter = params.get("state") || "";
+  const [inheritedLabel, setInheritedLabel] = useState("");
+  const inheritedDefaults = useRef<Record<string, { mode: string; value: string }>>({});
 
   async function loadHistory() {
     const search = stateFilter ? `?state=${encodeURIComponent(stateFilter)}` : "";
@@ -405,6 +407,42 @@ export function ImportPage() {
   useEffect(() => {
     loadHistory().catch((reason: Error) => setError(reason.message));
   }, [stateFilter]);
+
+  useEffect(() => {
+    const branchId = params.get("branch_id") || "";
+    const courseId = params.get("course_id") || "";
+    const batchId = params.get("batch_id") || "";
+    if (!branchId && !courseId && !batchId) return;
+    let cancelled = false;
+    Promise.all(
+      ["branch", "course", "batch"].map((dimension) => api<{ items: { id: string; label: string }[] }>(`/api/v1/context/options?dimension=${dimension}`)),
+    ).then(([branches, courses, batches]) => {
+      if (cancelled) return;
+      const next: Record<string, { mode: string; value: string }> = {};
+      const labels: string[] = [];
+      const branch = branches.items.find((item) => item.id === branchId);
+      const course = courses.items.find((item) => item.id === courseId);
+      const batch = batches.items.find((item) => item.id === batchId);
+      if (branch) {
+        next.branch = { mode: "existing", value: branch.label };
+        labels.push(branch.label);
+      }
+      if (course) {
+        next.course = { mode: "existing", value: course.label };
+        labels.push(course.label);
+      }
+      if (batch) {
+        next.batch = { mode: "existing", value: batch.label };
+        labels.push(batch.label);
+      }
+      inheritedDefaults.current = next;
+      setDefaults((current) => ({ ...next, ...current }));
+      setInheritedLabel(labels.join(" · "));
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [params]);
 
   useEffect(() => {
     if (params.get("new") !== "1") return;
@@ -461,8 +499,9 @@ export function ImportPage() {
     body.append("file", file);
     try {
       const created = await api<{ id: string }>("/api/v1/imports", { method: "POST", body });
-      if (Object.keys(defaults).length) {
-        await api(`/api/v1/imports/${created.id}`, { method: "PATCH", body: JSON.stringify({ defaults }) });
+      const chosen = { ...inheritedDefaults.current, ...defaults };
+      if (Object.keys(chosen).length) {
+        await api(`/api/v1/imports/${created.id}`, { method: "PATCH", body: JSON.stringify({ defaults: chosen }) });
       }
       showImport(await api<Preview>(`/api/v1/imports/${created.id}`), 1);
       await loadHistory();
@@ -617,6 +656,7 @@ export function ImportPage() {
             {step === 0 ? (
               <>
                 <p>Detect keeps the value found in the workbook. Existing or new applies one value to every sheet.</p>
+                {inheritedLabel ? <p>This import uses {inheritedLabel}. A workbook that names something else must be confirmed before it is saved.</p> : null}
                 <div className="stack">
                   {LEVELS.map(([field, label]) => (
                     <label key={field}>
@@ -672,6 +712,7 @@ export function ImportPage() {
                   blockers={preview.blockers}
                   onSelect={setSheetId}
                   onHeading={(targetId) => patchSheet(targetId, { acknowledge_heading: true })}
+                  onContextAck={(targetId) => patchSheet(targetId, { acknowledge_context: true })}
                   onGroup={(targetId, groupId, interpretation) => patchSheet(targetId, { groups: { [groupId]: { interpretation, confirmed: true } } })}
                   onBatch={(targetId, row, session) => patchSheet(targetId, { row_batches: { [String(row)]: session } })}
                   onDrop={(targetId, row) => patchSheet(targetId, { drop_rows: [row] })}
@@ -716,6 +757,7 @@ export function ImportPage() {
                   blockers={preview.blockers}
                   onSelect={setSheetId}
                   onHeading={(targetId) => patchSheet(targetId, { acknowledge_heading: true })}
+                  onContextAck={(targetId) => patchSheet(targetId, { acknowledge_context: true })}
                   onGroup={(targetId, groupId, interpretation) => patchSheet(targetId, { groups: { [groupId]: { interpretation, confirmed: true } } })}
                   onBatch={(targetId, row, session) => patchSheet(targetId, { row_batches: { [String(row)]: session } })}
                   onDrop={(targetId, row) => patchSheet(targetId, { drop_rows: [row] })}
@@ -775,6 +817,7 @@ function SheetGrid({
   blockers,
   onSelect,
   onHeading,
+  onContextAck,
   onGroup,
   onBatch,
   onDrop,
@@ -788,6 +831,7 @@ function SheetGrid({
   blockers: Blocker[];
   onSelect: (id: string) => void;
   onHeading: (sheetId: string) => void;
+  onContextAck: (sheetId: string) => void;
   onGroup: (sheetId: string, groupId: string, interpretation: string) => void;
   onBatch: (sheetId: string, row: number, session: string) => void;
   onDrop: (sheetId: string, row: number) => void;
@@ -920,6 +964,17 @@ function SheetGrid({
             </tr>
           </thead>
           <tbody>
+            {blockers.some((item) => item.code === "import.context_conflict" && item.sheet_id === sheet.id) ? (
+              <tr>
+                <th className="row-no" />
+                <td className="name">Context</td>
+                <td className="bad" colSpan={1 + sheet.groups.length}>
+                  <button type="button" className="cell-link" onClick={() => onContextAck(sheet.id)}>
+                    This sheet does not match the selected branch, course, or batch. Use the selected context
+                  </button>
+                </td>
+              </tr>
+            ) : null}
             {sheet.heading_conflict && !sheet.heading_acknowledged ? (
               <tr>
                 <th className="row-no" />

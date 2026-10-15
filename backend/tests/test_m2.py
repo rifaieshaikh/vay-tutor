@@ -148,7 +148,7 @@ def test_disjoint_grants_and_hidden_aggregates(client):
     )
     database.results.insert_many(
         [
-                {"_id": "result-acc", "institute_id": institute_id, "student_id": "student-a", "marksheet_id": "sheet-acc", "enrollment_id": "enr-a", "revision": 1, "branch_id": branch_a, "course_id": "ca", "batch_id": "sept", "subject_id": "accounting", "status": "scored", "score": 18},
+                {"_id": "result-acc", "institute_id": institute_id, "student_id": "student-a", "marksheet_id": "sheet-acc", "enrollment_id": "enr-a", "revision": 1, "active": True, "branch_id": branch_a, "course_id": "ca", "batch_id": "sept", "subject_id": "accounting", "status": "scored", "score": 18},
                 {"_id": "result-law", "institute_id": institute_id, "student_id": "student-a", "marksheet_id": "sheet-law", "enrollment_id": "enr-a", "revision": 1, "branch_id": branch_a, "course_id": "ca", "batch_id": "sept", "subject_id": "law", "status": "scored", "score": 10},
         ]
     )

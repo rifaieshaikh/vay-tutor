@@ -4,7 +4,7 @@ import { api, Session } from "../api";
 import { notify } from "../notify";
 import { studentRecordHref } from "../students";
 import { Band, BandMark, bandFor, bandTone } from "../bands";
-import { Icon } from "./Catalog";
+import { Icon } from "../ui";
 import { CONTEXT_FIELDS, Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
 
 type Performance = {

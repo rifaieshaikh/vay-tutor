@@ -1,18 +1,20 @@
-import { ChangeEvent, FormEvent, ReactNode, useEffect, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { notify } from "../notify";
 import { Option, optionFits } from "../filters";
 import { BandMark } from "../bands";
-import { StudentEnrollment, recordedDate, recordedName, recordedStatus, safeBatchWorkspace, safeStudentList } from "../students";
-import { QuestionControl } from "./Intake";
-
-type AcademicRecord = { qualification: string; stream: string; institution: string; mark: string; year_of_passing: string; board: string };
+import { AcademicRecord, BLOOD_GROUPS, EMPTY_RECORD, GENDERS } from "../records";
+import { QuestionControl } from "../admissions/questions";
+import { StudentDialog as Dialog } from "../ui";
+import { StudentEnrollment, recordedDate, recordedName, recordedStatus, safeBatchWorkspace, safeStudentList } from "./links";
 type CourseProfile = { course_id: string; course_name: string; answers: { question_id: string; label?: string; value: string; answer_type?: string; choices?: string[] }[] };
 type BusinessAnswer = { question_id: string; label?: string; value: string };
 type FormQuestion = { id: string; label: string; answer_type: string; choices: string[]; required: boolean };
 type Alias = { id: string; display_name: string };
-type StudentActions = { edit: boolean; card: boolean; enroll: boolean };
+type StudentActions = { edit: boolean; card: boolean; enroll: boolean; contact?: boolean };
+type SourceAdmission = { id: string; enquiry_id: string | null; course_name: string; status: string };
+type PublishedAssessment = { id: string; title: string; status: string; batch_id: string; score: number | null; maximum: number | null };
 type StudentDetail = {
   id: string;
   student_code: string;
@@ -42,6 +44,8 @@ type StudentDetail = {
   course_profiles: CourseProfile[];
   business_answers?: BusinessAnswer[];
   enrollments: StudentEnrollment[];
+  admissions?: SourceAdmission[];
+  assessments?: PublishedAssessment[];
   aliases: Alias[];
   actions: StudentActions;
 };
@@ -129,9 +133,6 @@ const CONTACT_ORDER = ["date_of_birth", "gender", "blood_group", "phone", "email
 const ADDRESS_ORDER = ["street", "address_line_2", "place", "district", "state", "pin"] as const;
 const ACADEMIC_ORDER = ["qualification", "passing_year", "institution", "board"] as const;
 const WIDE_FACTS = new Set<string>(["guardian_name", "notes", "street", "address_line_2", "email", "institution", "board"]);
-const BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"];
-const GENDERS = ["Female", "Male", "Other"];
-const EMPTY_RECORD: AcademicRecord = { qualification: "", stream: "", institution: "", mark: "", year_of_passing: "", board: "" };
 const EMPTY_PROFILE: ProfileValues = {
   display_name: "",
   date_of_birth: "",
@@ -244,37 +245,6 @@ function Icon({ name }: { name: "edit" | "card" | "add" }) {
   );
 }
 
-function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
-  const panelRef = useRef<HTMLDivElement>(null);
-  const closeRef = useRef(onClose);
-  closeRef.current = onClose;
-  useEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const node = panelRef.current;
-    const fields = node ? [...node.querySelectorAll<HTMLElement>("button, input, select")].filter((item) => !item.hasAttribute("disabled")) : [];
-    (fields.find((item) => item.matches("input:not([type=file])")) || fields[0] || node)?.focus();
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeRef.current();
-      }
-    }
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      previous?.focus();
-    };
-  }, []);
-  return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <div className="modal compact" role="dialog" aria-modal="true" aria-label={title} ref={panelRef} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modal-head"><h2>{title}</h2><button type="button" className="quiet" onClick={onClose}>Close</button></div>
-        {children}
-      </div>
-    </div>
-  );
-}
-
 function businessRows(stored: BusinessAnswer[], questions: FormQuestion[]): BusinessAnswer[] {
   const rows: BusinessAnswer[] = questions.map((item) => ({
     question_id: item.id,
@@ -328,6 +298,7 @@ export function StudentPage() {
   const [dateError, setDateError] = useState("");
   const [dateSaving, setDateSaving] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [transferFrom, setTransferFrom] = useState<StudentEnrollment | null>(null);
   const [options, setOptions] = useState<StudentOptions>({ branches: [], courses: [], batches: [] });
   const [addBranch, setAddBranch] = useState("");
   const [addCourse, setAddCourse] = useState("");
@@ -736,6 +707,58 @@ export function StudentPage() {
     }
   }
 
+  function openTransfer(item: StudentEnrollment) {
+    setTransferFrom(item);
+    setAddBranch("");
+    setAddCourse("");
+    setAddBatch("");
+    setAddStarted("");
+    setAddError("");
+    api<StudentOptions>("/api/v1/students/options?manage=true").then(setOptions).catch((reason: Error) => setAddError(reason.message));
+  }
+
+  async function saveTransfer(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!record || !transferFrom?.id || addSaving) return;
+    if (!addBranch || !addCourse || !addBatch) {
+      setAddError("Choose a branch, course, and batch.");
+      return;
+    }
+    setAddSaving(true);
+    setAddError("");
+    try {
+      await api(`/api/v1/students/${record.id}/transfers`, {
+        method: "POST",
+        body: JSON.stringify({
+          from_enrollment_id: transferFrom.id,
+          branch_id: addBranch,
+          course_id: addCourse,
+          batch_id: addBatch,
+          on: addStarted,
+        }),
+      });
+      setTransferFrom(null);
+      await reload();
+    } catch (reason) {
+      setAddError(reason instanceof Error ? reason.message : "Could not transfer this enrollment.");
+    } finally {
+      setAddSaving(false);
+    }
+  }
+
+  function contextHref(path: string, enrollment?: StudentEnrollment) {
+    const next = new URLSearchParams();
+    const branchId = enrollment?.branch_id || branch;
+    const courseId = enrollment?.course_id || course;
+    const batchId = enrollment?.batch_id || batch;
+    if (branchId) next.set("branch_id", branchId);
+    if (courseId) next.set("course_id", courseId);
+    if (batchId) next.set("batch_id", batchId);
+    next.set("returnTo", back);
+    const search = next.toString();
+    return search ? `${path}?${search}` : path;
+  }
+
   function cardHref(enrollment?: StudentEnrollment) {
     const next = new URLSearchParams();
     next.set("student", studentId);
@@ -805,9 +828,13 @@ export function StudentPage() {
           </div>
           {visibleTab === "personal" ? (
             <>
-              <FactGrid order={CONTACT_ORDER} values={shown} />
-              <h2>Address</h2>
-              <FactGrid order={ADDRESS_ORDER} values={shown} />
+              <FactGrid order={shown.actions.contact === false ? ["date_of_birth", "gender", "blood_group"] : CONTACT_ORDER} values={shown} />
+              {shown.actions.contact === false ? <p>Contact and address are available to staff who manage this student.</p> : (
+                <>
+                  <h2>Address</h2>
+                  <FactGrid order={ADDRESS_ORDER} values={shown} />
+                </>
+              )}
             </>
           ) : null}
           {visibleTab === "academics" ? (
@@ -859,6 +886,19 @@ export function StudentPage() {
                   </dl>
                 </div>
               ))}
+              {(shown.admissions || []).length ? (
+                <>
+                  <h2>Admission</h2>
+                  <ul className="people">
+                    {shown.admissions?.map((item) => (
+                      <li key={item.id}>
+                        <Link to={`/students/admissions/${item.id}`}>{item.course_name || "Admission"}</Link>
+                        {item.enquiry_id ? <> · <Link to={`/students/enquiries/${item.enquiry_id}`}>Enquiry</Link></> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : null}
               <div className="title-row">
                 <h2>Enrollments</h2>
                 {shown.actions.enroll ? (
@@ -894,7 +934,10 @@ export function StudentPage() {
                           <td>
                             <div className="icon-actions">
                               {item.manage ? <button type="button" onClick={() => openDates(item)} aria-label={`Edit dates for ${recordedName(item.batch_name)}`} title="Edit dates"><Icon name="edit" /></button> : null}
-                              {shown.actions.card ? <Link to={cardHref(item)} aria-label={`View progress card for ${recordedName(item.batch_name)}`} title="View progress card"><Icon name="card" /></Link> : null}
+                              {item.manage && item.status !== "historical" ? <button type="button" onClick={() => openTransfer(item)}>Transfer</button> : null}
+                              {shown.actions.card ? <Link to={cardHref(item)} aria-label={`View progress card for ${recordedName(item.batch_name)}`} title="View progress card">Card</Link> : null}
+                              <Link to={contextHref("/marksheets", item)}>Marksheets</Link>
+                              <Link to={contextHref("/views", item)}>Views</Link>
                             </div>
                           </td>
                         </tr>
@@ -923,6 +966,18 @@ export function StudentPage() {
                   ) : null}
                 </>
               ) : null}
+              <h2>Published results</h2>
+              {(shown.assessments || []).length === 0 ? <p>No published results for this student.</p> : (
+                <ul className="people">
+                  {shown.assessments?.map((item) => (
+                    <li key={`${item.id}-${item.batch_id}`}>
+                      <Link to={contextHref(`/marksheets/${item.id}`, shown.enrollments.find((enrollment) => enrollment.batch_id === item.batch_id))}>{item.title}</Link>
+                      {" · "}{item.status}
+                      {item.score == null ? "" : ` · ${item.score}${item.maximum == null ? "" : ` / ${item.maximum}`}`}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </>
           ) : null}
           {visibleTab === "history" ? (
@@ -1208,6 +1263,39 @@ export function StudentPage() {
                 <div className="dialog-actions">
                   <button type="button" className="quiet" onClick={() => setDateTarget(null)}>Cancel</button>
                   <button type="submit" disabled={dateSaving}>{dateSaving ? "Saving…" : "Save"}</button>
+                </div>
+              </form>
+            </Dialog>
+          ) : null}
+          {transferFrom ? (
+            <Dialog title="Transfer enrollment" onClose={() => setTransferFrom(null)}>
+              <form className="form-grid" onSubmit={saveTransfer}>
+                <p className="span-2">The current batch stays on record. Results already stored there stay there.</p>
+                <label>Branch
+                  <select value={addBranch} onChange={(event) => chooseAdd("branch_id", event.target.value)}>
+                    <option value="">Choose</option>
+                    {options.branches.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                  </select>
+                </label>
+                <label>Course
+                  <select value={addCourse} onChange={(event) => chooseAdd("course_id", event.target.value)}>
+                    <option value="">Choose</option>
+                    {addCourses.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                  </select>
+                </label>
+                <label className="span-2">Batch
+                  <select value={addBatch} onChange={(event) => chooseAdd("batch_id", event.target.value)}>
+                    <option value="">Choose</option>
+                    {addBatches.filter((item) => item.id !== transferFrom.batch_id).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                  </select>
+                </label>
+                <label>On
+                  <input type="date" value={addStarted} onChange={(event) => setAddStarted(event.target.value)} />
+                </label>
+                {addError ? <p className="error span-2" role="alert">{addError}</p> : null}
+                <div className="dialog-actions span-2">
+                  <button type="button" className="quiet" onClick={() => setTransferFrom(null)}>Cancel</button>
+                  <button type="submit" disabled={addSaving}>{addSaving ? "Saving…" : "Transfer"}</button>
                 </div>
               </form>
             </Dialog>

@@ -1,4 +1,4 @@
-import { Icon } from "./pages/Catalog";
+import { Icon } from "./ui";
 
 export type Band = { key?: string; name: string; through?: number | null; phrase?: string };
 export type BandDraft = { name: string; through: string };

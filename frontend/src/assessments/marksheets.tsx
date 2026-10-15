@@ -4,7 +4,7 @@ import { ApiError, api } from "../api";
 import { notify } from "../notify";
 import { CONTEXT_FIELDS, Option, clearIncompatible, optionFits } from "../filters";
 import { Band, BandFields, bandsPayload, bandsReady, draftsFrom } from "../bands";
-import { Icon, StudentDialog } from "./Catalog";
+import { Icon, StudentDialog } from "../ui";
 
 type Marksheet = {
   id: string;
@@ -367,7 +367,14 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
               <strong>Enter here</strong>
               <span>Create a draft, then add students who are already enrolled.</span>
             </button>
-            <button type="button" className="choice" onClick={() => navigate("/import?new=1")}>
+            <button type="button" className="choice" onClick={() => {
+              const context = new URLSearchParams();
+              for (const key of ["branch_id", "course_id", "batch_id", "period"]) {
+                if (filters[key]) context.set(key, filters[key]);
+              }
+              const search = context.toString();
+              navigate(search ? `/import?new=1&${search}` : "/import?new=1");
+            }}>
               <strong>Import a workbook</strong>
               <span>Upload an Excel marklist and correct it before it is saved.</span>
             </button>

@@ -2,13 +2,13 @@ import { FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api, Session } from "../api";
 import { Option, optionFits } from "../filters";
-import { IntakeTabs } from "../intakeTabs";
+import { IntakeTabs } from "../peopleTabs";
 import { notify } from "../notify";
-import { StudentDialog } from "./Catalog";
+import { AcademicRecord, BLOOD_GROUPS, EMPTY_RECORD, GENDERS } from "../records";
+import { StudentDialog } from "../ui";
+import { AnswerFields, FormQuestions, Question } from "./questions";
 
 type CourseOption = { id: string; name: string };
-type Question = { id: string; label: string; answer_type: string; choices: string[]; required: boolean; place?: string };
-type AcademicRecord = { qualification: string; stream: string; institution: string; mark: string; year_of_passing: string; board: string };
 type Answer = { question_id: string; label?: string; value: string };
 type FollowUp = { id: string; at: string; note: string; interest: string; next_on: string };
 type Enquiry = {
@@ -26,6 +26,8 @@ type Enquiry = {
   follow_ups: FollowUp[];
   follow_up_count?: number;
   admission_id: string | null;
+  stage?: string;
+  next_action?: string;
 };
 type Match = { id: string; display_name: string; student_code: string; phone: string };
 type Admission = {
@@ -52,7 +54,12 @@ type Admission = {
   questions: Question[];
   status: string;
   student_id: string | null;
+  enrollment_id?: string | null;
+  branch_id?: string | null;
+  batch_id?: string | null;
   enquiry_id: string | null;
+  stage?: string;
+  next_action?: string;
   match_decision: string;
   match_student_id: string;
   matches: Match[];
@@ -69,180 +76,10 @@ type PreviewRow = {
 };
 
 const INTERESTS = ["High", "Medium", "Low"];
-const GENDERS = ["Female", "Male", "Other"];
-const BLOOD = ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"];
-const EMPTY_RECORD: AcademicRecord = { qualification: "", stream: "", institution: "", mark: "", year_of_passing: "", board: "" };
+const BLOOD = BLOOD_GROUPS;
 
 function coursesOf(catalog: { courses: CourseOption[] } | null) {
   return [...(catalog?.courses || [])].sort((left, right) => left.name.localeCompare(right.name));
-}
-
-const PLACES = [
-  { value: "enquiry", label: "Enquiry" },
-  { value: "admission", label: "Admission" },
-  { value: "both", label: "Both" },
-];
-
-function placeLabel(place = "") {
-  return PLACES.find((item) => item.value === place)?.label || "Both";
-}
-
-const ANSWER_KINDS = [
-  { value: "boolean", label: "Checkbox" },
-  { value: "choice", label: "Dropdown" },
-  { value: "text", label: "Text box" },
-  { value: "textarea", label: "Text area" },
-];
-
-export function answerKindLabel(kind = "") {
-  return ANSWER_KINDS.find((item) => item.value === kind)?.label || kind;
-}
-
-export function QuestionControl({ type, choices, value, label, onChange }: { type: string; choices: string[]; value: string; label: string; onChange: (value: string) => void }) {
-  if (type === "boolean") {
-    return (
-      <input type="checkbox" aria-label={label} checked={["yes", "true", "1"].includes(value.trim().toLowerCase())} onChange={(event) => onChange(event.target.checked ? "Yes" : "")} />
-    );
-  }
-  if (type === "choice") {
-    return (
-      <select aria-label={label} value={value} onChange={(event) => onChange(event.target.value)}>
-        <option value="">Not recorded</option>
-        {choices.map((choice) => <option key={choice}>{choice}</option>)}
-      </select>
-    );
-  }
-  if (type === "textarea") {
-    return <textarea rows={4} aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} />;
-  }
-  return <input aria-label={label} type={type === "date" ? "date" : type === "number" ? "number" : "text"} value={value} onChange={(event) => onChange(event.target.value)} />;
-}
-
-function AnswerFields({ questions, answers, onChange, requiredNote }: { questions: Question[]; answers: Record<string, string>; onChange: (id: string, value: string) => void; requiredNote: string }) {
-  return questions.map((item) => {
-    const caption = `${item.label}${item.required ? ` (${requiredNote})` : ""}`;
-    if (item.answer_type === "boolean") {
-      return (
-        <label key={item.id} className="checkbox-row span-2">
-          <QuestionControl type={item.answer_type} choices={item.choices} value={answers[item.id] || ""} label={caption} onChange={(value) => onChange(item.id, value)} />
-          <span>{caption}</span>
-        </label>
-      );
-    }
-    return (
-      <label key={item.id} className="span-2">{caption}
-        <QuestionControl type={item.answer_type} choices={item.choices} value={answers[item.id] || ""} label={caption} onChange={(value) => onChange(item.id, value)} />
-      </label>
-    );
-  });
-}
-
-function FormQuestions({ form, canEdit }: { form: "enquiry" | "admission"; canEdit: boolean }) {
-  const [items, setItems] = useState<Question[]>([]);
-  const [adding, setAdding] = useState(false);
-  const [label, setLabel] = useState("");
-  const [answerType, setAnswerType] = useState("text");
-  const [choices, setChoices] = useState("");
-  const [required, setRequired] = useState(false);
-  const [place, setPlace] = useState<string>(form);
-  const [error, setError] = useState("");
-
-  function load() {
-    api<{ items: Question[] }>(`/api/v1/form-questions?form=${form}`).then((result) => setItems(result.items)).catch((reason: Error) => setError(reason.message));
-  }
-
-  useEffect(() => { load(); }, [form]);
-
-  async function add(event: FormEvent) {
-    event.preventDefault();
-    setError("");
-    try {
-      await api("/api/v1/form-questions", {
-        method: "POST",
-        body: JSON.stringify({
-          label,
-          answer_type: answerType,
-          choices: choices.split(",").map((item) => item.trim()).filter(Boolean),
-          required,
-          place,
-        }),
-      });
-      setLabel("");
-      setChoices("");
-      setRequired(false);
-      setPlace(form);
-      setAdding(false);
-      notify("Saved the question.");
-      load();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The question was not saved.");
-    }
-  }
-
-  async function remove(item: Question) {
-    setError("");
-    try {
-      await api(`/api/v1/form-questions/${item.id}`, { method: "DELETE" });
-      notify(`Removed ${item.label}.`);
-      load();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The question was not removed.");
-    }
-  }
-
-  return (
-    <>
-      <div className="title-row">
-        <h2>Questions</h2>
-        {canEdit ? <button type="button" onClick={() => { setLabel(""); setAnswerType("text"); setChoices(""); setRequired(false); setPlace(form); setAdding(true); }}>Add question</button> : null}
-      </div>
-      {error ? <p className="error" role="alert">{error}</p> : null}
-      {items.length === 0 ? <p>No questions for this form.</p> : (
-        <ul className="people">
-          {items.map((item) => (
-            <li key={item.id}>
-              <span>{item.label}{item.required ? " · required" : ""} · {answerKindLabel(item.answer_type)} · {placeLabel(item.place)}{item.choices.length ? ` · ${item.choices.join(", ")}` : ""}</span>
-              {canEdit ? <button type="button" className="quiet" onClick={() => void remove(item)}>Remove</button> : null}
-            </li>
-          ))}
-        </ul>
-      )}
-      {adding ? (
-        <StudentDialog title="Question" onClose={() => setAdding(false)}>
-          <form className="form-grid" onSubmit={add}>
-            <label className="span-2">Question
-              <input value={label} required onChange={(event) => setLabel(event.target.value)} />
-            </label>
-            <label>Shows on
-              <select value={place} onChange={(event) => setPlace(event.target.value)}>
-                {PLACES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-              </select>
-            </label>
-            <label>Answer
-              <select value={answerType} onChange={(event) => setAnswerType(event.target.value)}>
-                {ANSWER_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-              </select>
-            </label>
-            <label>Required
-              <select value={required ? "yes" : "no"} onChange={(event) => setRequired(event.target.value === "yes")}>
-                <option value="no">No</option>
-                <option value="yes">Yes</option>
-              </select>
-            </label>
-            {answerType === "choice" ? (
-              <label className="span-2">Options, separated by commas
-                <input value={choices} onChange={(event) => setChoices(event.target.value)} />
-              </label>
-            ) : null}
-            <div className="dialog-actions span-2">
-              <button type="button" className="quiet" onClick={() => setAdding(false)}>Cancel</button>
-              <button type="submit" disabled={!label.trim()}>Save</button>
-            </div>
-          </form>
-        </StudentDialog>
-      ) : null}
-    </>
-  );
 }
 
 export function EnquiriesPage({ session }: { session: Session }) {
@@ -306,13 +143,13 @@ export function EnquiriesPage({ session }: { session: Session }) {
         <button type="submit">Search</button>
       </form>
       <p className="filter-row"><span>{loading ? "Loading enquiries…" : `${total} enquir${total === 1 ? "y" : "ies"}`}</span></p>
-      {items.length === 0 && !loading ? <p>No enquiries yet.</p> : null}
+      {items.length === 0 && !loading ? <p>{query.trim() || followUp || courseId ? "No enquiries match." : "No enquiries yet."}</p> : null}
       {items.length > 0 ? (
         <div className="table-wrap">
           <table className="people-table">
             <caption className="sr-only">Enquiries</caption>
             <thead>
-              <tr><th>Name</th><th>WhatsApp</th><th>Course</th><th>Interest</th><th>Follow-ups</th><th>Status</th></tr>
+              <tr><th>Name</th><th>WhatsApp</th><th>Course</th><th>Interest</th><th>Stage</th><th>Next</th></tr>
             </thead>
             <tbody>
               {items.map((item) => (
@@ -321,8 +158,8 @@ export function EnquiriesPage({ session }: { session: Session }) {
                   <td>{item.whatsapp || "Not recorded"}</td>
                   <td>{item.course_name || "Not recorded"}</td>
                   <td>{item.interest || "Not recorded"}</td>
-                  <td>{item.follow_up_count ?? item.follow_ups.length}</td>
-                  <td>{item.admission_id ? "Admitted" : "Open"}</td>
+                  <td>{item.stage || (item.admission_id ? "Admitted" : "Enquiry")}</td>
+                  <td>{item.admission_id ? <Link to={`/students/admissions/${item.admission_id}`}>Open admission</Link> : <Link to={`/students/enquiries/${item.id}`}>{item.next_action || "Follow up"}</Link>}</td>
                 </tr>
               ))}
             </tbody>
@@ -389,14 +226,12 @@ export function EnquiryPage({ session }: { session: Session }) {
         <div>
           <p className="eyebrow">Enquiry</p>
           <h1>{enquiry.name}</h1>
-          <p className="meta">{enquiry.admission_id ? "Admitted" : "Open"}</p>
+          <p className="meta">{enquiry.stage || (enquiry.admission_id ? "Admitted" : "Enquiry")} · {enquiry.next_action || (enquiry.admission_id ? "Open the admission" : "Record a follow-up")}</p>
         </div>
-        {canManage ? (
-          <div className="actions">
-            <button type="button" onClick={() => setEditing(true)}>Edit</button>
-            {enquiry.admission_id ? <Link to={`/students/admissions/${enquiry.admission_id}`}>Open admission</Link> : <button type="button" onClick={() => void convert()}>Admit</button>}
-          </div>
-        ) : null}
+        <div className="actions">
+          {canManage ? <button type="button" onClick={() => setEditing(true)}>Edit</button> : null}
+          {enquiry.admission_id ? <Link to={`/students/admissions/${enquiry.admission_id}`}>Open admission</Link> : canManage ? <button type="button" onClick={() => void convert()}>Admit</button> : null}
+        </div>
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
       <dl className="facts">
@@ -602,19 +437,20 @@ export function AdmissionsPage({ session }: { session: Session }) {
         <button type="submit">Search</button>
       </form>
       <p className="filter-row"><span>{loading ? "Loading admissions…" : `${total} admission${total === 1 ? "" : "s"}`}</span></p>
-      {items.length === 0 && !loading ? <p>No admissions yet.</p> : null}
+      {items.length === 0 && !loading ? <p>{query.trim() || status || courseId ? "No admissions match." : "No admissions yet."}</p> : null}
       {items.length > 0 ? (
         <div className="table-wrap">
           <table className="people-table">
             <caption className="sr-only">Admissions</caption>
-            <thead><tr><th>Name</th><th>Contact</th><th>Course</th><th>Status</th></tr></thead>
+            <thead><tr><th>Name</th><th>Contact</th><th>Course</th><th>Stage</th><th>Next</th></tr></thead>
             <tbody>
               {items.map((item) => (
                 <tr key={item.id}>
                   <td><Link to={`/students/admissions/${item.id}`}>{item.name}</Link></td>
                   <td>{item.phone}</td>
                   <td>{item.course_name || "Not recorded"}</td>
-                  <td>{item.status === "converted" ? "Student" : "Open"}</td>
+                  <td>{item.stage || (item.status === "converted" ? "Enrolled" : "Open")}</td>
+                  <td>{item.student_id ? <Link to={`/students/${item.student_id}`}>Open student</Link> : <Link to={`/students/admissions/${item.id}`}>{item.next_action || "Enroll in a batch"}</Link>}</td>
                 </tr>
               ))}
             </tbody>
@@ -687,11 +523,13 @@ export function AdmissionPage({ session }: { session: Session }) {
         <div>
           <p className="eyebrow">Admission</p>
           <h1>{admission.name}</h1>
-          <p className="meta">{admission.course_name} · {open ? "Open" : "Student"}</p>
+          <p className="meta">{admission.course_name} · {admission.stage || (open ? "Open" : "Enrolled")} · {admission.next_action || (open ? "Enroll in a batch" : "Open the student")}</p>
         </div>
         <div className="actions">
+          {admission.enquiry_id ? <Link to={`/students/enquiries/${admission.enquiry_id}`}>Open enquiry</Link> : null}
           {canManage && open ? <button type="button" onClick={() => setEditing(true)}>Edit</button> : null}
           {admission.student_id ? <Link to={`/students/${admission.student_id}`}>Open student</Link> : null}
+          {admission.batch_id ? <Link to={`/batches/${admission.batch_id}?branch_id=${admission.branch_id || ""}&course_id=${admission.course_id}&batch_id=${admission.batch_id}`}>Open batch</Link> : null}
         </div>
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}

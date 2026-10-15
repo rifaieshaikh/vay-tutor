@@ -55,6 +55,17 @@ def _apply_sheet(source: dict, choice: dict, known: dict[str, list[str]], defaul
             blockers.extend(applied["blockers"])
     if included and not groups:
         blockers.append({"code": "import.no_table", "sheet_id": source["id"], "message": f"{source['name']} has no mark table."})
+    if included and _context_conflict(choice, defaults or {}, source):
+        blockers.append(
+            {
+                "code": "import.context_conflict",
+                "sheet_id": source["id"],
+                "message": (
+                    f"{source['name']} names a different branch, course, or batch than the one selected. "
+                    "Use the selected context, or clear it and keep the workbook."
+                ),
+            }
+        )
     return {
         **{key: source[key] for key in (
             "id", "name", "position", "branch_name", "course_name", "subject_name", "paper_number",
@@ -102,6 +113,24 @@ def _batch_override(choice: dict, defaults: dict, detected: list[dict]) -> list[
 
 def _batch_label(batches: list[dict]) -> str:
     return ", ".join(item["label"] for item in batches)
+
+
+def _context_conflict(choice: dict, defaults: dict, source: dict) -> bool:
+    if choice.get("acknowledge_context"):
+        return False
+    detected = {
+        "branch": source.get("branch_name") or "",
+        "course": source.get("course_name") or "",
+        "batch": _batch_label(source.get("recommended_batches") or []),
+    }
+    for field, found in detected.items():
+        selected = defaults.get(field) or {}
+        value = str(selected.get("value") or "").strip()
+        if selected.get("mode") != "existing" or not value or not str(found).strip():
+            continue
+        if name_key(value) != name_key(str(found)):
+            return True
+    return False
 
 
 def _apply_group(

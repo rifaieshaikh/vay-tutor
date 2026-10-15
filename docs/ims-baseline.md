@@ -283,3 +283,13 @@ A batch page at `/batches/{id}` links the batch to its branch, course curriculum
 A teaching post is an assignment on the teacher: batch, subject, optional paper, from date, until date, and status `current` or `ended`. Ending a post keeps the row. The same teacher can hold posts on more than one batch. Saving a post does not create or change grants. The older course teaching screen can still write teacher-role grants for an app user; that screen is access, and the batch post is not.
 
 A batch with `ended_on` is closed. New enrollments and new teaching posts into that batch are rejected. Existing enrollments, posts, and marksheets stay readable.
+
+## Connected records (Phase 4)
+
+An enquiry shows its stage and the next action. Admitting it opens the admission. Enrolling that admission creates or reuses one student and one enrollment in the chosen batch. Doing it again does not create a second student or a second enrollment. The same name with a different phone is a different person. The same name and phone asks the operator to attach or create.
+
+A transfer ends the source enrollment and opens another. Both enrollments stay. Results stay on the enrollment that sat the assessment. A closed batch rejects a new enrollment and a new admission conversion. Import of a historical workbook can still reuse a closed batch, and a failed import does not remove students that were already saved.
+
+Contact and address on the student page are shown to staff who can manage that student. A lookup-only grant sees the identity, enrollments, and published results. Progress cards and academic views count the active published revision. Draft rows stay out of those totals.
+
+Import opened from a batch or the marksheet list keeps that branch, course, and batch. If the workbook names a different one, the operator confirms the selected context before the import can be saved. A workbook opened with no selected context still uses its own headings.

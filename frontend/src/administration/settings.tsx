@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { api, Session } from "../api";
 import { notify } from "../notify";
 import { Band, BandFields, bandsPayload, bandsReady, draftsFrom } from "../bands";
-import { Icon, StudentDialog } from "./Catalog";
+import { Icon, StudentDialog } from "../ui";
 
 type Policy = {
   version: number;

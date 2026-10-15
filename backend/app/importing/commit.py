@@ -6,6 +6,7 @@ from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 
 from app.db import allocate_student_code
+from app.enrollment import enrollment_fields, name_document
 from app.errors import AppError
 from app.importing.plan import apply_decisions
 from app.security import name_key
@@ -320,19 +321,26 @@ async def _commit_group(db, session, job, actor, sheet, group, branch, course, s
         enrollment, enrollment_new = await _ensure(
             db, "enrollments", session,
             {"student_id": person["_id"], "batch_id": batch_id},
-            {
-                "institute_id": institute_id,
-                "student_id": person["_id"],
-                "branch_id": branch["_id"],
-                "course_id": course["_id"],
-                "batch_id": batch_id,
-            },
+            enrollment_fields(
+                institute_id=institute_id,
+                student_id=person["_id"],
+                branch_id=branch["_id"],
+                course_id=course["_id"],
+                batch_id=batch_id,
+            ),
         )
         _note(ledger, "enrollments", "insert" if enrollment_new else "unchanged", enrollment["_id"])
+        stored_name = name_document(
+            institute_id=institute_id,
+            batch_id=batch_id,
+            student_id=person["_id"],
+            name_key=student["name_key"],
+        )
+        stored_name.pop("_id")
         await _ensure(
             db, "enrollment_names", session,
             {"batch_id": batch_id, "name_key": student["name_key"]},
-            {"institute_id": institute_id, "batch_id": batch_id, "student_id": person["_id"], "name_key": student["name_key"]},
+            stored_name,
         )
         existing = by_student.get(person["_id"])
         if existing and _same_mark(existing, student):
@@ -389,11 +397,17 @@ async def _commit_group(db, session, job, actor, sheet, group, branch, course, s
 
 
 async def _student_for_batch(db, session, institute_id: str, batch_id: str, student: dict) -> tuple[dict, bool]:
-    existing = await db.enrollment_names.find_one(
+    matches = await db.enrollment_names.find(
         {"batch_id": batch_id, "name_key": student["name_key"]}, session=session
-    )
-    if existing:
-        found = await db.students.find_one({"_id": existing["student_id"]}, session=session)
+    ).to_list(length=5)
+    if len(matches) > 1:
+        raise AppError(
+            409,
+            "import.ambiguous_name",
+            f"More than one student in this batch is named {student['display_name']}. Choose which student this row is.",
+        )
+    if matches:
+        found = await db.students.find_one({"_id": matches[0]["student_id"]}, session=session)
         if found:
             return found, False
     code = await allocate_student_code(db, session, "IAM")
