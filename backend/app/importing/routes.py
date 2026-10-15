@@ -29,7 +29,8 @@ from app.importing.publish import (
     submit_marksheet,
     withdraw_marksheet,
 )
-from app.security import name_key
+from app.intake import apply_course_profiles, apply_record_update, remember_answers, student_extras
+from app.security import name_key, phone_key
 from app.students import (
     card_visible,
     directory_facts,
@@ -105,6 +106,12 @@ class StudentName(BaseModel):
     institution: str | None = None
     board: str | None = None
     passing_year: str | None = None
+    gender: str | None = None
+    email: str | None = None
+    address_line_2: str | None = None
+    academic_records: list[dict] | None = None
+    course_profiles: list[dict] | None = None
+    business_answers: list[dict] | None = None
 
 
 _PROFILE_LIMITS = {
@@ -113,18 +120,36 @@ _PROFILE_LIMITS = {
     "guardian_phone": 30,
     "notes": 500,
     "street": 200,
+    "address_line_2": 200,
     "place": 80,
     "district": 80,
     "state": 80,
     "qualification": 120,
     "institution": 200,
     "board": 160,
+    "email": 120,
 }
+_GENDERS = {"Female", "Male", "Other"}
 _BLOOD_GROUPS = {"A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"}
 _PROFILE_FIELDS = (
-    "date_of_birth", "blood_group", "phone", "guardian_name", "guardian_phone", "notes",
-    "street", "place", "district", "state", "pin",
-    "qualification", "institution", "board", "passing_year",
+    "date_of_birth",
+    "blood_group",
+    "gender",
+    "phone",
+    "email",
+    "guardian_name",
+    "guardian_phone",
+    "notes",
+    "street",
+    "address_line_2",
+    "place",
+    "district",
+    "state",
+    "pin",
+    "qualification",
+    "institution",
+    "board",
+    "passing_year",
 )
 
 
@@ -345,9 +370,13 @@ async def upload_corrections(request: Request, import_id: str, file: UploadFile 
     applied = []
     unmatched = []
     for row in rows:
-        sheet = next((item for item in plan["sheets"] if item["name"].strip().casefold() == row["sheet"].casefold()), None)
+        sheet = next(
+            (item for item in plan["sheets"] if item["name"].strip().casefold() == row["sheet"].casefold()), None
+        )
         if sheet is None:
-            unmatched.append({"sheet": row["sheet"], "student": row["student"], "message": "That sheet is not in this workbook."})
+            unmatched.append(
+                {"sheet": row["sheet"], "student": row["student"], "message": "That sheet is not in this workbook."}
+            )
             continue
         wanted_row = row["row"]
         matches = []
@@ -358,7 +387,13 @@ async def upload_corrections(request: Request, import_id: str, file: UploadFile 
                 if name_key(row["student"]) == student["name_key"]:
                     matches.append(student)
         if len(matches) != 1:
-            unmatched.append({"sheet": row["sheet"], "student": row["student"], "message": "Match one student. Add the Row column when a name appears twice."})
+            unmatched.append(
+                {
+                    "sheet": row["sheet"],
+                    "student": row["student"],
+                    "message": "Match one student. Add the Row column when a name appears twice.",
+                }
+            )
             continue
         score = row["score"]
         status = None
@@ -370,7 +405,12 @@ async def upload_corrections(request: Request, import_id: str, file: UploadFile 
             score = None
         choice = decisions["sheets"].setdefault(sheet["id"], {})
         corrections = choice.setdefault("corrections", {})
-        corrections[str(matches[0]["row"])] = {"action": "replace", "score": score, "status": status, "reason": row["reason"]}
+        corrections[str(matches[0]["row"])] = {
+            "action": "replace",
+            "score": score,
+            "status": status,
+            "reason": row["reason"],
+        }
         applied.append({"sheet": sheet["name"], "student": matches[0]["display_name"], "row": matches[0]["row"]})
     await db(request).import_jobs.update_one({"_id": job["_id"]}, {"$set": {"decisions": decisions}})
     return {"applied": applied, "unmatched": unmatched}
@@ -388,15 +428,17 @@ async def correction_template(request: Request, import_id: str):
             for student in group["students"]:
                 if student.get("change") not in {"reject", "update"}:
                     continue
-                sheet.append([
-                    item["name"],
-                    student["row"],
-                    student["display_name"],
-                    student.get("score"),
-                    student.get("before_score"),
-                    "",
-                    "",
-                ])
+                sheet.append(
+                    [
+                        item["name"],
+                        student["row"],
+                        student["display_name"],
+                        student.get("score"),
+                        student.get("before_score"),
+                        "",
+                        "",
+                    ]
+                )
     buffer = BytesIO()
     workbook.save(buffer)
     buffer.seek(0)
@@ -421,7 +463,22 @@ async def validation_report(request: Request, import_id: str):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Validation"
-    sheet.append(["Sheet", "Row", "Name", "Status", "Score", "Before", "Change", "Maximum", "Percentage", "Rank", "Source rank", "Blocker"])
+    sheet.append(
+        [
+            "Sheet",
+            "Row",
+            "Name",
+            "Status",
+            "Score",
+            "Before",
+            "Change",
+            "Maximum",
+            "Percentage",
+            "Rank",
+            "Source rank",
+            "Blocker",
+        ]
+    )
     blockers = {(item.get("sheet_id"), item.get("row")): item["message"] for item in payload["blockers"]}
     for item in payload["sheets"]:
         for group in item["groups"]:
@@ -466,12 +523,32 @@ async def outcome_report(request: Request, import_id: str):
     sheet.title = "Outcome"
     sheet.append(["Kind", "Inserted", "Updated", "Unchanged", "Skipped", "Rejected"])
     for kind, buckets in (summary.get("counts") or {}).items():
-        sheet.append([kind, buckets.get("insert", 0), buckets.get("update", 0), buckets.get("unchanged", 0), buckets.get("skip", 0), buckets.get("reject", 0)])
+        sheet.append(
+            [
+                kind,
+                buckets.get("insert", 0),
+                buckets.get("update", 0),
+                buckets.get("unchanged", 0),
+                buckets.get("skip", 0),
+                buckets.get("reject", 0),
+            ]
+        )
     detail = workbook.create_sheet("Sheets")
     detail.append(["Sheet", "Status", "Kind", "Inserted", "Updated", "Unchanged", "Skipped", "Rejected"])
     for item in summary.get("by_sheet") or []:
         for kind, buckets in (item.get("counts") or {}).items():
-            detail.append([item.get("name"), item.get("status"), kind, buckets.get("insert", 0), buckets.get("update", 0), buckets.get("unchanged", 0), buckets.get("skip", 0), buckets.get("reject", 0)])
+            detail.append(
+                [
+                    item.get("name"),
+                    item.get("status"),
+                    kind,
+                    buckets.get("insert", 0),
+                    buckets.get("update", 0),
+                    buckets.get("unchanged", 0),
+                    buckets.get("skip", 0),
+                    buckets.get("reject", 0),
+                ]
+            )
     buffer = BytesIO()
     workbook.save(buffer)
     buffer.seek(0)
@@ -511,7 +588,9 @@ async def cancel_import(request: Request, import_id: str) -> dict:
 @router.get("/imports")
 async def list_imports(request: Request) -> dict:
     user = await current_user(request)
-    if not any("marksheet.upload" in grant["actions"] or "marksheet.view" in grant["actions"] for grant in user["grants"]):
+    if not any(
+        "marksheet.upload" in grant["actions"] or "marksheet.view" in grant["actions"] for grant in user["grants"]
+    ):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
     items = []
     cursor = db(request).import_jobs.find({"institute_id": user["institute_id"]}).sort("created_at", -1)
@@ -545,11 +624,17 @@ async def create_marksheet(request: Request, body: MarksheetCreate) -> dict:
     paper = await database.papers.find_one({"_id": body.paper_id, "institute_id": institute_id})
     if not all((branch, course, batch, subject, paper)):
         raise AppError(404, "not_found", "That academic record was not found.")
-    if batch.get("course_id") != course["_id"] or subject.get("course_id") != course["_id"] or paper.get("subject_id") != subject["_id"]:
+    if (
+        batch.get("course_id") != course["_id"]
+        or subject.get("course_id") != course["_id"]
+        or paper.get("subject_id") != subject["_id"]
+    ):
         raise AppError(422, "marksheet.context", "That batch, subject, and paper do not belong to the same course.")
     if batch.get("branch_id") and batch.get("branch_id") != branch["_id"]:
         raise AppError(422, "marksheet.context", "That batch does not belong to the chosen branch.")
-    offering = await database.offerings.find_one({"institute_id": institute_id, "branch_id": branch["_id"], "course_id": course["_id"]})
+    offering = await database.offerings.find_one(
+        {"institute_id": institute_id, "branch_id": branch["_id"], "course_id": course["_id"]}
+    )
     if offering is None:
         raise AppError(422, "marksheet.context", "That branch does not offer the chosen course.")
     resource = {
@@ -567,7 +652,12 @@ async def create_marksheet(request: Request, body: MarksheetCreate) -> dict:
     existing = await database.assessments.find_one({"institute_id": institute_id, "identity_key": identity})
     if existing:
         found = await database.marksheets.find_one({"assessment_id": existing["_id"], "institute_id": institute_id})
-        raise AppError(409, "marksheet.exists", "A marksheet with that title already exists for this batch.", id=found["_id"] if found else None)
+        raise AppError(
+            409,
+            "marksheet.exists",
+            "A marksheet with that title already exists for this batch.",
+            id=found["_id"] if found else None,
+        )
     sheet_id = str(ObjectId())
     assessment_id = str(ObjectId())
     attempt_id = str(ObjectId())
@@ -743,18 +833,24 @@ async def list_marksheets(
         query["batch_ids"] = batch_id
     named_sheets: set[str] = set()
     if q:
-        matched_students = await db(request).students.find(
-            {"institute_id": user["institute_id"], "display_name": {"$regex": q, "$options": "i"}},
-            {"_id": 1},
-        ).to_list(length=200)
+        matched_students = (
+            await db(request)
+            .students.find(
+                {"institute_id": user["institute_id"], "display_name": {"$regex": q, "$options": "i"}},
+                {"_id": 1},
+            )
+            .to_list(length=200)
+        )
         student_ids = [item["_id"] for item in matched_students]
         if student_ids:
             named_sheets = {
                 item["marksheet_id"]
-                for item in await db(request).results.find(
+                for item in await db(request)
+                .results.find(
                     {"student_id": {"$in": student_ids}},
                     {"marksheet_id": 1},
-                ).to_list(length=2000)
+                )
+                .to_list(length=2000)
             }
     items = []
     names = {}
@@ -769,7 +865,9 @@ async def list_marksheets(
         if not allows(user["grants"], "marksheet.view", resource):
             continue
         summary = _marksheet_summary(sheet)
-        haystack = " ".join(str(summary.get(field) or "") for field in ("title", "source_file", "source_sheet")).casefold()
+        haystack = " ".join(
+            str(summary.get(field) or "") for field in ("title", "source_file", "source_sheet")
+        ).casefold()
         if q and q.casefold() not in haystack and sheet["_id"] not in named_sheets:
             continue
         for field, key in (("uploader_id", "uploader_name"), ("reviewer_id", "reviewer_name")):
@@ -779,7 +877,9 @@ async def list_marksheets(
                 names[person_id] = person["name"] if person else ""
             summary[key] = names.get(person_id, "")
         items.append(summary)
-    items.sort(key=lambda item: str(item.get(sort if sort in {"exam_date", "status", "title"} else "title") or "").casefold())
+    items.sort(
+        key=lambda item: str(item.get(sort if sort in {"exam_date", "status", "title"} else "title") or "").casefold()
+    )
     total = len(items)
     current = page or 1
     if page:
@@ -899,30 +999,37 @@ async def _refresh_sheet_marks(request: Request, sheet: dict) -> None:
 
     revision = sheet.get("revision") or 1
     rows = await db(request).results.find({"marksheet_id": sheet["_id"], "revision": revision}).to_list(length=500)
-    policy = {"bands": sheet["bands"]} if sheet.get("bands") else await db(request).policies.find_one(
-        {"institute_id": sheet["institute_id"]}, sort=[("version", -1)]
+    policy = (
+        {"bands": sheet["bands"]}
+        if sheet.get("bands")
+        else await db(request).policies.find_one({"institute_id": sheet["institute_id"]}, sort=[("version", -1)])
     )
-    ranked = dense_ranks([
-        {"id": row["_id"], "status": row.get("status"), "score": row.get("score")}
-        for row in rows
-    ])
+    ranked = dense_ranks([{"id": row["_id"], "status": row.get("status"), "score": row.get("score")} for row in rows])
     for row in rows:
-        exact = percentage(row.get("score"), row.get("maximum") if row.get("maximum") is not None else sheet.get("maximum"))
+        exact = percentage(
+            row.get("score"), row.get("maximum") if row.get("maximum") is not None else sheet.get("maximum")
+        )
         exact = exact if row.get("status") == "scored" else None
         await db(request).results.update_one(
             {"_id": row["_id"]},
-            {"$set": {
-                "percentage": display_percentage(exact),
-                "band": band(exact, policy) if row.get("status") == "scored" else None,
-                "rank": ranked.get(row["_id"]),
-            }},
+            {
+                "$set": {
+                    "percentage": display_percentage(exact),
+                    "band": band(exact, policy) if row.get("status") == "scored" else None,
+                    "rank": ranked.get(row["_id"]),
+                }
+            },
         )
 
 
 @router.get("/catalog")
 async def catalog(request: Request) -> dict:
     user = await current_user(request)
-    if not any(action in grant["actions"] for grant in user["grants"] for action in ("student.lookup", "catalog.correct", "catalog.manage")):
+    if not any(
+        action in grant["actions"]
+        for grant in user["grants"]
+        for action in ("student.lookup", "catalog.correct", "catalog.manage")
+    ):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
     database = db(request)
     branches = await database.branches.find({"institute_id": user["institute_id"]}).to_list(length=200)
@@ -949,7 +1056,9 @@ async def catalog(request: Request) -> dict:
 @router.patch("/catalog/{kind}/{record_id}")
 async def patch_catalog(request: Request, kind: str, record_id: str, body: CatalogPatch) -> dict:
     user = await current_user(request)
-    if not any("catalog.correct" in grant["actions"] or "catalog.manage" in grant["actions"] for grant in user["grants"]):
+    if not any(
+        "catalog.correct" in grant["actions"] or "catalog.manage" in grant["actions"] for grant in user["grants"]
+    ):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
     collection = {
         "branch": "branches",
@@ -993,11 +1102,20 @@ async def patch_catalog(request: Request, kind: str, record_id: str, body: Catal
             else:
                 unsets["notes"] = ""
     if kind == "batch":
-        started = calendar_date(body.started_on or "", "started_on") if "started_on" in sent else str(record.get("started_on") or "")
-        ended = calendar_date(body.ended_on or "", "ended_on") if "ended_on" in sent else str(record.get("ended_on") or "")
+        started = (
+            calendar_date(body.started_on or "", "started_on")
+            if "started_on" in sent
+            else str(record.get("started_on") or "")
+        )
+        ended = (
+            calendar_date(body.ended_on or "", "ended_on") if "ended_on" in sent else str(record.get("ended_on") or "")
+        )
         if started and ended and ended < started:
             raise AppError(422, "catalog.date", "The until date is before the from date.", field="ended_on")
-        for field, value in (("started_on", started if "started_on" in sent else None), ("ended_on", ended if "ended_on" in sent else None)):
+        for field, value in (
+            ("started_on", started if "started_on" in sent else None),
+            ("ended_on", ended if "ended_on" in sent else None),
+        ):
             if value is None:
                 continue
             if value != str(record.get(field) or ""):
@@ -1081,7 +1199,9 @@ async def merge_students(request: Request, body: MergeBody) -> dict:
             "display_name": source.get("display_name"),
         }
     )
-    await db(request).students.update_one({"_id": source["_id"]}, {"$set": {"archived": True, "merged_into": target["_id"]}})
+    await db(request).students.update_one(
+        {"_id": source["_id"]}, {"$set": {"archived": True, "merged_into": target["_id"]}}
+    )
     await db(request).audit_events.insert_one(
         {
             "_id": str(ObjectId()),
@@ -1113,6 +1233,7 @@ async def enrollment_history(request: Request, student_id: str) -> dict:
         "edit_version": student.get("edit_version", 0),
         "photo_id": student.get("photo_file_id") or None,
         **_profile_view(student),
+        **await student_extras(db(request), student),
         "enrollments": contexts,
         "aliases": [
             {"id": item["_id"], "display_name": item.get("display_name")}
@@ -1151,18 +1272,47 @@ async def rename_student(request: Request, student_id: str, body: StudentName) -
     key = name_key(display_name)
     await _reject_shared_name(request, user["institute_id"], student_id, key, owned)
     profile_set, profile_unset, profile_before, profile_after = _profile_changes(body, student)
+    if "phone" in profile_set:
+        profile_set["phone_key"] = phone_key(profile_set["phone"])
+    elif "phone" in profile_unset:
+        profile_unset["phone_key"] = ""
+    if "academic_records" in body.model_fields_set:
+        record_set, record_unset, record_before, record_after = apply_record_update(
+            student, body.academic_records or []
+        )
+        profile_set.update(record_set)
+        profile_unset.update(record_unset)
+        profile_before.update(record_before)
+        profile_after.update(record_after)
+    if "course_profiles" in body.model_fields_set:
+        profile_set["course_profiles"] = await apply_course_profiles(
+            request, user["institute_id"], body.course_profiles or []
+        )
+    if "business_answers" in body.model_fields_set:
+        profile_set["business_answers"] = await remember_answers(
+            request,
+            user["institute_id"],
+            "admission",
+            student.get("business_answers") or [],
+            body.business_answers or [],
+            require=False,
+        )
+    for field in profile_set:
+        profile_unset.pop(field, None)
     version_query: dict = {"_id": student_id, "institute_id": user["institute_id"]}
     if current == 0:
         version_query["$or"] = [{"edit_version": 0}, {"edit_version": {"$exists": False}}]
     else:
         version_query["edit_version"] = current
-    changes: dict = {"$set": {
-        "display_name": display_name,
-        "name_key": key,
-        "previous_name": student.get("display_name"),
-        "edit_version": current + 1,
-        **profile_set,
-    }}
+    changes: dict = {
+        "$set": {
+            "display_name": display_name,
+            "name_key": key,
+            "previous_name": student.get("display_name"),
+            "edit_version": current + 1,
+            **profile_set,
+        }
+    }
     if profile_unset:
         changes["$unset"] = profile_unset
     updated = await db(request).students.update_one(version_query, changes)
@@ -1217,7 +1367,7 @@ def _conflict_details(student: dict, version: int) -> dict:
 
 def _profile_text(value: str | None, limit: int, field: str) -> str:
     text = " ".join(str(value or "").split())
-    if field in {"street", "notes"}:
+    if field in {"street", "notes", "address_line_2"}:
         text = str(value or "").strip()
     if len(text) > limit:
         raise AppError(422, "student.profile", f"Use {limit} characters or fewer.", field=field)
@@ -1258,7 +1408,15 @@ def _profile_changes(body: StudentName, student: dict) -> tuple[dict, dict, dict
     for field, limit in _PROFILE_LIMITS.items():
         if field not in sent:
             continue
-        keep(field, _profile_text(getattr(body, field), limit, field))
+        text = _profile_text(getattr(body, field), limit, field)
+        if field == "email" and text and ("@" not in text[1:-1] or "." not in text.split("@", 1)[1]):
+            raise AppError(422, "student.profile", "Use an email address.", field="email")
+        keep(field, text)
+    if "gender" in sent:
+        gender = str(body.gender or "").strip()
+        if gender and gender not in _GENDERS:
+            raise AppError(422, "student.profile", "Choose a gender.", field="gender")
+        keep("gender", gender)
     if "date_of_birth" in sent:
         born = _birth_date(body.date_of_birth)
         keep("date_of_birth", born or "")
@@ -1542,9 +1700,13 @@ async def add_student_enrollment(request: Request, student_id: str, body: Enroll
     keys = {student.get("name_key")}
     keys.update(item.get("name_key") for item in aliases if item.get("name_key"))
     keys.discard(None)
-    taken = await db(request).enrollment_names.find(
-        {"batch_id": body.batch_id, "name_key": {"$in": list(keys)}, "student_id": {"$ne": student_id}}
-    ).to_list(length=5)
+    taken = (
+        await db(request)
+        .enrollment_names.find(
+            {"batch_id": body.batch_id, "name_key": {"$in": list(keys)}, "student_id": {"$ne": student_id}}
+        )
+        .to_list(length=5)
+    )
     if taken:
         raise AppError(
             409,
@@ -1631,14 +1793,17 @@ async def student_history(request: Request, student_id: str) -> dict:
     }
 
 
-async def _student_directory(request: Request, user: dict, student_id: str) -> tuple[dict, list[dict], list[dict], dict]:
+async def _student_directory(
+    request: Request, user: dict, student_id: str
+) -> tuple[dict, list[dict], list[dict], dict]:
     student = await db(request).students.find_one({"_id": student_id, "institute_id": user["institute_id"]})
     if student is None:
         raise AppError(404, "not_found", "That record was not found.")
     owned = await db(request).enrollments.find({"student_id": student_id}).to_list(length=100)
     facts = await directory_facts(db(request), user["institute_id"])
     visible = [
-        row for row in owned
+        row
+        for row in owned
         if enrollment_visible(user["grants"], row, facts["subject_by_id"], facts["paper_subject"], facts["rosters"])
     ]
     if not visible:
@@ -1646,17 +1811,25 @@ async def _student_directory(request: Request, user: dict, student_id: str) -> t
     return student, visible, owned, facts
 
 
-async def _reject_shared_name(request: Request, institute_id: str, student_id: str, key: str, owned: list[dict]) -> None:
-    others = await db(request).students.find(
-        {"institute_id": institute_id, "name_key": key, "_id": {"$ne": student_id}, "archived": {"$ne": True}}
-    ).to_list(length=20)
+async def _reject_shared_name(
+    request: Request, institute_id: str, student_id: str, key: str, owned: list[dict]
+) -> None:
+    others = (
+        await db(request)
+        .students.find(
+            {"institute_id": institute_id, "name_key": key, "_id": {"$ne": student_id}, "archived": {"$ne": True}}
+        )
+        .to_list(length=20)
+    )
     if not others:
         return
     batches = {row.get("batch_id") for row in owned if row.get("batch_id")}
     other_ids = [item["_id"] for item in others]
-    overlap = await db(request).enrollments.find(
-        {"student_id": {"$in": other_ids}, "batch_id": {"$in": list(batches)}}
-    ).to_list(length=20)
+    overlap = (
+        await db(request)
+        .enrollments.find({"student_id": {"$in": other_ids}, "batch_id": {"$in": list(batches)}})
+        .to_list(length=20)
+    )
     if overlap:
         raise AppError(
             409,
@@ -1704,7 +1877,17 @@ def _catalog_row(item: dict) -> dict:
         "archived": bool(item.get("archived")),
         "student_code": item.get("student_code"),
     }
-    for key in ("branch_id", "course_id", "subject_id", "offering_id", "number", "started_on", "ended_on", "timings", "notes"):
+    for key in (
+        "branch_id",
+        "course_id",
+        "subject_id",
+        "offering_id",
+        "number",
+        "started_on",
+        "ended_on",
+        "timings",
+        "notes",
+    ):
         if item.get(key) is not None:
             row[key] = item[key]
     if item.get("units"):
@@ -1720,7 +1903,9 @@ async def _job(request: Request, user: dict, import_id: str) -> dict:
     job = await db(request).import_jobs.find_one({"_id": import_id, "institute_id": user["institute_id"]})
     if job is None:
         raise AppError(404, "not_found", "That record was not found.")
-    if not any("marksheet.upload" in grant["actions"] or "marksheet.view" in grant["actions"] for grant in user["grants"]):
+    if not any(
+        "marksheet.upload" in grant["actions"] or "marksheet.view" in grant["actions"] for grant in user["grants"]
+    ):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
     return job
 

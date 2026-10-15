@@ -19,6 +19,8 @@ const AUDIT_LABELS: Record<string, string> = {
   "role.create": "Role added",
   "role.update": "Role changed",
   "user.create": "User added",
+  "teacher.create": "Teacher added",
+  "teacher.update": "Teacher changed",
   "user.activate": "User activated",
   "user.deactivate": "User deactivated",
   "grant.create": "Grant added",

@@ -13,6 +13,16 @@ def connect(settings: Settings) -> tuple[AsyncIOMotorClient, AsyncIOMotorDatabas
 
 async def ensure_schema(db: AsyncIOMotorDatabase) -> None:
     await db.policies.create_index([("institute_id", 1), ("version", 1)], unique=True)
+    await db.teachers.create_index(
+        [("institute_id", 1), ("user_id", 1)],
+        unique=True,
+        partialFilterExpression={"user_id": {"$type": "string"}},
+    )
+    await db.enquiries.create_index([("institute_id", 1), ("created_at", -1)])
+    await db.admissions.create_index([("institute_id", 1), ("status", 1), ("created_at", -1)])
+    await db.course_questions.create_index([("course_id", 1), ("order", 1)])
+    await db.form_questions.create_index([("institute_id", 1), ("order", 1)])
+    await db.students.create_index([("institute_id", 1), ("name_key", 1)])
     current = await db.schema_meta.find_one({"_id": "schema"})
     if current and current.get("version", 0) >= 1:
         return

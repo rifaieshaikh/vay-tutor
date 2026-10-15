@@ -1,6 +1,7 @@
 import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, Session } from "../api";
+import { notify } from "../notify";
 import { Icon, Place, PlaceFacts, StudentDialog } from "./Catalog";
 
 type Batch = { id: string; name: string; started_on: string | null; ended_on: string | null; timings: string | null; archived: boolean };
@@ -17,7 +18,6 @@ export function BranchPage({ session }: { session: Session }) {
   const [offering, setOffering] = useState(false);
   const [addingFor, setAddingFor] = useState<CourseOffer | null>(null);
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
   const canCorrect = session.actions.includes("catalog.correct") || session.actions.includes("catalog.manage");
 
   async function load() {
@@ -54,7 +54,6 @@ export function BranchPage({ session }: { session: Session }) {
         </div>
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
-      {message ? <p className="ok" role="status">{message}</p> : null}
       <div className="page-tabs" role="tablist" aria-label="Branch">
         <button type="button" role="tab" aria-selected={tab === "details"} onClick={() => setTab("details")}>Details</button>
         <button type="button" role="tab" aria-selected={tab === "courses"} onClick={() => setTab("courses")}>Courses</button>
@@ -113,18 +112,18 @@ export function BranchPage({ session }: { session: Session }) {
         <p>{branch.student_count} {branch.student_count === 1 ? "student" : "students"}. <Link to={`/students?branch_id=${branch.id}`}>Open the student list</Link></p>
       ) : null}
       {editing ? (
-        <BranchEditor branch={branch} onClose={() => setEditing(false)} onSaved={async () => { setMessage(`Saved ${branch.name}.`); setEditing(false); await load(); }} />
+        <BranchEditor branch={branch} onClose={() => setEditing(false)} onSaved={async () => { notify(`Saved ${branch.name}.`); setEditing(false); await load(); }} />
       ) : null}
       {offering ? (
         <OfferCourse available={available} onClose={() => setOffering(false)} onSaved={async (courseId) => {
           await api(`/api/v1/branches/${branch.id}/courses`, { method: "POST", body: JSON.stringify({ course_id: courseId }) });
-          setMessage("This branch now offers that course.");
+          notify("This branch now offers that course.");
           setOffering(false);
           await load();
         }} />
       ) : null}
       {addingFor ? (
-        <BranchBatchForm branchId={branch.id} course={addingFor} onClose={() => setAddingFor(null)} onSaved={async () => { setMessage(`Added a batch to ${addingFor.name}.`); setAddingFor(null); await load(); }} />
+        <BranchBatchForm branchId={branch.id} course={addingFor} onClose={() => setAddingFor(null)} onSaved={async () => { notify(`Added a batch to ${addingFor.name}.`); setAddingFor(null); await load(); }} />
       ) : null}
     </section>
   );

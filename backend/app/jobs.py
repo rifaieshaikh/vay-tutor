@@ -150,58 +150,18 @@ async def _run(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
         return
     target = data_dir / "files"
     target.mkdir(parents=True, exist_ok=True)
-    from app.reporting import authorized, export_bytes, file_digest, hydrate, policy_for
+    from app.reporting import authorized, export_bytes, file_digest, hydrate, policy_for, progress_document
 
     policy = await policy_for(db, job["institute_id"])
     stored = await db.results.find({"institute_id": job["institute_id"], "active": {"$ne": False}}).to_list(length=5000)
     card = job["payload"].get("card") or {}
-    rows = [
+    visible = [
         row for row in authorized(await hydrate(db, stored), grants, "progress_card.view")
-        if _in_scope(row, resource) and _matches_card(row, card)
+        if _in_scope(row, resource)
     ]
-    lines = [
-        f"Policy version {policy.get('version', 1)}",
-        policy.get("aggregate") or "maximum-marks-weighted",
-        "Authorized subjects only. Drafts are excluded.",
-        "One active revision is included.",
-        "The total uses the latest published attempt, weighted by each maximum.",
-    ]
-    scope = resource or {}
-    for field, value in scope.items():
-        if value and field != "institute_id":
-            lines.append(f"{field}: {value}")
-    if card.get("student_id"):
-        lines.append(f"student_id: {card['student_id']}")
-    if card.get("exam_date_from"):
-        lines.append(f"exam_date_from: {card['exam_date_from']}")
-    if card.get("exam_date_to"):
-        lines.append(f"exam_date_to: {card['exam_date_to']}")
-    if card.get("exam_type"):
-        lines.append(f"exam_type: {card['exam_type']}")
-    if card.get("attempt"):
-        lines.append(f"attempt: {card['attempt']}")
-    if not any(field != "institute_id" and value for field, value in scope.items()):
-        lines.append("Scope: this institute")
-    student_ids = list({row.get("student_id") for row in rows if row.get("student_id")})
-    people = {}
-    if student_ids:
-        for student in await db.students.find({"_id": {"$in": student_ids}}).to_list(length=len(student_ids)):
-            people[student["_id"]] = f"{student.get('display_name')} ({student.get('student_code')})"
-    for row in rows:
-        if not row.get("published"):
-            continue
-        previous = row.get("previous_score")
-        earlier = f" previous {previous}" if previous is not None else ""
-        who = people.get(row.get("student_id"), "Student")
-        if row.get("status") == "scored":
-            mark = f"scored {row.get('score')}/{row.get('maximum')}"
-        else:
-            mark = row.get("status") or "unscored"
-        lines.append(
-            f"{who} - {row.get('title') or 'Result'} revision {row.get('revision') or 1} "
-            f"{mark}{earlier} {row.get('exam_date') or 'undated'}"
-        )
-    payload, filename = export_bytes(job["kind"], lines)
+    rows = [row for row in visible if _matches_card(row, card)]
+    document = await progress_document(db, job["institute_id"], rows, policy, card, resource, job["kind"], visible)
+    payload, filename = export_bytes(job["kind"], document)
     partial = target / f"{job['_id']}.partial"
     final = target / f"{job['_id']}.bin"
     partial.write_bytes(payload)

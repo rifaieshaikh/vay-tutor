@@ -1,7 +1,9 @@
 import { ChangeEvent, FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
+import { notify } from "../notify";
 import { Option, optionFits } from "../filters";
+import { IntakeTabs } from "../intakeTabs";
 import { StudentEnrollment, StudentFilters, recordedDate, recordedName, recordedStatus, studentRecordHref } from "../students";
 
 type Unit = { id: string; name: string; kind: string };
@@ -45,7 +47,6 @@ function byName(rows: Row[]) {
 function useCatalog() {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
 
   async function load() {
     setCatalog(await api<Catalog>("/api/v1/catalog"));
@@ -58,11 +59,11 @@ function useCatalog() {
   async function correct(kind: CatalogKind, row: Row, body: CatalogChange) {
     setError("");
     await api(`/api/v1/catalog/${KIND[kind]}/${row.id}`, { method: "PATCH", body: JSON.stringify(body) });
-    setMessage(body.name ? `Renamed ${row.name}. The previous name stays on the record.` : body.archived ? `Archived ${row.name}.` : body.archived === false ? `Restored ${row.name}.` : `Saved ${row.name}.`);
+    notify(body.name ? `Renamed ${row.name}. The previous name stays on the record.` : body.archived ? `Archived ${row.name}.` : body.archived === false ? `Restored ${row.name}.` : `Saved ${row.name}.`);
     await load();
   }
 
-  return { catalog, error, message, correct, reload: load, setMessage, setError };
+  return { catalog, error, correct, reload: load, setError };
 }
 
 function CatalogEditor({ kind, row, onClose, onSave }: { kind: CatalogKind; row: Row; onClose: () => void; onSave: (body: CatalogChange) => Promise<void> }) {
@@ -155,13 +156,9 @@ function CatalogEditor({ kind, row, onClose, onSave }: { kind: CatalogKind; row:
   );
 }
 
-function Notes({ error, message }: { error: string; message: string }) {
-  return (
-    <>
-      {error ? <p className="error" role="alert">{error}</p> : null}
-      {message ? <p className="ok" role="status">{message}</p> : null}
-    </>
-  );
+function Notes({ error }: { error: string }) {
+  if (!error) return null;
+  return <p className="error" role="alert">{error}</p>;
 }
 
 type StudentActions = { edit: boolean; card: boolean };
@@ -428,7 +425,6 @@ export function StudentsPage({ session }: { session: Session }) {
   const [listNonce, setListNonce] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
   const listKey = [applied.q, applied.branch_id, applied.course_id, applied.batch_id, sort, direction, page, listNonce].join("|");
 
   useEffect(() => {
@@ -626,7 +622,8 @@ export function StudentsPage({ session }: { session: Session }) {
           </div>
         </div>
       </div>
-      <Notes error={error} message={message} />
+      <IntakeTabs current="students" />
+      <Notes error={error} />
       <p className="filter-row"><span>{loading ? "Loading students…" : `${total} student${total === 1 ? "" : "s"}`}</span></p>
       {sortOpen ? (
         <StudentDialog title="Sort" onClose={() => setSortOpen(false)}>
@@ -739,7 +736,7 @@ export function StudentsPage({ session }: { session: Session }) {
           catalog={catalog}
           onClose={() => setMerging(false)}
           onMerged={() => {
-            setMessage("Merged. The source student is archived and the remaining student keeps both names.");
+            notify("Merged. The source student is archived and the remaining student keeps both names.");
             setListNonce((value) => value + 1);
           }}
         />
@@ -786,7 +783,7 @@ export function PlaceFacts({ values }: { values: Place }) {
 
 export function InstitutePage({ session }: { session: Session }) {
   const navigate = useNavigate();
-  const { catalog, error, message } = useCatalog();
+  const { catalog, error } = useCatalog();
   const [institute, setInstitute] = useState<InstituteRecord | null>(null);
   const [editingInstitute, setEditingInstitute] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -796,7 +793,7 @@ export function InstitutePage({ session }: { session: Session }) {
 
   useEffect(() => {
     api<InstituteRecord>("/api/v1/institute").then(setInstitute).catch((reason: Error) => setLocalError(reason.message));
-  }, [message]);
+  }, []);
 
   if (!catalog || !institute) {
     return <section className="panel">{error || localError ? <p className="error" role="alert">{error || localError}</p> : <p>Loading institute…</p>}</section>;
@@ -833,7 +830,7 @@ export function InstitutePage({ session }: { session: Session }) {
         ) : null}
       </div>
       <PlaceFacts values={institute} />
-      <Notes error={error || localError} message={message} />
+      <Notes error={error || localError} />
       <div className="title-row">
         <h2>Branches</h2>
         {canCorrect ? (
@@ -969,7 +966,7 @@ function InstituteEditor({ institute, onClose, onSaved }: { institute: Institute
 
 export function CoursesPage({ session }: { session: Session }) {
   const navigate = useNavigate();
-  const { catalog, error, message, reload, setMessage, setError } = useCatalog();
+  const { catalog, error, reload, setError } = useCatalog();
   const [params] = useSearchParams();
   const [addingCourse, setAddingCourse] = useState(false);
   const [courseName, setCourseName] = useState("");
@@ -998,7 +995,7 @@ export function CoursesPage({ session }: { session: Session }) {
       await reload();
       setAddingCourse(false);
       setCourseName("");
-      setMessage("Added the course.");
+      notify("Added the course.");
       navigate(`/courses/${created.id}`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not add the course.");
@@ -1007,7 +1004,7 @@ export function CoursesPage({ session }: { session: Session }) {
 
   return (
     <section className="panel wide">
-      <Notes error={error} message={message} />
+      <Notes error={error} />
       <div className="title-row">
         <div>
           <p className="eyebrow">Courses</p>
@@ -1081,9 +1078,122 @@ export function CoursesPage({ session }: { session: Session }) {
   );
 }
 
+type CourseQuestion = { id: string; label: string; answer_type: string; choices: string[]; required: boolean };
+
+function answerKind(kind: string) {
+  if (kind === "boolean") return "Checkbox";
+  if (kind === "choice") return "Dropdown";
+  if (kind === "textarea") return "Text area";
+  if (kind === "text") return "Text box";
+  return kind;
+}
+
+function CourseQuestions({ courseId, canEdit }: { courseId: string; canEdit: boolean }) {
+  const [items, setItems] = useState<CourseQuestion[]>([]);
+  const [adding, setAdding] = useState(false);
+  const [label, setLabel] = useState("");
+  const [answerType, setAnswerType] = useState("text");
+  const [choices, setChoices] = useState("");
+  const [required, setRequired] = useState(false);
+  const [error, setError] = useState("");
+
+  function load() {
+    api<{ items: CourseQuestion[] }>(`/api/v1/courses/${courseId}/questions`).then((result) => setItems(result.items)).catch((reason: Error) => setError(reason.message));
+  }
+
+  useEffect(() => { load(); }, [courseId]);
+
+  async function add(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    try {
+      await api(`/api/v1/courses/${courseId}/questions`, {
+        method: "POST",
+        body: JSON.stringify({
+          label,
+          answer_type: answerType,
+          choices: choices.split(",").map((item) => item.trim()).filter(Boolean),
+          required,
+        }),
+      });
+      setLabel("");
+      setChoices("");
+      setRequired(false);
+      setAdding(false);
+      notify("Saved the question.");
+      load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The question was not saved.");
+    }
+  }
+
+  async function remove(item: CourseQuestion) {
+    setError("");
+    try {
+      await api(`/api/v1/courses/${courseId}/questions/${item.id}`, { method: "DELETE" });
+      notify(`Removed ${item.label}.`);
+      load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The question was not removed.");
+    }
+  }
+
+  return (
+    <>
+      <div className="title-row">
+        <h2>Admission questions</h2>
+        {canEdit ? <button type="button" onClick={() => setAdding(true)}>Add question</button> : null}
+      </div>
+      {error ? <p className="error" role="alert">{error}</p> : null}
+      {items.length === 0 ? <p>No extra questions for this course.</p> : (
+        <ul className="people">
+          {items.map((item) => (
+            <li key={item.id}>
+              <span>{item.label}{item.required ? " · required to admit" : ""} · {answerKind(item.answer_type)}{item.choices.length ? ` · ${item.choices.join(", ")}` : ""}</span>
+              {canEdit ? <button type="button" className="quiet" onClick={() => void remove(item)}>Remove</button> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+      {adding ? (
+        <StudentDialog title="Admission question" onClose={() => setAdding(false)}>
+          <form className="form-grid" onSubmit={add}>
+            <label className="span-2">Question
+              <input value={label} required onChange={(event) => setLabel(event.target.value)} />
+            </label>
+            <label>Answer
+              <select value={answerType} onChange={(event) => setAnswerType(event.target.value)}>
+                <option value="boolean">Checkbox</option>
+                <option value="choice">Dropdown</option>
+                <option value="text">Text box</option>
+                <option value="textarea">Text area</option>
+              </select>
+            </label>
+            <label>Required to admit
+              <select value={required ? "yes" : "no"} onChange={(event) => setRequired(event.target.value === "yes")}>
+                <option value="no">No</option>
+                <option value="yes">Yes</option>
+              </select>
+            </label>
+            {answerType === "choice" ? (
+              <label className="span-2">Options, separated by commas
+                <input value={choices} onChange={(event) => setChoices(event.target.value)} />
+              </label>
+            ) : null}
+            <div className="dialog-actions span-2">
+              <button type="button" className="quiet" onClick={() => setAdding(false)}>Cancel</button>
+              <button type="submit" disabled={!label.trim()}>Save</button>
+            </div>
+          </form>
+        </StudentDialog>
+      ) : null}
+    </>
+  );
+}
+
 export function CoursePage({ session }: { session: Session }) {
   const { courseId = "" } = useParams();
-  const { catalog, error, message, correct, reload, setMessage, setError } = useCatalog();
+  const { catalog, error, correct, reload, setError } = useCatalog();
   const [editing, setEditing] = useState<{ kind: CatalogKind; row: Row } | null>(null);
   const [subjectId, setSubjectId] = useState("");
   const [addingItem, setAddingItem] = useState(false);
@@ -1112,7 +1222,7 @@ export function CoursePage({ session }: { session: Session }) {
   return (
     <section className="panel wide">
       <p className="meta"><Link to="/courses">Courses</Link></p>
-      <Notes error={error} message={message} />
+      <Notes error={error} />
       <div className="title-row">
         <div>
           <p className="eyebrow">Course</p>
@@ -1131,6 +1241,7 @@ export function CoursePage({ session }: { session: Session }) {
           <Link to={`/views?level=course&course_id=${course.id}`} aria-label={`View ${course.name}`} title="View course"><Icon name="view" /></Link>
         </div>
       </div>
+      <CourseQuestions courseId={course.id} canEdit={canCorrect} />
       <div className="title-row">
         <h2>Subjects</h2>
         {canCorrect ? (
@@ -1155,20 +1266,20 @@ export function CoursePage({ session }: { session: Session }) {
               </div>
             ) : null}
           </div>
-          <SubjectItems subject={subject} papers={papers} canCorrect={canCorrect} onEditPaper={(row) => setEditing({ kind: "papers", row })} onChanged={async () => { setMessage(`Saved ${subject?.name || "the subject"}.`); await reload(); }} onError={setError} />
+          <SubjectItems subject={subject} papers={papers} canCorrect={canCorrect} onEditPaper={(row) => setEditing({ kind: "papers", row })} onChanged={async () => { notify(`Saved ${subject?.name || "the subject"}.`); await reload(); }} onError={setError} />
         </>
       )}
       {editing ? (
         <CatalogEditor kind={editing.kind} row={editing.row} onClose={() => setEditing(null)} onSave={(body) => correct(editing.kind, editing.row, body)} />
       ) : null}
       {addingItem && subject ? (
-        <ItemForm subject={subject} onClose={() => setAddingItem(false)} onSaved={async (label) => { setMessage(`Added ${label} to ${subject.name}.`); setAddingItem(false); await reload(); }} />
+        <ItemForm subject={subject} onClose={() => setAddingItem(false)} onSaved={async (label) => { notify(`Added ${label} to ${subject.name}.`); setAddingItem(false); await reload(); }} />
       ) : null}
       {addingSubject ? (
         <SubjectForm
           courseId={course.id}
           onClose={() => setAddingSubject(false)}
-          onSaved={async (created) => { setSubjectId(created.id); setMessage(`Added ${created.name}.`); setAddingSubject(false); await reload(); }}
+          onSaved={async (created) => { setSubjectId(created.id); notify(`Added ${created.name}.`); setAddingSubject(false); await reload(); }}
         />
       ) : null}
     </section>
@@ -1176,7 +1287,7 @@ export function CoursePage({ session }: { session: Session }) {
 }
 
 export function BatchesPage({ session }: { session: Session }) {
-  const { catalog, error, message, correct, reload, setMessage, setError } = useCatalog();
+  const { catalog, error, correct, reload, setError } = useCatalog();
   const [params, setParams] = useSearchParams();
   const [editing, setEditing] = useState<Row | null>(null);
   const [adding, setAdding] = useState(false);
@@ -1204,7 +1315,7 @@ export function BatchesPage({ session }: { session: Session }) {
 
   return (
     <section className="panel wide">
-      <Notes error={error} message={message} />
+      <Notes error={error} />
       <div className="title-row">
         <div>
           <p className="eyebrow">Batches</p>
@@ -1270,7 +1381,7 @@ export function BatchesPage({ session }: { session: Session }) {
           courseId={courseId || catalog.courses[0]?.id || ""}
           branchesFor={branchesFor}
           onClose={() => setAdding(false)}
-          onSaved={async (name) => { setMessage(`Added ${name}.`); setAdding(false); await reload(); }}
+          onSaved={async (name) => { notify(`Added ${name}.`); setAdding(false); await reload(); }}
         />
       ) : null}
     </section>

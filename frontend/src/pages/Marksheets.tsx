@@ -1,6 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "../api";
+import { notify } from "../notify";
 import { CONTEXT_FIELDS, Option, clearIncompatible, optionFits } from "../filters";
 import { Band, BandFields, bandsPayload, bandsReady, draftsFrom } from "../bands";
 import { Icon, StudentDialog } from "./Catalog";
@@ -166,7 +167,6 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
   const [total, setTotal] = useState(0);
   const [pages, setPages] = useState(1);
   const [options, setOptions] = useState<Record<string, Option[]>>({});
-  const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -216,7 +216,7 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
   function choose(key: string, value: string) {
     const merged = { ...filters, [key]: value, page: "1" };
     const { filters: next, cleared } = clearIncompatible(merged, options, key);
-    setNotice(cleared.length ? `${cleared.map((field) => LABELS[field]).join(", ")} cleared because it does not belong with that choice.` : "");
+    if (cleared.length) notify(`${cleared.map((field) => LABELS[field]).join(", ")} cleared because it does not belong with that choice.`);
     write(next);
   }
 
@@ -301,7 +301,6 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
           <button type="button" onClick={() => setPanel("filters")} aria-label={advancedCount ? `Filters, ${advancedCount} applied` : "Filters"} title="Filters"><Icon name="filter" /></button>
         </div>
       </div>
-      {notice ? <p className="ok" role="status">{notice}</p> : null}
       <p className="filter-row">
         {active.map(([key, value]) => (
           <button key={key} type="button" className="chip-button" onClick={() => choose(key, "")}>{LABELS[key]}: {labelFor(key, value)}</button>
@@ -513,7 +512,6 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [reason, setReason] = useState("");
   const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
   const [options, setOptions] = useState<Record<string, Option[]>>({});
   const [studentId, setStudentId] = useState("");
   const [rowStatus, setRowStatus] = useState("scored");
@@ -546,7 +544,6 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
     setDrafts({});
     setReason("");
     setError("");
-    setMessage("");
     setSaveState("idle");
     setTab("results");
     api<Detail>(`/api/v1/marksheets/${marksheetId}`).then((fresh) => {
@@ -590,7 +587,6 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
     setDrafts(Object.fromEntries(detail.results.map((result) => [result.id, { score: result.score == null ? "" : String(result.score), status: result.status }])));
     setReason("");
     setError("");
-    setMessage("");
     setSaveState("idle");
     setTab("results");
     setEditing(true);
@@ -665,7 +661,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
           setError(`Nothing in this save was stored. Your edits are still on this page. ${why} This page is on the latest version, so you can save again.`);
           return;
         }
-        setMessage("Saved. A new revision is active. The previous scores are kept.");
+        notify("Saved. A new revision is active. The previous scores are kept.");
         setSaveState("saved");
         setEditing(false);
         setDrafts({});
@@ -699,7 +695,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
           return;
         }
       }
-      setMessage("Saved.");
+      notify("Saved.");
       setSaveState("saved");
       setEditing(false);
       setDrafts({});
@@ -713,7 +709,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
     setError("");
     try {
       await api(`/api/v1/marksheets/${sheet.id}/publish`, { method: "POST" });
-      setMessage(`${sheet.title} is published.`);
+      notify(`${sheet.title} is published.`);
       await reload();
     } catch (reasonText) {
       setError(reasonText instanceof Error ? reasonText.message : "Could not publish.");
@@ -742,7 +738,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
         method: "POST",
         body: JSON.stringify({ reason: new FormData(event.currentTarget).get("reason"), edit_version: sheet.edit_version }),
       });
-      setMessage("The published revision was withdrawn.");
+      notify("The published revision was withdrawn.");
       await reload();
       return true;
     } catch (reasonText) {
@@ -766,7 +762,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
       });
       setStudentId("");
       setRowScore("");
-      setMessage("Student added to this draft.");
+      notify("Student added to this draft.");
       await reload();
       return true;
     } catch (reasonText) {
@@ -836,7 +832,6 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
         <button type="button" role="tab" aria-selected={tab === "details"} onClick={() => setTab("details")}>Details</button>
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
-      {message ? <p className="ok" role="status">{message}</p> : null}
       {tab === "details" ? (
       <>
       <dl className="facts">
@@ -1021,7 +1016,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
           onClose={() => setBandEditor(false)}
           onSaved={async (messageText) => {
             setBandEditor(false);
-            setMessage(messageText);
+            notify(messageText);
             await reload();
           }}
         />

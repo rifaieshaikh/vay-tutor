@@ -1,6 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
+import { notify } from "../notify";
 import { studentRecordHref } from "../students";
 import { Band, BandMark, bandFor, bandTone } from "../bands";
 import { Icon } from "./Catalog";
@@ -74,7 +75,7 @@ type Card = {
   retests: { title: string | null; original_percentage: number | null; latest_percentage: number | null; change: number | null; baseline_outside_period?: boolean; batch_id?: string | null }[];
   results: Result[];
 };
-type ExportJob = { format: "pdf" | "xlsx"; state: "queued" | "running" | "ready" | "failed"; fileId?: string | null; error?: string };
+type ExportJob = { format: "pdf" | "xlsx"; state: "queued" | "running" | "ready" | "failed"; fileId?: string | null; filename?: string | null; error?: string };
 
 const REPORT_FILTERS = ["branch_id", "course_id", "batch_id", "subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"] as const;
 const FILTER_LABELS: Record<string, string> = {
@@ -103,7 +104,6 @@ const EMPTY_REASONS: Record<string, string> = {
   unpublished: "No published results yet. Drafts stay off this card.",
   restricted: "No authorized results are available for this student.",
 };
-const EXPORT_LABELS = { queued: "Queued", running: "Running", ready: "Ready", failed: "Failed" };
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function formatDate(value: string | null) {
@@ -115,6 +115,11 @@ function formatDate(value: string | null) {
 
 function formatPercent(value: number | null) {
   return value == null ? "—" : value.toFixed(2);
+}
+
+function progressFileStem(name: string, code: string, batch: string) {
+  const stem = [name, code, batch, "progress card"].map((part) => part.trim()).filter(Boolean).join(" ");
+  return stem.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120) || "Progress card";
 }
 
 function reportSort(value: string) {
@@ -264,7 +269,6 @@ function Dialog({ title, onClose, children }: { title: string; onClose: () => vo
 function ReportFilters({
   draft,
   options,
-  notice,
   rangeError,
   dirty,
   showSearch,
@@ -274,7 +278,6 @@ function ReportFilters({
 }: {
   draft: Record<string, string>;
   options: Record<string, Option[]>;
-  notice: string;
   rangeError: string;
   dirty: boolean;
   showSearch: boolean;
@@ -320,7 +323,6 @@ function ReportFilters({
         <label>From<input type="date" value={draft.exam_date_from || ""} onChange={(event) => onChange("exam_date_from", event.target.value)} /></label>
         <label>To<input type="date" value={draft.exam_date_to || ""} onChange={(event) => onChange("exam_date_to", event.target.value)} /></label>
       </div>
-      {notice ? <p className="ok" role="status">{notice}</p> : null}
       {rangeError ? <p className="error" role="alert">{rangeError}</p> : null}
       {dirty ? <p className="meta">Choices change when you apply them.</p> : null}
       <div className="dialog-actions">
@@ -335,7 +337,6 @@ export function CardsPage({ session }: { session: Session }) {
   const [params, setParams] = useSearchParams();
   const applied = readApplied(params);
   const [draft, setDraft] = useState(applied);
-  const [notice, setNotice] = useState("");
   const [rangeError, setRangeError] = useState("");
   const [options, setOptions] = useState<Record<string, Option[]>>({});
   const [students, setStudents] = useState<Student[]>([]);
@@ -369,7 +370,6 @@ export function CardsPage({ session }: { session: Session }) {
 
   useEffect(() => {
     setDraft(readApplied(params));
-    setNotice("");
     setRangeError("");
   }, [appliedKey]);
 
@@ -491,19 +491,17 @@ export function CardsPage({ session }: { session: Session }) {
     setDraft(value ? fitted.filters : opened.filters);
     setRangeError("");
     const labels = cleared.map((field) => FILTER_LABELS[field] || field).join(", ");
-    setNotice(labels ? (value ? `${labels} cleared because it does not belong with that choice.` : `${labels} cleared because All authorized includes each of them.`) : "");
+    if (labels) notify(value ? `${labels} cleared because it does not belong with that choice.` : `${labels} cleared because All authorized includes each of them.`);
   }
 
   function openFilters() {
     setDraft(readApplied(params));
-    setNotice("");
     setRangeError("");
     setFiltersOpen(true);
   }
 
   function closeFilters() {
     setDraft(readApplied(params));
-    setNotice("");
     setRangeError("");
     setFiltersOpen(false);
   }
@@ -593,9 +591,9 @@ export function CardsPage({ session }: { session: Session }) {
         body: JSON.stringify({ format, scope }),
       });
       setExportJob({ format, state: "running" });
-      const finished = await api<{ state: string; file_id: string | null; last_error: string | null }>(`/api/v1/jobs/${job.id}/run`, { method: "POST" });
+      const finished = await api<{ state: string; file_id: string | null; last_error: string | null; filename?: string | null }>(`/api/v1/jobs/${job.id}/run`, { method: "POST" });
       if (finished.state === "succeeded" && finished.file_id) {
-        setExportJob({ format, state: "ready", fileId: finished.file_id });
+        setExportJob({ format, state: "ready", fileId: finished.file_id, filename: finished.filename });
         return;
       }
       setExportJob({ format, state: "failed", error: finished.last_error || "The export failed." });
@@ -626,7 +624,6 @@ export function CardsPage({ session }: { session: Session }) {
       <ReportFilters
         draft={draft}
         options={options}
-        notice={notice}
         rangeError={rangeError}
         dirty={dirty}
         showSearch={!studentId}
@@ -669,6 +666,12 @@ export function CardsPage({ session }: { session: Session }) {
     const photoInitials = studentName.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() || "").join("");
     const photoId = shown?.photo_id || "";
     const retests = (shown?.retests || []).filter((item) => !splitBatch || item.batch_id === selectedBatch);
+    function printCard() {
+      const previous = document.title;
+      document.title = progressFileStem(studentName, studentCode || "", batchName);
+      window.print();
+      document.title = previous;
+    }
     const subjectRows = [...(splitBatch ? subjectsFrom(results, shown?.bands) : (shown?.subjects || []))].sort((left, right) => {
       const label = subjectName(left.subject_id).localeCompare(subjectName(right.subject_id))
         || paperName(left.paper_id).localeCompare(paperName(right.paper_id));
@@ -686,6 +689,7 @@ export function CardsPage({ session }: { session: Session }) {
             {photoId && !photoFailed ? <img src={`/api/v1/students/${studentId}/photo?v=${photoId}`} alt="" onError={() => setPhotoFailed(true)} /> : photoInitials}
           </div>
           <div className="card-person">
+            <p className="print-kicker">Progress card</p>
             <h1>{studentName || "Progress card"}</h1>
             <dl className="card-identity">
               {studentCode ? <div><dt>Student code</dt><dd>{studentCode}</dd></div> : null}
@@ -695,9 +699,10 @@ export function CardsPage({ session }: { session: Session }) {
                 <div>
                   <dt>Batch</dt>
                   <dd>
-                    <select aria-label="Batch" value={selectedBatch} onChange={(event) => setBatchPick(event.target.value)}>
+                    <select className="no-print" aria-label="Batch" value={selectedBatch} onChange={(event) => setBatchPick(event.target.value)}>
                       {orderedMemberships.map((item) => <option key={item.batch_id} value={item.batch_id || ""}>{optionLabel("batch", item.batch_id) || "Batch"}</option>)}
                     </select>
+                    <span className="print-only">{batchName || "Batch"}</span>
                   </dd>
                 </div>
               ) : batchName ? <div><dt>Batch</dt><dd>{batchName}</dd></div> : null}
@@ -706,17 +711,33 @@ export function CardsPage({ session }: { session: Session }) {
           <div className="actions card-actions">
             {canPdf ? <button type="button" onClick={() => exportCard("pdf")} disabled={exporting}>PDF</button> : null}
             {canSheet ? <button type="button" onClick={() => exportCard("xlsx")} disabled={exporting}>Spreadsheet</button> : null}
-            <button type="button" onClick={() => window.print()}>Print</button>
+            <button type="button" onClick={printCard}>Print</button>
             {session.actions.includes("student.lookup") ? <Link to={studentRecordHref(studentId, listReturn || "/students", { q: "", branch_id: selectedEnrollment?.branch_id || "", course_id: selectedEnrollment?.course_id || "", batch_id: selectedEnrollment?.batch_id || "" })}>View student</Link> : null}
           </div>
         </div>
         <p className="print-context">{[`Student code ${studentCode}`, branchName ? `Branch ${branchName}` : "", courseName ? `Course ${courseName}` : "", batchName ? `Batch ${batchName}` : ""].filter(Boolean).join(". ")}</p>
         {exportJob ? (
-          <p className="meta" role="status">
-            {exportJob.format === "pdf" ? "PDF" : "Spreadsheet"} export: {EXPORT_LABELS[exportJob.state]}.
-            {exportJob.state === "ready" && exportJob.fileId ? <> <a href={`/api/v1/files/${exportJob.fileId}`}>Download</a></> : null}
-            {exportJob.state === "failed" ? ` ${exportJob.error || "The export failed."}` : null}
-          </p>
+          <Dialog title={exportJob.format === "pdf" ? "PDF progress card" : "Spreadsheet progress card"} onClose={() => setExportJob(null)}>
+            {exportJob.state === "queued" || exportJob.state === "running" ? <p role="status">Preparing the progress card…</p> : null}
+            {exportJob.state === "ready" ? (
+              <>
+                <p>{studentName ? `${studentName}'s progress card is ready.` : "The progress card is ready."}</p>
+                {exportJob.filename ? <p className="export-file">{exportJob.filename}</p> : null}
+                <div className="dialog-actions">
+                  <button type="button" className="text-button" onClick={() => setExportJob(null)}>Close</button>
+                  {exportJob.fileId ? <a className="button" href={`/api/v1/files/${exportJob.fileId}`}>Download</a> : null}
+                </div>
+              </>
+            ) : null}
+            {exportJob.state === "failed" ? (
+              <>
+                <p className="error" role="alert">{exportJob.error || "The export failed."}</p>
+                <div className="dialog-actions">
+                  <button type="button" onClick={() => setExportJob(null)}>Close</button>
+                </div>
+              </>
+            ) : null}
+          </Dialog>
         ) : null}
         {error ? <p className="error" role="alert">{error}</p> : null}
         {loading && !shown ? <p role="status">Loading this card…</p> : null}

@@ -107,16 +107,86 @@ def test_published_card_uses_the_active_revision(client):
     job = client.get(f"/api/v1/jobs/{queued.json()['id']}")
     assert job.status_code == 200
     assert job.json()["state"] == "succeeded"
+    assert job.json()["filename"].startswith("Progress cards ")
+    assert job.json()["filename"].endswith(".pdf")
+    named = client.post("/api/v1/reports/cards", json={"format": "xlsx", "scope": {"student_id": scored["student_id"]}})
+    ran = client.post(f"/api/v1/jobs/{named.json()['id']}/run")
+    assert ran.status_code == 200, ran.text
+    assert ran.json()["state"] == "succeeded"
+    assert body["display_name"] in ran.json()["filename"]
+    assert body["student_code"] in ran.json()["filename"]
+    assert ran.json()["filename"].endswith("progress card.xlsx")
+    downloaded = client.get(f"/api/v1/files/{ran.json()['file_id']}")
+    assert downloaded.status_code == 200
+    from urllib.parse import unquote
+    assert "progress card.xlsx" in unquote(downloaded.headers["content-disposition"])
+    assert downloaded.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 def test_pdf_report_spans_pages_and_names_the_policy():
-    payload, filename = export_bytes("report_pdf", [f"Result line {index}" for index in range(50)])
-    assert filename == "progress-cards.pdf"
+    from datetime import date
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    from app.reporting import export_filename
+
+    exams = [
+        ["1 Sep 2026", f"Assessment {index}", "80.00%", "40 of 50", "Safe", str(index)]
+        for index in range(40)
+    ]
+    report = {
+        "filename": "Amina Khan STU-1042 progress card.pdf",
+        "title": "Progress card",
+        "institute": "IAM Tirur",
+        "generated": "9 Oct 2026",
+        "single": True,
+        "period": "1 Jun 2026 to 9 Oct 2026",
+        "context": ["Branch IAM Tirur"],
+        "notes": [
+            "Policy version 1.",
+            "Authorized subjects only. Drafts are excluded.",
+            "One active revision is included.",
+            "The total uses the latest published attempt, weighted by each maximum.",
+        ],
+        "students": [
+            {
+                "name": "Amina Khan",
+                "code": "STU-1042",
+                "branch": "IAM Tirur",
+                "course": "CA Foundation",
+                "batch": "September 2026",
+                "performance": "80.00%",
+                "band": "Safe",
+                "scored": "40 of 40",
+                "missing": "0",
+                "absent": "0",
+                "subjects": [["Accountancy", "Paper 1", "80.00%", "40 of 40", "Safe"]],
+                "exams": exams,
+                "retests": [],
+                "attention": [],
+                "gaps": [],
+            }
+        ],
+    }
+    payload, filename = export_bytes("report_pdf", report)
+    assert filename == "Amina Khan STU-1042 progress card.pdf"
     assert b"/Count 2" in payload
     assert b"Page 2 of 2" in payload
-    sheet, name = export_bytes("report_xlsx", ["Policy version 1", "Authorized subjects only."])
-    assert name.endswith(".xlsx")
-    assert b"Policy version 1" in sheet or len(sheet) > 100
+    assert b"Amina Khan" in payload
+    assert b"Policy version" not in payload
+    assert b"Band" not in payload
+    assert b"Subjects and papers" in payload
+    sheet_report = {**report, "filename": "Amina Khan STU-1042 September 2026 progress card.xlsx"}
+    sheet, name = export_bytes("report_xlsx", sheet_report)
+    assert name == "Amina Khan STU-1042 September 2026 progress card.xlsx"
+    book = load_workbook(BytesIO(sheet))
+    values = [cell.value for row in book.active.iter_rows() for cell in row]
+    assert "Amina Khan" in values
+    assert "Subjects and papers" in values
+    assert any(isinstance(item, str) and "Policy version 1." in item for item in values)
+    assert export_filename("report_pdf", student_name="Amina/Khan", student_code="STU:1042") == "Amina Khan STU 1042 progress card.pdf"
+    assert export_filename("report_xlsx", on=date(2026, 10, 9)) == "Progress cards 2026-10-09.xlsx"
 
 
 def test_correction_and_restricted_outputs_stay_on_the_active_revision(client):
@@ -350,7 +420,7 @@ def test_cleared_score_card_filters_and_owned_export(client):
     assert b"SHANHA" in contents
     assert b"OTHER STUDENT" not in contents
     assert b"Secret paper" not in contents
-    assert b"exam_date_from: 2026-10-08" in contents
+    assert b"8 Oct 2026" in contents
     late = client.post("/api/v1/reports/cards", json={"format": "pdf", "scope": {"student_id": student, "exam_date_from": "2026-12-01"}})
     assert client.post(f"/api/v1/jobs/{late.json()['id']}/run").json()["state"] == "succeeded"
     late_file = open(database.files.find_one({"job_id": late.json()["id"]})["path"], "rb").read()
@@ -448,8 +518,8 @@ def test_report_filters_reach_the_list_card_and_export(client):
     assert queued.status_code == 200, queued.text
     assert client.post(f"/api/v1/jobs/{queued.json()['id']}/run").json()["state"] == "succeeded"
     contents = open(database.files.find_one({"job_id": queued.json()["id"]})["path"], "rb").read()
-    assert b"exam_type: unit" in contents
-    assert b"attempt: original" in contents
+    assert b"Exam type unit" in contents
+    assert b"Attempt Original" in contents
 
 
 def _result(institute, **fields):

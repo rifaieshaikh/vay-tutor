@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import re
+from datetime import date, datetime, timezone
 from io import BytesIO
 
 from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 from app.acl import allows
 from app.calculating import (
@@ -13,6 +17,7 @@ from app.calculating import (
     display_percentage,
     percentage,
     percentage_change,
+    public_bands,
     selected_attempts,
 )
 
@@ -358,36 +363,668 @@ def rank_page(rows: list[dict], page: int, size: int = 20) -> dict:
     }
 
 
-def export_bytes(kind: str, lines: list[str]) -> tuple[bytes, str]:
-    if kind == "report_xlsx":
-        book = Workbook()
-        sheet = book.active
-        sheet.title = "Progress cards"
-        for line in lines:
-            sheet.append([line])
-        buffer = BytesIO()
-        book.save(buffer)
-        return buffer.getvalue(), "progress-cards.xlsx"
-    return _pdf(lines), "progress-cards.pdf"
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+_ILLEGAL_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
 
 
-def _pdf(lines: list[str]) -> bytes:
-    chunks = [lines[index : index + 40] for index in range(0, max(len(lines), 1), 40)]
-    font_id = 3 + len(chunks) * 2
-    kids = " ".join(f"{3 + index * 2} 0 R" for index in range(len(chunks)))
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        f"<< /Type /Pages /Kids [{kids}] /Count {len(chunks)} >>".encode(),
+def export_filename(
+    kind: str,
+    *,
+    student_name: str = "",
+    student_code: str = "",
+    batch_name: str = "",
+    on: date | None = None,
+) -> str:
+    extension = "xlsx" if kind == "report_xlsx" else "pdf"
+    name = " ".join(student_name.split())
+    code = " ".join(student_code.split())
+    batch = " ".join(batch_name.split())
+    if name or code:
+        parts = [name, code]
+        if batch:
+            parts.append(batch)
+        parts.append("progress card")
+        stem = " ".join(part for part in parts if part)
+    else:
+        stamp = (on or datetime.now(timezone.utc).date()).isoformat()
+        stem = f"Progress cards {stamp}"
+    stem = _ILLEGAL_FILENAME.sub(" ", stem)
+    stem = re.sub(r"\s+", " ", stem).strip(" .")
+    stem = stem[:120].rstrip(" .") or "Progress card"
+    return f"{stem}.{extension}"
+
+
+def _format_date(value) -> str:
+    text = str(value or "")
+    parts = text.split("-")
+    if len(parts) != 3:
+        return text or "-"
+    try:
+        label = _MONTHS[int(parts[1]) - 1]
+        return f"{int(parts[2])} {label} {parts[0]}"
+    except (ValueError, IndexError):
+        return text
+
+
+def _percent(value) -> str:
+    if value is None:
+        return "-"
+    return f"{float(value):.2f}%"
+
+
+def _signed(value) -> str:
+    if value is None:
+        return "-"
+    number = float(value)
+    sign = "+" if number > 0 else ""
+    return f"{sign}{number:.2f}"
+
+
+def _plain_number(value) -> str:
+    if value is None:
+        return "-"
+    number = float(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.2f}"
+
+
+def _status_label(status: str | None) -> str:
+    labels = {"missing": "Missing", "absent": "Absent", "exempt": "Exempt", "scored": "Scored"}
+    return labels.get(status or "", status or "-")
+
+
+def _mark_text(row: dict) -> str:
+    if row.get("status") == "scored":
+        return f"{_plain_number(row.get('score'))} of {_plain_number(row.get('maximum'))}"
+    return _status_label(row.get("status"))
+
+
+def _rank_text(row: dict) -> str:
+    rank = row.get("rank")
+    batch_rank = row.get("batch_rank")
+    if rank is None and batch_rank is None:
+        return "-"
+    if rank is not None and batch_rank is not None:
+        return f"{rank} | batch {batch_rank}"
+    return str(rank if rank is not None else batch_rank)
+
+
+def _context_name(mapping: dict, rows: list[dict], scope: dict, field: str) -> str:
+    if scope.get(field):
+        return mapping.get(scope[field]) or ""
+    found = []
+    for row in rows:
+        label = mapping.get(row.get(field) or "")
+        if label and label not in found:
+            found.append(label)
+    if len(found) == 1:
+        return found[0]
+    return ""
+
+
+async def _name_map(db, collection: str, ids: set) -> dict[str, str]:
+    values = [item for item in ids if item]
+    found = {}
+    if not values:
+        return found
+    for document in await db[collection].find({"_id": {"$in": values}}).to_list(length=len(values)):
+        found[document["_id"]] = document.get("name") or ""
+    return found
+
+
+async def progress_document(
+    db,
+    institute_id: str,
+    rows: list[dict],
+    policy: dict,
+    card: dict,
+    scope: dict,
+    kind: str,
+    cohort: list[dict] | None = None,
+) -> dict:
+    published = [row for row in rows if row.get("published")]
+    siblings = [row for row in (cohort if cohort is not None else rows) if row.get("published")]
+    by_sheet: dict[str, list[dict]] = {}
+    for row in siblings:
+        by_sheet.setdefault(row.get("marksheet_id") or row.get("id"), []).append(row)
+    prepared = []
+    for row in published:
+        item = dict(row)
+        group = by_sheet.get(row.get("marksheet_id") or row.get("id"), [row])
+        rank, batch_rank = ranks_for(item, group)
+        item["rank"] = rank
+        item["batch_rank"] = batch_rank
+        prepared.append(item)
+
+    student_ids = list({row.get("student_id") for row in prepared if row.get("student_id")})
+    if card.get("student_id") and card["student_id"] not in student_ids:
+        student_ids.append(card["student_id"])
+    people = {}
+    if student_ids:
+        for student in await db.students.find({"_id": {"$in": student_ids}}).to_list(length=len(student_ids)):
+            people[student["_id"]] = student
+    enrollments = []
+    if card.get("student_id"):
+        enrollments = await db.enrollments.find(
+            {"student_id": card["student_id"], "institute_id": institute_id}
+        ).to_list(length=50)
+    sources = list(prepared) + list(enrollments) + [scope]
+    names = {
+        "branch": await _name_map(db, "branches", {item.get("branch_id") for item in sources}),
+        "course": await _name_map(db, "courses", {item.get("course_id") for item in sources}),
+        "batch": await _name_map(db, "batches", {item.get("batch_id") for item in sources}),
+        "subject": await _name_map(db, "subjects", {item.get("subject_id") for item in prepared}),
+        "paper": await _name_map(db, "papers", {item.get("paper_id") for item in prepared}),
+    }
+    institute = await db.institutes.find_one({"_id": institute_id})
+    grouped: dict[str, list[dict]] = {}
+    for row in prepared:
+        grouped.setdefault(row.get("student_id") or "", []).append(row)
+    ordered_ids = sorted(
+        student_ids,
+        key=lambda student_id: (
+            (people.get(student_id, {}).get("display_name") or "").casefold(),
+            people.get(student_id, {}).get("student_code") or "",
+        ),
+    )
+    students = []
+    for student_id in ordered_ids:
+        person = people.get(student_id, {})
+        student_rows = grouped.get(student_id, [])
+        identity_rows = student_rows or [
+            item for item in enrollments if item.get("student_id") in {student_id, None} or card.get("student_id") == student_id
+        ]
+        students.append(_student_block(person, student_rows, identity_rows, names, policy, scope))
+    single = bool(card.get("student_id")) or len(students) == 1
+    focus = students[0] if single and students else None
+    now = datetime.now(timezone.utc).date()
+    filename = export_filename(
+        kind,
+        student_name=(focus or {}).get("name") or "",
+        student_code=(focus or {}).get("code") or "",
+        batch_name=(focus or {}).get("batch") or "",
+        on=now,
+    )
+    start = card.get("exam_date_from") or ""
+    end = card.get("exam_date_to") or ""
+    period = ""
+    if start or end:
+        period = f"{_format_date(start) if start else 'Start'} to {_format_date(end) if end else 'today'}"
+    context = []
+    if card.get("exam_type"):
+        context.append(f"Exam type {card['exam_type']}")
+    if card.get("attempt"):
+        context.append(f"Attempt {card['attempt'].capitalize()}")
+    if scope.get("subject_id"):
+        context.append(f"Subject {names['subject'].get(scope['subject_id']) or 'Subject'}")
+    if scope.get("paper_id"):
+        context.append(f"Paper {names['paper'].get(scope['paper_id']) or 'Paper'}")
+    notes = [
+        f"Policy version {policy.get('version', 1)}.",
+        "Authorized subjects only. Drafts are excluded.",
+        "One active revision is included.",
+        "The total uses the latest published attempt, weighted by each maximum.",
     ]
-    for index, chunk in enumerate(chunks):
+    for item in public_bands(policy.get("bands")):
+        notes.append(f"{item['name']}: {item['phrase']}.")
+    return {
+        "filename": filename,
+        "title": "Progress card" if single and focus else "Progress cards",
+        "institute": (institute or {}).get("name") or "",
+        "generated": _format_date(now.isoformat()),
+        "single": bool(single and focus),
+        "period": period,
+        "context": context,
+        "notes": notes,
+        "students": students,
+    }
+
+
+def _student_block(person: dict, rows: list[dict], identity_rows: list[dict], names: dict, policy: dict, scope: dict) -> dict:
+    summary = aggregate(rows, policy) if rows else {
+        "percentage": None,
+        "band_name": None,
+        "scored": 0,
+        "expected": 0,
+        "missing": 0,
+        "absent": 0,
+    }
+    grouped: dict[tuple, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault((row.get("subject_id") or "", row.get("paper_id") or ""), []).append(row)
+    subjects = []
+    for key, group in grouped.items():
+        item = aggregate(group, policy)
+        subjects.append(
+            [
+                names["subject"].get(key[0]) or "Subject",
+                names["paper"].get(key[1]) or "Paper",
+                _percent(item["percentage"]),
+                f"{item['scored']} of {item['expected']}",
+                item.get("band_name") or "-",
+            ]
+        )
+    subjects.sort(key=lambda item: (item[0].casefold(), item[1].casefold()))
+    exams = []
+    corrections = []
+    for row in rows:
+        shown = present(row, policy, row.get("rank"), row.get("batch_rank"))
+        mark = _mark_text(shown)
+        if row.get("previous_score") is not None:
+            mark = f"{mark} (previous {_plain_number(row.get('previous_score'))})"
+        title = shown.get("title") or "Result"
+        subject = names["subject"].get(shown.get("subject_id") or "")
+        if subject and subject not in title:
+            title = f"{title} - {subject}"
+        if shown.get("attempt") == "retest":
+            title = f"{title} - Retest"
+        if shown.get("included_in_total") is False:
+            title = f"{title} - kept out"
+        if row.get("previous_score") is not None:
+            corrections.append(f"{title}: previous score {_plain_number(row.get('previous_score'))}")
+        exams.append(
+            {
+                "date": str(shown.get("exam_date") or ""),
+                "title": title,
+                "cells": [
+                    _format_date(shown.get("exam_date")),
+                    title,
+                    _percent(shown["percentage"]) if shown.get("status") == "scored" else _status_label(shown.get("status")),
+                    mark,
+                    shown.get("band_name") or _status_label(shown.get("status")),
+                    _rank_text(shown),
+                ],
+                "percentage": shown.get("percentage"),
+                "place": shown.get("band_place"),
+                "status": shown.get("status"),
+            }
+        )
+    exams.sort(key=lambda item: item["title"].casefold())
+    exams.sort(key=lambda item: item["date"] or "0000", reverse=True)
+    attention = [
+        [item["title"], item["cells"][2], item["cells"][3], item["cells"][4]]
+        for item in sorted(exams, key=lambda entry: (entry["percentage"] is None, entry["percentage"] if entry["percentage"] is not None else 0))
+        if item["place"] == "low"
+    ]
+    gaps = [
+        [item["title"], "Absent" if item["status"] == "absent" else "Missing"]
+        for item in exams
+        if item["status"] in {"missing", "absent"}
+    ]
+    retests = []
+    for item in comparisons(rows):
+        basis = (
+            "Original is outside this period and is not in the total"
+            if item.get("baseline_outside_period")
+            else "Both attempts are in this report"
+        )
+        retests.append(
+            [
+                item.get("title") or "Result",
+                _percent(item.get("original_percentage")),
+                _percent(item.get("latest_percentage")),
+                _signed(item.get("change")),
+                basis,
+            ]
+        )
+    return {
+        "name": person.get("display_name") or "Student",
+        "code": person.get("student_code") or "",
+        "branch": _context_name(names["branch"], identity_rows, scope, "branch_id"),
+        "course": _context_name(names["course"], identity_rows, scope, "course_id"),
+        "batch": _context_name(names["batch"], identity_rows, scope, "batch_id"),
+        "performance": _percent(summary.get("percentage")),
+        "band": summary.get("band_name") or "-",
+        "scored": f"{summary.get('scored', 0)} of {summary.get('expected', 0)}",
+        "missing": str(summary.get("missing", 0)),
+        "absent": str(summary.get("absent", 0)),
+        "subjects": subjects,
+        "exams": [item["cells"] for item in exams],
+        "retests": retests,
+        "attention": attention,
+        "gaps": gaps,
+        "corrections": corrections,
+    }
+
+
+def export_bytes(kind: str, report: dict) -> tuple[bytes, str]:
+    filename = report.get("filename") or export_filename(kind)
+    if kind == "report_xlsx":
+        return _workbook(report), filename
+    return _pdf_document(report), filename
+
+
+_PAGE_W = 595
+_PAGE_H = 842
+_MARGIN_X = 40
+_MARGIN_TOP = 46
+_MARGIN_BOTTOM = 40
+_CONTENT_W = _PAGE_W - _MARGIN_X * 2
+_TEAL = (0.059, 0.431, 0.420)
+_INK = (0.110, 0.141, 0.188)
+_MUTED = (0.322, 0.400, 0.369)
+_WHITE = (1, 1, 1)
+_ZEBRA = (0.957, 0.969, 0.965)
+_SUBJECT_HEADERS = ["Subject", "Paper", "Performance", "Results", "Band"]
+_SUBJECT_WIDTHS = [150, 110, 85, 80, 90]
+_EXAM_HEADERS = ["Date", "Assessment", "Performance", "Results", "Band", "Rank"]
+_EXAM_WIDTHS = [78, 155, 72, 78, 72, 60]
+_RETEST_HEADERS = ["Assessment", "Original", "Latest", "Change", "Basis"]
+_RETEST_WIDTHS = [155, 80, 80, 70, 130]
+_ATTENTION_HEADERS = ["Assessment", "Performance", "Results", "Band"]
+_ATTENTION_WIDTHS = [200, 90, 110, 115]
+_GAP_HEADERS = ["Assessment", "Status"]
+_GAP_WIDTHS = [360, 155]
+_INDEX_HEADERS = ["Student", "Code", "Performance", "Results", "Band"]
+_INDEX_WIDTHS = [180, 100, 80, 80, 75]
+
+
+def _pdf_columns(headers: list[str], widths: list[int], rows: list[list[str]]) -> tuple[list[str], list[int], list[list[str]]]:
+    kept = [index for index, header in enumerate(headers) if header != "Band"]
+    selected = [widths[index] for index in kept]
+    total = sum(selected) or 1
+    scaled = [int(round(width / total * _CONTENT_W)) for width in selected]
+    if scaled:
+        scaled[-1] += _CONTENT_W - sum(scaled)
+    shown = [[row[index] if index < len(row) else "" for index in kept] for row in rows]
+    return [headers[index] for index in kept], scaled, shown
+
+
+def _pdf_escape(value) -> str:
+    text = "" if value is None else str(value)
+    text = text.replace("—", "-").replace("–", "-").replace("·", "|")
+    text = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
+def _fit(value, width: float, size: int = 9) -> str:
+    lines = _wrap_text(value, width, size, max_lines=1)
+    return lines[0] if lines else "-"
+
+
+def _char_limit(width: float, size: int) -> int:
+    return max(int(width / (size * 0.5)) - 1, 4)
+
+
+def _wrap_text(value, width: float, size: int = 9, max_lines: int = 2) -> list[str]:
+    text = " ".join(str(value or "-").split()) or "-"
+    limit = _char_limit(width, size)
+    if len(text) <= limit or max_lines < 2:
+        if len(text) <= limit:
+            return [text]
+        return [text[: limit - 3] + "..."]
+    words = text.split(" ")
+    first = ""
+    used = 0
+    for index, word in enumerate(words):
+        trial = word if not first else f"{first} {word}"
+        if len(trial) <= limit:
+            first = trial
+            used = index + 1
+            continue
+        if not first:
+            first = word[:limit]
+            used = index + 1
+        break
+    rest = " ".join(words[used:]).strip()
+    if not rest:
+        return [first]
+    if len(rest) > limit:
+        rest = rest[: limit - 3] + "..."
+    return [first, rest]
+
+
+def _pdf_color(color: tuple[float, float, float]) -> str:
+    return f"{color[0]:.3f} {color[1]:.3f} {color[2]:.3f}"
+
+
+def _pdf_text(x: float, y: float, text: str, font: str, size: int, color: tuple[float, float, float]) -> str:
+    return f"{_pdf_color(color)} rg\nBT /{font} {size} Tf 1 0 0 1 {x:.2f} {y:.2f} Tm ({_pdf_escape(text)}) Tj ET"
+
+
+def _pdf_rect(x: float, y: float, width: float, height: float, color: tuple[float, float, float]) -> str:
+    return f"{_pdf_color(color)} rg {x:.2f} {y:.2f} {width:.2f} {height:.2f} re f"
+
+
+def _pdf_box(x: float, y: float, width: float, height: float, color: tuple[float, float, float]) -> str:
+    return f"{_pdf_color(color)} RG 0.7 w {x:.2f} {y:.2f} {width:.2f} {height:.2f} re S"
+
+
+class _PdfCard:
+    def __init__(self, report: dict):
+        self.report = report
+        self.pages: list[list[str]] = []
+        self.commands: list[str] = []
+        self.y = _PAGE_H - _MARGIN_TOP
+        self.running = report.get("title") or "Progress card"
+
+    def build(self) -> list[list[str]]:
+        report = self.report
+        self._open_page(running=False)
+        self._banner()
+        students = report.get("students") or []
+        if not students:
+            self._paragraph("No published results match this report.")
+        elif report.get("single"):
+            self.running = students[0].get("name") or self.running
+            self._student(students[0], heading=False)
+        else:
+            self._heading("Students")
+            self._table(
+                _INDEX_HEADERS,
+                _INDEX_WIDTHS,
+                [
+                    [item.get("name") or "Student", item.get("code") or "-", item.get("performance") or "-", item.get("scored") or "-", item.get("band") or "-"]
+                    for item in students
+                ],
+                "No published results match this report.",
+            )
+            for student in students:
+                self.running = student.get("name") or "Progress card"
+                self._student(student, heading=True)
+        self.pages.append(self.commands)
+        return self.pages
+
+    def _open_page(self, running: bool):
+        if self.commands:
+            self.pages.append(self.commands)
+        self.commands = []
+        title = self.running if running else (self.report.get("title") or "Progress card")
+        self.commands.append(_pdf_rect(0, _PAGE_H - 36, _PAGE_W, 36, _TEAL))
+        self.commands.append(_pdf_text(_MARGIN_X, _PAGE_H - 23, _fit(title, 300, 13), "F2", 13, _WHITE))
+        institute = self.report.get("institute") or ""
+        if institute:
+            self.commands.append(_pdf_text(340, _PAGE_H - 22, _fit(institute, 200, 9), "F1", 9, _WHITE))
+        self.y = _PAGE_H - 52
+
+    def _need(self, height: float):
+        if self.y - height < _MARGIN_BOTTOM:
+            self._open_page(running=True)
+
+    def _text(self, text: str, font: str, size: int, color: tuple[float, float, float], x: float | None = None):
+        self.commands.append(_pdf_text(x if x is not None else _MARGIN_X, self.y - size, text, font, size, color))
+
+    def _banner(self):
+        report = self.report
+        lines = []
+        if report.get("generated"):
+            lines.append(f"Generated {report['generated']}")
+        if report.get("period"):
+            lines.append(f"Reporting period {report['period']}")
+        lines.extend(report.get("context") or [])
+        for line in lines:
+            self._need(13)
+            self._text(line, "F1", 9, _MUTED)
+            self.y -= 12
+        if lines:
+            self.y -= 6
+
+    def _paragraph(self, text: str):
+        self._need(16)
+        self._text(text, "F1", 10, _INK)
+        self.y -= 16
+
+    def _heading(self, text: str):
+        self._need(40)
+        self.y -= 8
+        self._text(text, "F2", 12, _TEAL)
+        self.y -= 22
+
+    def _identity(self, student: dict):
+        facts = [
+            ("Student code", student.get("code") or ""),
+            ("Branch", student.get("branch") or ""),
+            ("Course", student.get("course") or ""),
+            ("Batch", student.get("batch") or ""),
+        ]
+        facts = [(label, value) for label, value in facts if value]
+        column = _CONTENT_W / 2
+        for index in range(0, len(facts), 2):
+            self._need(24)
+            self._fact(_MARGIN_X, facts[index], column - 12)
+            if index + 1 < len(facts):
+                self._fact(_MARGIN_X + column, facts[index + 1], column - 12)
+            self.y -= 26
+        self._stats(student)
+
+    def _fact(self, x: float, fact: tuple[str, str], width: float):
+        label, value = fact
+        self.commands.append(_pdf_text(x, self.y - 9, label, "F1", 8, _MUTED))
+        self.commands.append(_pdf_text(x, self.y - 22, _fit(value, width, 11), "F2", 11, _INK))
+
+    def _stats(self, student: dict):
+        cards = [
+            ("Weighted performance", student.get("performance") or "-", ""),
+            ("Scored results", student.get("scored") or "-", "Latest published attempt"),
+            ("Missing", student.get("missing") or "0", "No mark entered"),
+            ("Absent", student.get("absent") or "0", "Marked absent"),
+        ]
+        gap = 8
+        height = 48
+        width = (_CONTENT_W - gap * 3) / 4
+        self._need(height + 8)
+        top = self.y
+        fill = (0.973, 0.980, 0.976)
+        edge = (0.863, 0.898, 0.882)
+        for index, (label, value, note) in enumerate(cards):
+            x = _MARGIN_X + index * (width + gap)
+            self.commands.append(_pdf_rect(x, top - height, width, height, fill))
+            self.commands.append(_pdf_box(x, top - height, width, height, edge))
+            self.commands.append(_pdf_text(x + 6, top - 12, _fit(label, width - 12, 7), "F1", 7, _MUTED))
+            self.commands.append(_pdf_text(x + 6, top - 28, _fit(value, width - 12, 12), "F2", 12, _TEAL))
+            if note:
+                self.commands.append(_pdf_text(x + 6, top - 41, _fit(note, width - 12, 7), "F1", 7, _MUTED))
+        self.y = top - height - 8
+
+    def _student(self, student: dict, heading: bool):
+        if heading:
+            self._heading(student.get("name") or "Student")
+        elif student.get("name"):
+            self._need(22)
+            self._text(student["name"], "F2", 16, _INK)
+            self.y -= 22
+        self._identity(student)
+        self._heading("Subjects and papers")
+        self._table(_SUBJECT_HEADERS, _SUBJECT_WIDTHS, student.get("subjects") or [], "No published subjects match this report.")
+        self._heading("Exams")
+        self._table(_EXAM_HEADERS, _EXAM_WIDTHS, student.get("exams") or [], "No published exams match this report.")
+        if student.get("retests"):
+            self._heading("Original and retest")
+            self._table(_RETEST_HEADERS, _RETEST_WIDTHS, student["retests"], "")
+        if student.get("corrections"):
+            self._heading("Corrections")
+            for line in student["corrections"]:
+                self._paragraph(line)
+        if student.get("attention") or student.get("gaps"):
+            self._heading("Needs attention")
+            if student.get("attention"):
+                self._table(_ATTENTION_HEADERS, _ATTENTION_WIDTHS, student["attention"], "")
+            if student.get("gaps"):
+                self._table(_GAP_HEADERS, _GAP_WIDTHS, student["gaps"], "")
+
+    def _table(self, headers: list[str], widths: list[int], rows: list[list[str]], empty: str):
+        headers, widths, rows = _pdf_columns(headers, widths, rows)
+        if not rows:
+            if empty:
+                self._paragraph(empty)
+            return
+        self._header_row(headers, widths)
+        for index, row in enumerate(rows):
+            height = self._row_height(row, widths)
+            if self.y - height < _MARGIN_BOTTOM:
+                self._open_page(running=True)
+                self._header_row(headers, widths)
+            self._body_row(row, widths, shaded=index % 2 == 1, headers=headers)
+        self.y -= 6
+
+    def _row_height(self, row: list[str], widths: list[int]) -> float:
+        lines = 1
+        for value, width in zip(row, widths):
+            lines = max(lines, len(_wrap_text(value, width - 8)))
+        return 10 + lines * 11
+
+    def _header_row(self, headers: list[str], widths: list[int]):
+        if self.y - 18 < _MARGIN_BOTTOM:
+            self._open_page(running=True)
+        top = self.y
+        self.commands.append(_pdf_rect(_MARGIN_X, top - 18, _CONTENT_W, 18, _TEAL))
+        x = _MARGIN_X
+        for header, width in zip(headers, widths):
+            label = _fit(header, width - 8)
+            self.commands.append(_pdf_text(self._align_x(x, width, label, header), top - 13, label, "F2", 9, _WHITE))
+            x += width
+        self.y = top - 18
+
+    def _body_row(self, row: list[str], widths: list[int], shaded: bool, headers: list[str]):
+        wrapped = [_wrap_text(value, width - 8) for value, width in zip(row, widths)]
+        height = 10 + max(len(parts) for parts in wrapped) * 11
+        top = self.y
+        if shaded:
+            self.commands.append(_pdf_rect(_MARGIN_X, top - height, _CONTENT_W, height, _ZEBRA))
+        rule = top - height
+        self.commands.append(f"0.863 0.898 0.882 RG 0.4 w {_MARGIN_X:.2f} {rule:.2f} m {_MARGIN_X + _CONTENT_W:.2f} {rule:.2f} l S")
+        x = _MARGIN_X
+        for parts, width, header in zip(wrapped, widths, headers):
+            for index, part in enumerate(parts):
+                self.commands.append(_pdf_text(self._align_x(x, width, part, header), top - 13 - index * 11, part, "F1", 9, _INK))
+            x += width
+        self.y = top - height
+
+    def _align_x(self, x: float, width: float, text: str, header: str) -> float:
+        if header not in {"Performance", "Results", "Rank", "Change", "Original", "Latest"}:
+            return x + 4
+        used = len(text) * 4.5
+        return max(x + 4, x + width - used - 6)
+
+
+def _pdf_document(report: dict) -> bytes:
+    pages = _PdfCard(report).build() or [[]]
+    font_regular = 3 + len(pages) * 2
+    font_bold = font_regular + 1
+    info_id = font_bold + 1
+    kids = " ".join(f"{3 + index * 2} 0 R" for index in range(len(pages)))
+    objects: list[bytes] = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>".encode(),
+    ]
+    generated = _pdf_escape(f"Generated {report.get('generated') or ''}".strip())
+    for index, commands in enumerate(pages):
         content_id = 4 + index * 2
         page = (
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-            f"/Contents {content_id} 0 R /Resources << /Font << /F1 {font_id} 0 R >> >> >>"
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {_PAGE_W} {_PAGE_H}] "
+            f"/Contents {content_id} 0 R /Resources << /Font << /F1 {font_regular} 0 R /F2 {font_bold} 0 R >> >> >>"
         )
+        footer = [
+            _pdf_text(_MARGIN_X, 24, f"Page {index + 1} of {len(pages)}", "F1", 8, _MUTED),
+            _pdf_text(360, 24, generated, "F1", 8, _MUTED),
+        ]
         objects.append(page.encode())
-        objects.append(_pdf_stream(chunk, index + 1, len(chunks)))
+        objects.append(_pdf_stream_bytes(commands + footer))
     objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
+    title = _pdf_escape(report.get("filename") or report.get("title") or "Progress card")
+    objects.append(f"<< /Title ({title}) /Creator (Vay Tutor) >>".encode("latin-1", "replace"))
     output = bytearray(b"%PDF-1.4\n")
     offsets = [0]
     for index, body in enumerate(objects, start=1):
@@ -398,21 +1035,218 @@ def _pdf(lines: list[str]) -> bytes:
     output += b"0000000000 65535 f \n"
     for offset in offsets[1:]:
         output += f"{offset:010d} 00000 n \n".encode()
-    trailer = f"trailer << /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    trailer = f"trailer << /Size {len(objects) + 1} /Root 1 0 R /Info {info_id} 0 R >>\nstartxref\n{xref}\n%%EOF\n"
     output += trailer.encode()
     return bytes(output)
 
 
-def _pdf_stream(lines: list[str], page: int, pages: int) -> bytes:
-    commands = ["BT", "/F1 11 Tf", "1 0 0 1 48 760 Tm", f"(Page {page} of {pages}) Tj"]
-    y_pos = 736
-    for line in lines:
-        safe = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")[:110]
-        commands.append(f"1 0 0 1 48 {y_pos} Tm ({safe}) Tj")
-        y_pos -= 16
-    commands.append("ET")
-    stream = "\n".join(commands).encode("latin-1", errors="replace")
+def _pdf_stream_bytes(commands: list[str]) -> bytes:
+    stream = "\n".join(commands).encode("latin-1", "replace")
     return b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream"
+
+
+_HEADER_FILL = PatternFill("solid", fgColor="0F6E6B")
+_HEADER_FONT = Font(bold=True, color="FFFFFF", name="Calibri", size=11)
+_TITLE_FONT = Font(bold=True, color="0F6E6B", name="Calibri", size=18)
+_SECTION_FONT = Font(bold=True, color="143F3D", name="Calibri", size=13)
+_LABEL_FONT = Font(bold=True, color="52665E", name="Calibri", size=11)
+_BODY_FONT = Font(name="Calibri", size=11, color="1C2430")
+_ZEBRA_FILL = PatternFill("solid", fgColor="F4F7F6")
+_THIN = Border(
+    left=Side(style="thin", color="DCE5E1"),
+    right=Side(style="thin", color="DCE5E1"),
+    top=Side(style="thin", color="DCE5E1"),
+    bottom=Side(style="thin", color="DCE5E1"),
+)
+
+
+def _write_row(sheet, row: int, values: list, font=None, fill=None, border=None) -> int:
+    for column, value in enumerate(values, start=1):
+        cell = sheet.cell(row, column, value)
+        cell.font = font or _BODY_FONT
+        if fill is not None:
+            cell.fill = fill
+        if border is not None:
+            cell.border = border
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+    return row + 1
+
+
+def _write_table(sheet, row: int, headers: list[str], rows: list[list]) -> int:
+    row = _write_row(sheet, row, headers, font=_HEADER_FONT, fill=_HEADER_FILL, border=_THIN)
+    for index, values in enumerate(rows):
+        row = _write_row(
+            sheet,
+            row,
+            values,
+            font=_BODY_FONT,
+            fill=_ZEBRA_FILL if index % 2 else None,
+            border=_THIN,
+        )
+    return row + 1
+
+
+_STAT_FILL = PatternFill("solid", fgColor="F8FAF9")
+_STAT_FONT = Font(bold=True, color="0F6E6B", name="Calibri", size=16)
+_NAME_FONT = Font(bold=True, color="1C2430", name="Calibri", size=16)
+
+
+def _sheet_page(sheet, report: dict, landscape: bool = False):
+    for index, width in enumerate([24, 22, 18, 16, 18, 36], start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    sheet.page_setup.orientation = "landscape" if landscape else "portrait"
+    sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.sheet_properties.tabColor = "0F6E6B"
+    sheet.page_margins.left = 0.55
+    sheet.page_margins.right = 0.55
+    sheet.page_margins.top = 0.7
+    sheet.page_margins.bottom = 0.55
+    sheet.page_margins.header = 0.28
+    sheet.page_margins.footer = 0.28
+    sheet.oddHeader.left.text = report.get("institute") or ""
+    sheet.oddHeader.right.text = report.get("title") or "Progress card"
+    sheet.oddFooter.left.text = f"Generated {report.get('generated') or ''}".strip()
+    sheet.oddFooter.right.text = "Page &P of &N"
+    sheet.sheet_view.showGridLines = False
+    sheet.page_setup.horizontalCentered = True
+    sheet.print_options.horizontalCentered = True
+
+
+def _write_student_sheet(sheet, row: int, student: dict, named: bool) -> int:
+    if named and student.get("name"):
+        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+        sheet.row_dimensions[row].height = 22
+        row = _write_row(sheet, row, [student.get("name") or "Student"], font=_NAME_FONT)
+    facts = [
+        ("Student code", student.get("code") or "-"),
+        ("Branch", student.get("branch") or "-"),
+        ("Course", student.get("course") or "-"),
+        ("Batch", student.get("batch") or "-"),
+    ]
+    for offset in range(0, len(facts), 2):
+        left, right = facts[offset], facts[offset + 1] if offset + 1 < len(facts) else ("", "")
+        row = _write_row(sheet, row, [left[0], left[1], "", right[0], right[1]], font=_BODY_FONT)
+        sheet.cell(row - 1, 1).font = _LABEL_FONT
+        sheet.cell(row - 1, 2).font = Font(bold=True, name="Calibri", size=11, color="1C2430")
+        if right[0]:
+            sheet.cell(row - 1, 4).font = _LABEL_FONT
+            sheet.cell(row - 1, 5).font = Font(bold=True, name="Calibri", size=11, color="1C2430")
+    row += 1
+    labels = ["Weighted performance", "Scored results", "Missing", "Absent"]
+    values = [
+        f"{student.get('performance') or '-'}  {student.get('band') or ''}".strip(),
+        student.get("scored") or "-",
+        student.get("missing") or "0",
+        student.get("absent") or "0",
+    ]
+    row = _write_row(sheet, row, labels, font=_LABEL_FONT, fill=_STAT_FILL)
+    sheet.row_dimensions[row].height = 24
+    row = _write_row(sheet, row, values, font=_STAT_FONT, fill=_STAT_FILL)
+    row += 1
+    row = _write_row(sheet, row, ["Subjects and papers"], font=_SECTION_FONT)
+    if student.get("subjects"):
+        row = _write_table(sheet, row, _SUBJECT_HEADERS, student["subjects"])
+    else:
+        row = _write_row(sheet, row, ["No published subjects match this report."])
+        row += 1
+    row = _write_row(sheet, row, ["Exams"], font=_SECTION_FONT)
+    if student.get("exams"):
+        row = _write_table(sheet, row, _EXAM_HEADERS, student["exams"])
+    else:
+        row = _write_row(sheet, row, ["No published exams match this report."])
+        row += 1
+    if student.get("retests"):
+        row = _write_row(sheet, row, ["Original and retest"], font=_SECTION_FONT)
+        row = _write_table(sheet, row, _RETEST_HEADERS, student["retests"])
+    if student.get("corrections"):
+        row = _write_row(sheet, row, ["Corrections"], font=_SECTION_FONT)
+        for line in student["corrections"]:
+            row = _write_row(sheet, row, [line])
+        row += 1
+    if student.get("attention") or student.get("gaps"):
+        row = _write_row(sheet, row, ["Needs attention"], font=_SECTION_FONT)
+        if student.get("attention"):
+            row = _write_table(sheet, row, _ATTENTION_HEADERS, student["attention"])
+        if student.get("gaps"):
+            row = _write_table(sheet, row, _GAP_HEADERS, student["gaps"])
+    return row
+
+
+def _data_sheet(book, report: dict, title: str, headers: list[str], rows: list[list]):
+    sheet = book.create_sheet(title[:31])
+    _sheet_page(sheet, report, landscape=len(headers) > 5)
+    widths = [22, 16, 16, 28, 16, 16, 16, 14]
+    for index, width in enumerate(widths[: max(len(headers), 1)], start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    _write_row(sheet, 1, headers, font=_HEADER_FONT, fill=_HEADER_FILL, border=_THIN)
+    for index, values in enumerate(rows):
+        _write_row(sheet, index + 2, values, font=_BODY_FONT, fill=_ZEBRA_FILL if index % 2 else None, border=_THIN)
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(len(rows) + 1, 1)}"
+    sheet.print_title_rows = "1:1"
+    sheet.page_setup.orientation = "landscape"
+    sheet.sheet_view.showGridLines = False
+    return sheet
+
+
+def _workbook(report: dict) -> bytes:
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Progress card"
+    _sheet_page(sheet, report)
+    sheet.row_dimensions[1].height = 28
+    sheet.merge_cells("A1:F1")
+    row = _write_row(sheet, 1, [report.get("title") or "Progress card"], font=_TITLE_FONT)
+    if report.get("institute"):
+        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+        row = _write_row(sheet, row, [report["institute"]], font=Font(bold=True, name="Calibri", size=12, color="143F3D"))
+    row = _write_row(sheet, row, [f"Generated {report.get('generated') or '-'}"], font=_LABEL_FONT)
+    if report.get("period"):
+        row = _write_row(sheet, row, [f"Reporting period {report['period']}"])
+    for line in report.get("context") or []:
+        row = _write_row(sheet, row, [line])
+    row += 1
+    students = report.get("students") or []
+    subject_rows = []
+    exam_rows = []
+    if not students:
+        row = _write_row(sheet, row, ["No published results match this report."])
+    elif report.get("single"):
+        student = students[0]
+        row = _write_student_sheet(sheet, row, student, named=True)
+        subject_rows = [[student.get("name") or "", student.get("code") or "", *item] for item in student.get("subjects") or []]
+        exam_rows = [[student.get("name") or "", student.get("code") or "", *item] for item in student.get("exams") or []]
+    else:
+        row = _write_row(sheet, row, ["Students"], font=_SECTION_FONT)
+        row = _write_table(
+            sheet,
+            row,
+            _INDEX_HEADERS,
+            [
+                [item.get("name") or "Student", item.get("code") or "-", item.get("performance") or "-", item.get("scored") or "-", item.get("band") or "-"]
+                for item in students
+            ],
+        )
+        for student in students:
+            row = _write_student_sheet(sheet, row, student, named=True)
+            subject_rows.extend([student.get("name") or "", student.get("code") or "", *item] for item in student.get("subjects") or [])
+            exam_rows.extend([student.get("name") or "", student.get("code") or "", *item] for item in student.get("exams") or [])
+    row += 1
+    row = _write_row(sheet, row, ["Notes"], font=_SECTION_FONT)
+    for note in report.get("notes") or []:
+        row = _write_row(sheet, row, [note])
+    if subject_rows:
+        _data_sheet(book, report, "Subjects", ["Student", "Code", *_SUBJECT_HEADERS], subject_rows)
+    if exam_rows:
+        _data_sheet(book, report, "Exams", ["Student", "Code", *_EXAM_HEADERS], exam_rows)
+    sheet.freeze_panes = None
+    sheet.sheet_view.showGridLines = False
+    buffer = BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
 
 
 def file_digest(payload: bytes) -> str:

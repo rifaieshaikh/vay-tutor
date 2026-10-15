@@ -1,5 +1,7 @@
 # Release 1 task list
 
+> **Current restructuring plan (15 October 2026):** See [Institute management restructuring task list](institute-management-task-list.md) for the transition to an institute management system. It replaces the import-first organizing direction for that work; the completion records and outstanding release obligations below remain historical inputs. IMS-01 reconciles the affected requirements and planning rules.
+
 Date: 7 October 2026 · Baseline: [Product requirements v1.1](product-requirements.md) · M0: [Approved decisions](m0-decisions.md) · M1: [Architecture](m1-architecture.md)
 
 This is a delivery backlog. Existing M0–M4 and MOD-01–11 tasks retain their recorded completion status. MOD-12–20 and MOD-22 were implemented on 8 October 2026. MOD-23 progress-report filtering was implemented and checked in the running application on 8 October 2026; its checkbox stays open until desktop/mobile screenshots are kept with the acceptance record and an academic user accepts the revised views. MOD-24–29 academic-view review fixes and MOD-21 acceptance are open, so M4-Modernization stays reopened before M5. M5 and M6 tasks are open. Each checkbox is a deliverable with an acceptance condition. Owner labels identify responsibilities, not assigned people. Estimates and dates follow product decisions and platform feasibility. All milestones, including modernization, desktop and cloud delivery, are required for release 1.

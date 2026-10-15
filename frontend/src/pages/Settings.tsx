@@ -1,6 +1,7 @@
 import { FormEvent, useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { api, Session } from "../api";
+import { notify } from "../notify";
 import { Band, BandFields, bandsPayload, bandsReady, draftsFrom } from "../bands";
 import { Icon, StudentDialog } from "./Catalog";
 
@@ -36,8 +37,8 @@ export function SettingsPage({ session }: { session: Session }) {
   const [policy, setPolicy] = useState<Policy | null>(null);
   const [tab, setTab] = useState<"preferences" | "policy" | "operations">("preferences");
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
   const [editing, setEditing] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [loading, setLoading] = useState(true);
   const canEdit = session.actions.includes("grant.manage");
   const bands = policy?.bands && policy.bands.length >= 2 ? policy.bands : null;
@@ -63,7 +64,6 @@ export function SettingsPage({ session }: { session: Session }) {
         ) : null}
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
-      {notice ? <p className="ok" role="status">{notice}</p> : null}
       {loading ? <p>Loading settings…</p> : null}
       <div className="page-tabs" role="tablist" aria-label="Settings">
         <button type="button" role="tab" aria-selected={tab === "preferences"} onClick={() => setTab("preferences")}>Preferences</button>
@@ -159,6 +159,16 @@ export function SettingsPage({ session }: { session: Session }) {
           ) : null}
         </dl>
       ) : null}
+      {tab === "operations" && canEdit ? (
+        <div className="title-row">
+          <div>
+            <h2>Factory reset</h2>
+            <p>Remove the institute, people, courses, marks, and uploaded files. Setup starts again from the beginning.</p>
+          </div>
+          <button type="button" onClick={() => setResetting(true)}>Factory reset</button>
+        </div>
+      ) : null}
+      {resetting ? <FactoryReset onClose={() => setResetting(false)} /> : null}
       {editing && policy ? (
         <PolicyForm
           policy={policy}
@@ -167,12 +177,47 @@ export function SettingsPage({ session }: { session: Session }) {
             const count = next.published_on_earlier_version ?? 0;
             const sheets = count === 1 ? "1 published marksheet stays" : `${count} published marksheets stay`;
             setPolicy(next);
-            setNotice(`Saved as policy version ${next.version}. ${sheets} on an earlier version. Academic views use these rules.`);
+            notify(`Saved as policy version ${next.version}. ${sheets} on an earlier version. Academic views use these rules.`);
             setEditing(false);
           }}
         />
       ) : null}
     </section>
+  );
+}
+
+function FactoryReset({ onClose }: { onClose: () => void }) {
+  const [phrase, setPhrase] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function reset(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api("/api/v1/factory-reset", { method: "POST", body: JSON.stringify({ confirm: phrase }) });
+      window.location.replace("/");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The install was not reset.");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <StudentDialog title="Factory reset" onClose={onClose}>
+      <form className="form-grid" onSubmit={reset}>
+        <p className="span-2">This wipes every record and uploaded file on this install. The next screen asks you to create the institute again.</p>
+        <label className="span-2">Type RESET
+          <input value={phrase} aria-label="Type RESET" autoComplete="off" onChange={(event) => setPhrase(event.target.value)} />
+        </label>
+        {error ? <p className="error span-2" role="alert">{error}</p> : null}
+        <div className="dialog-actions span-2">
+          <button type="button" className="quiet" onClick={onClose}>Cancel</button>
+          <button type="submit" disabled={saving || phrase !== "RESET"}>{saving ? "Wiping…" : "Wipe all data"}</button>
+        </div>
+      </form>
+    </StudentDialog>
   );
 }
 

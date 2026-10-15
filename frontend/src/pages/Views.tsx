@@ -1,6 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api";
+import { notify } from "../notify";
 import { CONTEXT_FIELDS, Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
 import { Band, BandMark, bandTone } from "../bands";
 import { Icon } from "./Catalog";
@@ -363,7 +364,6 @@ export function ViewsPage() {
   const [options, setOptions] = useState<Record<string, Option[]>>({});
   const [view, setView] = useState<View | null>(null);
   const [loadedKey, setLoadedKey] = useState("");
-  const [notice, setNotice] = useState("");
   const [rangeError, setRangeError] = useState("");
   const [sectionSearch, setSectionSearch] = useState("");
   const [sectionSort, setSectionSort] = useState("lowest");
@@ -450,19 +450,17 @@ export function ViewsPage() {
     setDraft(value ? fitted.filters : opened.filters);
     setRangeError("");
     const labels = cleared.map((field) => FILTERS.find(([name]) => name === field)?.[1] || field).join(", ");
-    setNotice(labels ? (value ? `${labels} cleared because it does not belong with that choice.` : `${labels} cleared because All authorized includes each of them.`) : "");
+    if (labels) notify(value ? `${labels} cleared because it does not belong with that choice.` : `${labels} cleared because All authorized includes each of them.`);
   }
 
   function openFilters() {
     setDraft(read(params).filters);
-    setNotice("");
     setRangeError("");
     setFiltersOpen(true);
   }
 
   function closeFilters() {
     setDraft(read(params).filters);
-    setNotice("");
     setRangeError("");
     setFiltersOpen(false);
   }
@@ -473,7 +471,6 @@ export function ViewsPage() {
       setRangeError(problem);
       return;
     }
-    setNotice("");
     setFiltersOpen(false);
     write(level, draft, 1, panel);
   }
@@ -481,7 +478,6 @@ export function ViewsPage() {
   function resetFilters() {
     const empty = Object.fromEntries(FILTER_KEYS.map((key) => [key, ""]));
     setDraft(empty);
-    setNotice("");
     setRangeError("");
     setSectionSearch("");
     setFiltersOpen(false);
@@ -495,7 +491,7 @@ export function ViewsPage() {
 
   function explainCleared(cleared: string[]) {
     const labels = cleared.map((field) => FILTERS.find(([name]) => name === field)?.[1] || field).join(", ");
-    setNotice(labels ? `${labels} cleared because it does not belong with that choice.` : "");
+    if (labels) notify(`${labels} cleared because it does not belong with that choice.`);
   }
 
   function drill(section: Section) {
@@ -537,7 +533,6 @@ export function ViewsPage() {
     .filter((section) => section.label.toLowerCase().includes(sectionSearch.toLowerCase()))
     .sort((a, b) => sectionSort === "name" ? a.label.localeCompare(b.label) : sectionSort === "students" ? b.students - a.students || a.label.localeCompare(b.label) : sectionSort === "highest" ? (b.percentage ?? -1) - (a.percentage ?? -1) || a.label.localeCompare(b.label) : sectionOrder(a, b)) : [];
   function goToLevel(nextLevel: string) {
-    setNotice("");
     write(nextLevel, filters, 1);
   }
 
@@ -618,7 +613,6 @@ export function ViewsPage() {
               <label>From<input type="date" value={draft.exam_date_from || ""} onChange={(event) => editDraft("exam_date_from", event.target.value)} /></label>
               <label>To<input type="date" value={draft.exam_date_to || ""} onChange={(event) => editDraft("exam_date_to", event.target.value)} /></label>
             </div>
-            {notice ? <p className="ok" role="status">{notice}</p> : null}
             {rangeError || periodError(draft.exam_date_from || "", draft.exam_date_to || "") ? <p className="error" role="alert">{rangeError || periodError(draft.exam_date_from || "", draft.exam_date_to || "")}</p> : null}
             {dirty ? <p className="meta">Choices change when you apply them.</p> : null}
             <div className="dialog-actions">

@@ -1,10 +1,16 @@
 import { ChangeEvent, FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "../api";
+import { notify } from "../notify";
 import { Option, optionFits } from "../filters";
 import { BandMark } from "../bands";
 import { StudentEnrollment, recordedDate, recordedName, recordedStatus, safeStudentList } from "../students";
+import { QuestionControl } from "./Intake";
 
+type AcademicRecord = { qualification: string; stream: string; institution: string; mark: string; year_of_passing: string; board: string };
+type CourseProfile = { course_id: string; course_name: string; answers: { question_id: string; label?: string; value: string; answer_type?: string; choices?: string[] }[] };
+type BusinessAnswer = { question_id: string; label?: string; value: string };
+type FormQuestion = { id: string; label: string; answer_type: string; choices: string[]; required: boolean };
 type Alias = { id: string; display_name: string };
 type StudentActions = { edit: boolean; card: boolean; enroll: boolean };
 type StudentDetail = {
@@ -15,12 +21,15 @@ type StudentDetail = {
   edit_version: number;
   photo_id: string | null;
   date_of_birth: string | null;
+  gender: string | null;
   blood_group: string | null;
   phone: string | null;
+  email: string | null;
   guardian_name: string | null;
   guardian_phone: string | null;
   notes: string | null;
   street: string | null;
+  address_line_2: string | null;
   place: string | null;
   district: string | null;
   state: string | null;
@@ -29,6 +38,9 @@ type StudentDetail = {
   institution: string | null;
   board: string | null;
   passing_year: string | null;
+  academic_records: AcademicRecord[];
+  course_profiles: CourseProfile[];
+  business_answers?: BusinessAnswer[];
   enrollments: StudentEnrollment[];
   aliases: Alias[];
   actions: StudentActions;
@@ -36,12 +48,15 @@ type StudentDetail = {
 type ProfileValues = {
   display_name: string;
   date_of_birth: string;
+  gender: string;
   blood_group: string;
   phone: string;
+  email: string;
   guardian_name: string;
   guardian_phone: string;
   notes: string;
   street: string;
+  address_line_2: string;
   place: string;
   district: string;
   state: string;
@@ -63,12 +78,15 @@ type HistorySide = {
   started_on?: string;
   ended_on?: string;
   date_of_birth?: string;
+  gender?: string;
   blood_group?: string;
   phone?: string;
+  email?: string;
   guardian_name?: string;
   guardian_phone?: string;
   notes?: string;
   street?: string;
+  address_line_2?: string;
   place?: string;
   district?: string;
   state?: string;
@@ -89,35 +107,43 @@ const EMPTY_REASONS: Record<string, string> = {
 };
 const PROFILE_FIELDS = [
   ["date_of_birth", "Date of birth"],
+  ["gender", "Gender"],
   ["blood_group", "Blood group"],
-  ["phone", "Student phone"],
+  ["phone", "Contact number"],
+  ["email", "Email"],
   ["guardian_phone", "Parent or guardian phone"],
   ["guardian_name", "Parent or guardian"],
   ["notes", "Notes"],
-  ["street", "House and street"],
-  ["place", "Place"],
+  ["street", "Address line 1"],
+  ["address_line_2", "Address line 2"],
+  ["place", "City"],
   ["district", "District"],
   ["state", "State"],
   ["pin", "PIN"],
   ["qualification", "Qualification"],
   ["passing_year", "Year of passing"],
-  ["institution", "School or college"],
+  ["institution", "Institution"],
   ["board", "Board or university"],
 ] as const;
-const CONTACT_ORDER = ["date_of_birth", "blood_group", "phone", "guardian_phone", "guardian_name", "notes"] as const;
-const ADDRESS_ORDER = ["street", "place", "district", "state", "pin"] as const;
+const CONTACT_ORDER = ["date_of_birth", "gender", "blood_group", "phone", "email", "guardian_phone", "guardian_name", "notes"] as const;
+const ADDRESS_ORDER = ["street", "address_line_2", "place", "district", "state", "pin"] as const;
 const ACADEMIC_ORDER = ["qualification", "passing_year", "institution", "board"] as const;
-const WIDE_FACTS = new Set<string>(["guardian_name", "notes", "street", "institution", "board"]);
+const WIDE_FACTS = new Set<string>(["guardian_name", "notes", "street", "address_line_2", "email", "institution", "board"]);
 const BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"];
+const GENDERS = ["Female", "Male", "Other"];
+const EMPTY_RECORD: AcademicRecord = { qualification: "", stream: "", institution: "", mark: "", year_of_passing: "", board: "" };
 const EMPTY_PROFILE: ProfileValues = {
   display_name: "",
   date_of_birth: "",
+  gender: "",
   blood_group: "",
   phone: "",
+  email: "",
   guardian_name: "",
   guardian_phone: "",
   notes: "",
   street: "",
+  address_line_2: "",
   place: "",
   district: "",
   state: "",
@@ -249,6 +275,18 @@ function Dialog({ title, onClose, children }: { title: string; onClose: () => vo
   );
 }
 
+function businessRows(stored: BusinessAnswer[], questions: FormQuestion[]): BusinessAnswer[] {
+  const rows: BusinessAnswer[] = questions.map((item) => ({
+    question_id: item.id,
+    label: item.label,
+    value: stored.find((answer) => answer.question_id === item.id)?.value || "",
+  }));
+  for (const answer of stored) {
+    if (!questions.some((item) => item.id === answer.question_id)) rows.push(answer);
+  }
+  return rows;
+}
+
 export function StudentPage() {
   const { studentId = "" } = useParams();
   const [params, setParams] = useSearchParams();
@@ -264,9 +302,12 @@ export function StudentPage() {
   const [editing, setEditing] = useState(false);
   const [tab, setTab] = useState<StudentTab>("personal");
   const [draft, setDraft] = useState<ProfileValues>(EMPTY_PROFILE);
+  const [records, setRecords] = useState<AcademicRecord[]>([]);
+  const [profiles, setProfiles] = useState<CourseProfile[]>([]);
+  const [businessAnswers, setBusinessAnswers] = useState<BusinessAnswer[]>([]);
+  const [businessQuestions, setBusinessQuestions] = useState<FormQuestion[]>([]);
   const [dirty, setDirty] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [conflict, setConflict] = useState<Conflict | null>(null);
   const [aliasName, setAliasName] = useState("");
@@ -308,7 +349,6 @@ export function StudentPage() {
     setDraft(EMPTY_PROFILE);
     setDirty(false);
     setSaveState("idle");
-    setMessage("");
     setError("");
     setConflict(null);
     setAliasName("");
@@ -346,6 +386,12 @@ export function StudentPage() {
       active = false;
     };
   }, [studentId, attempt]);
+
+  useEffect(() => {
+    api<{ items: FormQuestion[] }>("/api/v1/form-questions?form=admission")
+      .then((result) => setBusinessQuestions(result.items))
+      .catch(() => setBusinessQuestions([]));
+  }, [studentId]);
 
   useEffect(() => {
     if (params.get("edit") !== "1" || !record?.actions.edit || record.id !== studentId) return;
@@ -462,6 +508,9 @@ export function StudentPage() {
     if (!record?.actions.edit) return;
     openedEdit.current = studentId;
     setDraft(profileFrom(record));
+    setRecords(record.academic_records?.length ? record.academic_records.map((item) => ({ ...item })) : [{ ...EMPTY_RECORD }]);
+    setProfiles((record.course_profiles || []).map((item) => ({ ...item, answers: item.answers.map((answer) => ({ ...answer })) })));
+    setBusinessAnswers((record.business_answers || []).map((item) => ({ ...item })));
     setDirty(false);
     setConflict(null);
     setError("");
@@ -510,10 +559,20 @@ export function StudentPage() {
     savingRef.current = true;
     setSaveState("saving");
     setError("");
-    setMessage("");
-    const fields = tab === "academics" ? ACADEMIC_ORDER : [...CONTACT_ORDER, ...ADDRESS_ORDER];
-    const body: Record<string, string | number> = { display_name: displayName, edit_version: record.edit_version };
+    const fields = tab === "academics" ? [] : [...CONTACT_ORDER, ...ADDRESS_ORDER];
+    const body: Record<string, unknown> = { display_name: displayName, edit_version: record.edit_version };
     for (const key of fields) body[key] = draft[key];
+    if (tab === "academics") {
+      body.academic_records = records;
+      body.course_profiles = profiles.map((item) => ({
+        course_id: item.course_id,
+        answers: item.answers.map((answer) => ({ question_id: answer.question_id, value: answer.value })),
+      }));
+      body.business_answers = businessQuestions.map((item) => ({
+        question_id: item.id,
+        value: businessAnswers.find((answer) => answer.question_id === item.id)?.value || "",
+      })).concat(businessAnswers.filter((answer) => !businessQuestions.some((item) => item.id === answer.question_id)));
+    }
     try {
       await api(`/api/v1/students/${record.id}`, {
         method: "PATCH",
@@ -522,7 +581,7 @@ export function StudentPage() {
       setDirty(false);
       setConflict(null);
       setSaveState("saved");
-      setMessage(`Saved ${displayName}.`);
+      notify(`Saved ${displayName}.`);
       closeEditor();
       await reload();
     } catch (reason) {
@@ -743,7 +802,6 @@ export function StudentPage() {
             <button type="button" role="tab" aria-selected={visibleTab === "academics"} onClick={() => chooseTab("academics")}>Academics</button>
             {historyPermitted ? <button type="button" role="tab" aria-selected={visibleTab === "history"} onClick={() => chooseTab("history")}>History</button> : null}
           </div>
-          {message ? <p className="ok" role="status">{message}</p> : null}
           {visibleTab === "personal" ? (
             <>
               <FactGrid order={CONTACT_ORDER} values={shown} />
@@ -753,7 +811,53 @@ export function StudentPage() {
           ) : null}
           {visibleTab === "academics" ? (
             <>
-              <FactGrid order={ACADEMIC_ORDER} values={shown} />
+              <h2>Academic records</h2>
+              {(shown.academic_records || []).length === 0 ? <p>No academic records yet.</p> : (
+                <div className="table-wrap">
+                  <table className="people-table">
+                    <caption className="sr-only">Academic records</caption>
+                    <thead><tr><th>Qualification</th><th>Stream</th><th>Institution</th><th>Mark</th><th>Year</th><th>Board</th></tr></thead>
+                    <tbody>
+                      {shown.academic_records.map((item, index) => (
+                        <tr key={`${item.qualification}-${index}`}>
+                          <td>{item.qualification || "Not recorded"}</td>
+                          <td>{item.stream || "Not recorded"}</td>
+                          <td>{item.institution || "Not recorded"}</td>
+                          <td>{item.mark || "Not recorded"}</td>
+                          <td>{item.year_of_passing || "Not recorded"}</td>
+                          <td>{item.board || "Not recorded"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {businessRows(shown.business_answers || [], businessQuestions).length ? (
+                <>
+                  <h2>Questions</h2>
+                  <dl className="facts">
+                    {businessRows(shown.business_answers || [], businessQuestions).map((answer) => (
+                      <div key={answer.question_id} className="span-2">
+                        <dt>{answer.label || "Question"}</dt>
+                        <dd className={answer.value ? undefined : "is-empty"}>{answer.value || "Not recorded"}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </>
+              ) : null}
+              {(shown.course_profiles || []).map((profile) => (
+                <div key={profile.course_id}>
+                  <h2>{profile.course_name || "Course"} details</h2>
+                  <dl className="facts">
+                    {profile.answers.map((answer) => (
+                      <div key={answer.question_id} className="span-2">
+                        <dt>{answer.label || "Answer"}</dt>
+                        <dd className={answer.value ? undefined : "is-empty"}>{answer.value || "Not recorded"}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              ))}
               <div className="title-row">
                 <h2>Enrollments</h2>
                 {shown.actions.enroll ? (
@@ -887,14 +991,23 @@ export function StudentPage() {
                     <label>Date of birth
                       <input type="date" value={draft.date_of_birth} aria-label="Date of birth" onChange={change("date_of_birth")} />
                     </label>
+                    <label>Gender
+                      <select value={draft.gender} aria-label="Gender" onChange={change("gender")}>
+                        <option value="">Not recorded</option>
+                        {GENDERS.map((item) => <option key={item}>{item}</option>)}
+                      </select>
+                    </label>
                     <label>Blood group
                       <select value={draft.blood_group} aria-label="Blood group" onChange={change("blood_group")}>
                         <option value="">Not recorded</option>
                         {BLOOD_GROUPS.map((group) => <option key={group} value={group}>{group}</option>)}
                       </select>
                     </label>
-                    <label>Student phone
-                      <input value={draft.phone} aria-label="Student phone" onChange={change("phone")} />
+                    <label>Contact number
+                      <input value={draft.phone} aria-label="Contact number" onChange={change("phone")} />
+                    </label>
+                    <label>Email
+                      <input value={draft.email} aria-label="Email" onChange={change("email")} />
                     </label>
                     <label>Parent or guardian phone
                       <input value={draft.guardian_phone} aria-label="Parent or guardian phone" onChange={change("guardian_phone")} />
@@ -906,11 +1019,14 @@ export function StudentPage() {
                       <textarea value={draft.notes} rows={3} aria-label="Notes" onChange={change("notes")} />
                     </label>
                     <p className="span-2 section-label">Address</p>
-                    <label className="span-2">House and street
-                      <textarea value={draft.street} rows={2} aria-label="House and street" onChange={change("street")} />
+                    <label className="span-2">Address line 1
+                      <textarea value={draft.street} rows={2} aria-label="Address line 1" onChange={change("street")} />
                     </label>
-                    <label>Place
-                      <input value={draft.place} aria-label="Place" onChange={change("place")} />
+                    <label className="span-2">Address line 2
+                      <input value={draft.address_line_2} aria-label="Address line 2" onChange={change("address_line_2")} />
+                    </label>
+                    <label>City
+                      <input value={draft.place} aria-label="City" onChange={change("place")} />
                     </label>
                     <label>District
                       <input value={draft.district} aria-label="District" onChange={change("district")} />
@@ -924,18 +1040,109 @@ export function StudentPage() {
                   </>
                 ) : (
                   <>
-                    <label>Qualification
-                      <input value={draft.qualification} aria-label="Qualification" onChange={change("qualification")} />
-                    </label>
-                    <label>Year of passing
-                      <input value={draft.passing_year} inputMode="numeric" maxLength={4} aria-label="Year of passing" onChange={change("passing_year")} />
-                    </label>
-                    <label className="span-2">School or college
-                      <input value={draft.institution} aria-label="School or college" onChange={change("institution")} />
-                    </label>
-                    <label className="span-2">Board or university
-                      <input value={draft.board} aria-label="Board or university" onChange={change("board")} />
-                    </label>
+                    {records.map((item, index) => (
+                      <div className="span-2 form-grid" key={index}>
+                        <label>Qualification
+                          <input value={item.qualification} aria-label={`Qualification ${index + 1}`} onChange={(event) => {
+                            const value = event.target.value;
+                            setRecords((current) => current.map((recordItem, recordIndex) => recordIndex === index ? { ...recordItem, qualification: value } : recordItem));
+                            setDirty(true);
+                          }} />
+                        </label>
+                        <label>Stream or department
+                          <input value={item.stream} aria-label={`Stream ${index + 1}`} onChange={(event) => {
+                            const value = event.target.value;
+                            setRecords((current) => current.map((recordItem, recordIndex) => recordIndex === index ? { ...recordItem, stream: value } : recordItem));
+                            setDirty(true);
+                          }} />
+                        </label>
+                        <label className="span-2">Institution
+                          <input value={item.institution} aria-label={`Institution ${index + 1}`} onChange={(event) => {
+                            const value = event.target.value;
+                            setRecords((current) => current.map((recordItem, recordIndex) => recordIndex === index ? { ...recordItem, institution: value } : recordItem));
+                            setDirty(true);
+                          }} />
+                        </label>
+                        <label>Mark
+                          <input value={item.mark} aria-label={`Mark ${index + 1}`} onChange={(event) => {
+                            const value = event.target.value;
+                            setRecords((current) => current.map((recordItem, recordIndex) => recordIndex === index ? { ...recordItem, mark: value } : recordItem));
+                            setDirty(true);
+                          }} />
+                        </label>
+                        <label>Year of passing
+                          <input value={item.year_of_passing} inputMode="numeric" maxLength={4} aria-label={`Year of passing ${index + 1}`} onChange={(event) => {
+                            const value = event.target.value;
+                            setRecords((current) => current.map((recordItem, recordIndex) => recordIndex === index ? { ...recordItem, year_of_passing: value } : recordItem));
+                            setDirty(true);
+                          }} />
+                        </label>
+                        <label>Board or university
+                          <input value={item.board} aria-label={`Board ${index + 1}`} onChange={(event) => {
+                            const value = event.target.value;
+                            setRecords((current) => current.map((recordItem, recordIndex) => recordIndex === index ? { ...recordItem, board: value } : recordItem));
+                            setDirty(true);
+                          }} />
+                        </label>
+                      </div>
+                    ))}
+                    <div className="span-2">
+                      <button type="button" className="quiet" onClick={() => { setRecords((current) => [...current, { ...EMPTY_RECORD }]); setDirty(true); }}>Add academic record</button>
+                    </div>
+                    {businessRows(businessAnswers, businessQuestions).map((answer) => {
+                      const question = businessQuestions.find((item) => item.id === answer.question_id);
+                      return (
+                        <label key={answer.question_id} className={question?.answer_type === "boolean" ? "checkbox-row span-2" : "span-2"}>
+                          {question?.answer_type === "boolean" ? (
+                            <QuestionControl type="boolean" choices={[]} value={answer.value} label={answer.label || "Question"} onChange={(value) => {
+                              setBusinessAnswers((current) => {
+                                const next = current.filter((item) => item.question_id !== answer.question_id);
+                                return [...next, { question_id: answer.question_id, label: answer.label, value }];
+                              });
+                              setDirty(true);
+                            }} />
+                          ) : null}
+                          <span>{answer.label || "Question"}</span>
+                          {question?.answer_type === "boolean" ? null : (
+                            <QuestionControl type={question?.answer_type || "text"} choices={question?.choices || []} value={answer.value} label={answer.label || "Question"} onChange={(value) => {
+                              setBusinessAnswers((current) => {
+                                const next = current.filter((item) => item.question_id !== answer.question_id);
+                                return [...next, { question_id: answer.question_id, label: answer.label, value }];
+                              });
+                              setDirty(true);
+                            }} />
+                          )}
+                        </label>
+                      );
+                    })}
+                    {profiles.map((profile) => (
+                      <div className="span-2" key={profile.course_id}>
+                        <p className="section-label">{profile.course_name || "Course"} details</p>
+                        {profile.answers.map((answer) => (
+                          <label key={answer.question_id} className={answer.answer_type === "boolean" ? "checkbox-row" : undefined}>
+                            {answer.answer_type === "boolean" ? (
+                              <QuestionControl type="boolean" choices={[]} value={answer.value} label={answer.label || "Course answer"} onChange={(value) => {
+                                setProfiles((current) => current.map((item) => item.course_id === profile.course_id ? {
+                                  ...item,
+                                  answers: item.answers.map((entry) => entry.question_id === answer.question_id ? { ...entry, value } : entry),
+                                } : item));
+                                setDirty(true);
+                              }} />
+                            ) : null}
+                            <span>{answer.label || "Answer"}</span>
+                            {answer.answer_type === "boolean" ? null : (
+                              <QuestionControl type={answer.answer_type || "text"} choices={answer.choices || []} value={answer.value} label={answer.label || "Course answer"} onChange={(value) => {
+                                setProfiles((current) => current.map((item) => item.course_id === profile.course_id ? {
+                                  ...item,
+                                  answers: item.answers.map((entry) => entry.question_id === answer.question_id ? { ...entry, value } : entry),
+                                } : item));
+                                setDirty(true);
+                              }} />
+                            )}
+                          </label>
+                        ))}
+                      </div>
+                    ))}
                   </>
                 )}
                 {conflict ? (

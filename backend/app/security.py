@@ -13,6 +13,13 @@ def name_key(value: str) -> str:
     return " ".join(value.split()).casefold()
 
 
+def phone_key(value: str) -> str:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    if digits.startswith("91") and len(digits) == 12:
+        return digits[2:]
+    return digits
+
+
 _PBKDF2_ROUNDS = 120_000
 
 

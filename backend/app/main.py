@@ -15,6 +15,7 @@ from app.db import connect, ensure_schema
 from app.errors import AppError, app_error_handler, error_body
 from app.http import router
 from app.importing.routes import router as import_router
+from app.intake import router as intake_router
 from app.jobs import process_due_jobs
 
 log = logging.getLogger("vay")
@@ -77,6 +78,7 @@ def create_app() -> FastAPI:
     app.include_router(router)
     app.include_router(import_router)
     app.include_router(catalog_router)
+    app.include_router(intake_router)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):

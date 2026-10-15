@@ -403,6 +403,39 @@ def test_custom_role_permissions_can_be_changed_for_later_grants(client):
     assert unknown.status_code == 422
 
 
+def test_factory_reset_wipes_the_install_and_returns_to_setup(client):
+    bootstrap(client)
+    data_dir = client.app.state.settings.data_dir
+    stored = data_dir / "files"
+    stored.mkdir()
+    (stored / "kept.xlsx").write_bytes(b"sheet")
+    database = sync_db(client)
+    database.students.insert_one({"_id": "student-1", "display_name": "Kept"})
+    client.post("/api/v1/auth/logout")
+    signed_out = client.post("/api/v1/factory-reset", json={"confirm": "RESET"})
+    assert signed_out.status_code == 401
+    assert client.post("/api/v1/auth/login", json={"email": "admin@iam.test", "password": "correct-horse"}).status_code == 200
+    refused = client.post("/api/v1/factory-reset", json={"confirm": "reset"})
+    assert refused.status_code == 422
+    assert database.students.count_documents({}) == 1
+    reset = client.post("/api/v1/factory-reset", json={"confirm": "RESET"})
+    assert reset.status_code == 200, reset.text
+    cleared = reset.headers.get("set-cookie", "")
+    assert "vay_session=" in cleared
+    assert "HttpOnly" in cleared
+    assert "Max-Age=0" in cleared
+    assert database.institutes.count_documents({}) == 0
+    assert database.users.count_documents({}) == 0
+    assert database.students.count_documents({}) == 0
+    assert database.counters.find_one({"_id": "student_code"})["value"] == 0
+    assert database.schema_meta.find_one({"_id": "schema"})["version"] == 1
+    assert not (stored / "kept.xlsx").exists()
+    assert client.get("/api/v1/health").json()["bootstrapped"] is False
+    assert client.get("/api/v1/auth/session").status_code == 401
+    again = bootstrap(client)
+    assert again["institute"]["code"] == "IAM"
+
+
 def test_incompatible_client_is_rejected(client):
     response = client.get("/api/v1/auth/session", headers={"X-Client-Version": "2.0.0"})
     assert response.status_code == 426

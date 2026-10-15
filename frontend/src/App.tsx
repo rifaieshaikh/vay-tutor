@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { api, Health, Session } from "./api";
-import { AccessPage, UserAccessPage } from "./pages/Access";
+import { AccessPage, TeacherPage, TeachersPage, UserAccessPage } from "./pages/Access";
 import { AuditPage } from "./pages/Audit";
 import { CoursePage, CoursesPage, InstitutePage, StudentsPage, BatchesPage } from "./pages/Catalog";
 import { BranchPage } from "./pages/Branch";
+import { AdmissionPage, AdmissionsPage, EnquiriesPage, EnquiryPage } from "./pages/Intake";
 import { StudentPage } from "./pages/Student";
 import { CardsPage } from "./pages/Cards";
 import { ImportPage } from "./pages/Import";
@@ -67,6 +68,12 @@ export function App() {
         <Route path="/cards" element={can("progress_card.view") ? <CardsPage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/views" element={can("dashboard.view") ? <ViewsPage /> : <Navigate to="/" replace />} />
         <Route path="/students" element={can("student.lookup") ? <StudentsPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/students/enquiries" element={can("student.lookup") ? <EnquiriesPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/students/enquiries/:enquiryId" element={can("student.lookup") ? <EnquiryPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/students/admissions" element={can("student.lookup") ? <AdmissionsPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/students/admissions/:admissionId" element={can("student.lookup") ? <AdmissionPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/teachers" element={can("user.manage") ? <TeachersPage /> : <Navigate to="/" replace />} />
+        <Route path="/teachers/:teacherId" element={can("user.manage") ? <TeacherPage /> : <Navigate to="/" replace />} />
         <Route path="/students/:studentId" element={can("student.lookup") ? <StudentPage /> : <Navigate to="/" replace />} />
         <Route path="/institute" element={can("student.lookup") ? <InstitutePage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/institute/branches/:branchId" element={can("student.lookup") ? <BranchPage session={session} /> : <Navigate to="/" replace />} />

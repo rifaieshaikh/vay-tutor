@@ -9,6 +9,7 @@ const LINKS = [
   { to: "/cards", label: "Progress Cards", action: "progress_card.view" },
   { to: "/views", label: "Academic Views", action: "dashboard.view" },
   { to: "/students", label: "Students", action: "student.lookup" },
+  { to: "/teachers", label: "Teachers", action: "user.manage" },
   { to: "/institute", label: "Institute", action: "student.lookup" },
   { to: "/courses", label: "Courses", action: "student.lookup" },
   { to: "/batches", label: "Batches", action: "student.lookup" },

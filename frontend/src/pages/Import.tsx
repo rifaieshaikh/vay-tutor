@@ -1,6 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
+import { notify } from "../notify";
 import { Icon } from "./Catalog";
 
 type Student = {
@@ -383,7 +384,6 @@ export function ImportPage() {
   const fromList = useRef(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const [open, setOpen] = useState(false);
@@ -391,7 +391,6 @@ export function ImportPage() {
   const [sheetId, setSheetId] = useState("");
   const [defaults, setDefaults] = useState<Record<string, { mode: string; value: string }>>({});
   const [confirmUpdates, setConfirmUpdates] = useState(false);
-  const [correctionNote, setCorrectionNote] = useState("");
   const saveChain = useRef(Promise.resolve());
 
   async function loadHistory() {
@@ -450,7 +449,6 @@ export function ImportPage() {
   async function upload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
-    setMessage("");
     const input = event.currentTarget.elements.namedItem("file") as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
@@ -502,7 +500,7 @@ export function ImportPage() {
       });
       setPreview(await api<Preview>(`/api/v1/imports/${preview.id}`));
       setStep(5);
-      setMessage(result.summary
+      notify(result.summary
         ? `Import finished. ${result.summary.counts.results.insert} results inserted, ${result.summary.counts.results.update} updated.`
         : "Import finished. Drafts stay unpublished until you review the marksheets.");
       await loadHistory();
@@ -512,9 +510,8 @@ export function ImportPage() {
   }
 
   async function correctRow(targetId: string, key: string, correction: Record<string, unknown>) {
-    setCorrectionNote("");
     await patchSheet(targetId, { corrections: { [key]: correction } });
-    setCorrectionNote("Saved.");
+    notify("Saved.");
   }
 
   async function uploadCorrections(event: FormEvent<HTMLFormElement>) {
@@ -533,7 +530,7 @@ export function ImportPage() {
       );
       setPreview(await api<Preview>(`/api/v1/imports/${preview.id}`));
       const missed = result.unmatched.map((item) => `${item.student}: ${item.message}`).join(" ");
-      setCorrectionNote(`Applied ${result.applied.length} correction${result.applied.length === 1 ? "" : "s"}. ${missed}`);
+      notify(`Applied ${result.applied.length} correction${result.applied.length === 1 ? "" : "s"}. ${missed}`);
       input.value = "";
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not read the correction file.");
@@ -545,7 +542,7 @@ export function ImportPage() {
     await api(`/api/v1/imports/${preview.id}/cancel`, { method: "POST" });
     setOpen(false);
     setPreview(null);
-    setMessage("Import cancelled. It remains in the history.");
+    notify("Import cancelled. It remains in the history.");
     await loadHistory();
     if (fromList.current) navigate("/marksheets");
   }
@@ -571,7 +568,6 @@ export function ImportPage() {
       </div>
       <p>Each workbook stays in this list. Opening the import wizard does not remove earlier imports. Close the window and the history is still here.</p>
       {error && !open ? <p className="error" role="alert">{error}</p> : null}
-      {message ? <p className="ok" role="status">{message}</p> : null}
       {history.length === 0 ? <p>No imports yet.</p> : (
         <div className="table-wrap">
           <table className="history">
@@ -665,7 +661,6 @@ export function ImportPage() {
             {preview && step === 2 ? (
               <>
                 <p>The opening rows show what was read from the file. Branch, course, batch, subject, and paper at the top apply to every sheet. On a combined exam, a student already in one of the sheet’s batches keeps that batch. Otherwise choose from the batches written on the sheet.</p>
-                {correctionNote ? <p className="ok" role="status">{correctionNote}</p> : null}
                 <SheetGrid
                   sheets={preview.sheets.filter((sheet) => sheet.included)}
                   activeId={activeSheet?.id || ""}
@@ -690,7 +685,6 @@ export function ImportPage() {
             {preview && step === 3 && activeSheet ? (
               <>
                 <p>{problemCount === 0 ? "No cells need a correction. You can still review each sheet." : `${problemCount} cell${problemCount === 1 ? "" : "s"} need a decision. Edit the red cells, or upload a file.`}</p>
-                {correctionNote ? <p className="ok" role="status">{correctionNote}</p> : null}
                 <div className="upload-pair">
                   <form onSubmit={uploadCorrections}>
                     <h3>Upload a correction file</h3>
