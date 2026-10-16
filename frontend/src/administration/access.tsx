@@ -3,7 +3,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "../api";
 import { notify } from "../notify";
 import { Option, clearIncompatible, optionFits } from "../filters";
-import { Icon, StudentDialog } from "../ui";
+import { Icon, moveTab, StudentDialog } from "../ui";
 
 type UserGrant = { role: string; scope: Record<string, string | null>; unit_ids?: string[] };
 type User = { id: string; name: string; email: string; active: boolean; grants?: UserGrant[] };
@@ -205,12 +205,12 @@ export function AccessPage() {
           <div className="icon-actions">
             {tab === "users" && active.length ? <button type="button" onClick={() => writeFilters("", "")} aria-label="Clear filters" title="Clear filters"><Icon name="clear" /></button> : null}
             {tab === "users" ? <button type="button" onClick={() => { setDraftQuery(query); setDraftStatus(status); setFiltersOpen(true); }} aria-label={active.length ? `Filters, ${active.length} applied` : "Filters"} title="Filters"><Icon name="filter" /></button> : null}
-            {tab === "users" ? <button type="button" onClick={() => { setAdding(true); setError(""); }} aria-label="Add user" title="Add user"><Icon name="add" /></button> : null}
-            {tab === "roles" ? <button type="button" onClick={() => { setAddingRole(true); setError(""); }} aria-label="Add role" title="Add role"><Icon name="add" /></button> : null}
-          </div>
+            </div>
+          {tab === "users" ? <button type="button" onClick={() => { setAdding(true); setError(""); }}>Add user</button> : null}
+          {tab === "roles" ? <button type="button" onClick={() => { setAddingRole(true); setError(""); }}>Add role</button> : null}
         </div>
       </div>
-      <div className="page-tabs" role="tablist" aria-label="Users and access">
+      <div className="page-tabs" role="tablist" aria-label="Users and access" onKeyDown={(event) => moveTab(event, ["users", "roles"] as const, tab, openTab)}>
         <button type="button" role="tab" aria-selected={tab === "users"} onClick={() => openTab("users")}>Users</button>
         <button type="button" role="tab" aria-selected={tab === "roles"} onClick={() => openTab("roles")}>Roles</button>
       </div>
@@ -416,9 +416,7 @@ export function UserAccessPage() {
       {error ? <p className="error" role="alert">{error}</p> : null}
       <div className="title-row">
         <h2>Grants</h2>
-        <div className="icon-actions">
-          <button type="button" onClick={() => { setAdding(true); setError(""); }} aria-label="Add grant" title="Add grant"><Icon name="add" /></button>
-        </div>
+        <button type="button" onClick={() => { setAdding(true); setError(""); }}>Add grant</button>
       </div>
       <p className="meta">A grant is one role on one scope. Grants do not combine across different branches or subjects.</p>
       {preview.grants.length === 0 ? <p>No grants yet.</p> : (
@@ -557,9 +555,7 @@ function UserForm({ roles, options, onClose, onSaved }: { roles: Role[]; options
         <div className="dialog-actions span-2">
           <button type="button" className="quiet" onClick={onClose}>Cancel</button>
           {acknowledge ? <button type="submit" disabled={saving || !ready}>Confirm this scope</button> : (
-            <div className="icon-actions">
-              <button type="submit" disabled={saving || !ready} aria-label="Add user" title="Add user"><Icon name="add" /></button>
-            </div>
+            <button type="submit" disabled={saving || !ready}>{saving ? "Saving…" : "Add user"}</button>
           )}
         </div>
       </form>
@@ -614,9 +610,7 @@ function GrantForm({ userId, roles, options, onClose, onSaved }: { userId: strin
         <div className="dialog-actions span-2">
           <button type="button" className="quiet" onClick={onClose}>Cancel</button>
           {acknowledge ? <button type="submit" disabled={saving}>Confirm this grant</button> : (
-            <div className="icon-actions">
-              <button type="submit" disabled={saving} aria-label="Add grant" title="Add grant"><Icon name="add" /></button>
-            </div>
+            <button type="submit" disabled={saving}>{saving ? "Saving…" : "Add grant"}</button>
           )}
         </div>
       </form>
@@ -670,9 +664,7 @@ function RoleForm({ role, onClose, onSaved }: { role?: Role; onClose: () => void
         <div className="dialog-actions span-2">
           <button type="button" className="quiet" onClick={onClose}>Cancel</button>
           {role ? <button type="submit" disabled={saving || !ready}>Save</button> : (
-            <div className="icon-actions">
-              <button type="submit" disabled={saving || !ready} aria-label="Add role" title="Add role"><Icon name="add" /></button>
-            </div>
+            <button type="submit" disabled={saving || !ready}>{saving ? "Saving…" : "Add role"}</button>
           )}
         </div>
       </form>

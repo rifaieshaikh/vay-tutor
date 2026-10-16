@@ -1,8 +1,8 @@
 import { ReactNode, useEffect, useState } from "react";
-import { NavLink, useLocation, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
 import { ContextBar, contextSearch, showsContext } from "../context";
-import { Breadcrumbs, pageOrientation } from "../orientation";
+import { Breadcrumbs, pageOrientation, useRecordTitle } from "../orientation";
 
 type Item = { to: string; label: string; action: string; end?: boolean };
 
@@ -49,7 +49,12 @@ const GROUPS: { label: string; items: Item[] }[] = [
   },
 ];
 
+function ownsStudentRecord(pathname: string) {
+  return pathname === "/students" || /^\/students\/(?!enquiries(?:\/|$)|admissions(?:\/|$))[^/]+$/.test(pathname);
+}
+
 function itemActive(pathname: string, item: Item) {
+  if (item.to === "/students") return ownsStudentRecord(pathname);
   if (item.end || item.to === "/") return pathname === item.to;
   return pathname === item.to || pathname.startsWith(`${item.to}/`);
 }
@@ -66,6 +71,7 @@ export function Shell({
   const [open, setOpen] = useState(false);
   const { pathname } = useLocation();
   const [params] = useSearchParams();
+  const record = useRecordTitle();
   const search = contextSearch(params).toString();
   const groups = GROUPS.map((group) => ({
     ...group,
@@ -73,8 +79,8 @@ export function Shell({
   })).filter((group) => group.items.length > 0);
 
   useEffect(() => {
-    document.title = `${pageOrientation(pathname).title} · Vay Tutor`;
-  }, [pathname]);
+    document.title = `${pageOrientation(pathname, record).title} · Vay Tutor`;
+  }, [pathname, record]);
 
   async function logout() {
     await api("/api/v1/auth/logout", { method: "POST" });
@@ -101,15 +107,15 @@ export function Shell({
             <div className="nav-group" key={group.label}>
               <p className="nav-label">{group.label}</p>
               {group.items.map((item) => (
-                <NavLink
+                <Link
                   key={item.to}
                   to={{ pathname: item.to, search }}
-                  end={item.end || item.to === "/"}
+                  aria-current={itemActive(pathname, item) ? "page" : undefined}
                   className={itemActive(pathname, item) ? "active" : undefined}
                   onClick={() => setOpen(false)}
                 >
                   {item.label}
-                </NavLink>
+                </Link>
               ))}
             </div>
           ))}

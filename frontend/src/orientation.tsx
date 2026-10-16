@@ -1,3 +1,4 @@
+import { useEffect, useSyncExternalStore } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { contextSearch } from "./context";
 
@@ -5,13 +6,15 @@ type Crumb = { label: string; to?: string };
 
 const RULES: [RegExp, Crumb[]][] = [
   [/^\/students\/enquiries\/[^/]+$/, [
-    { label: "Admissions", to: "/students/enquiries" },
     { label: "Enquiries", to: "/students/enquiries" },
     { label: "Enquiry" },
   ]],
   [/^\/students\/enquiries$/, [
-    { label: "Admissions", to: "/students/enquiries" },
     { label: "Enquiries" },
+  ]],
+  [/^\/students\/admissions\/new$/, [
+    { label: "Admissions", to: "/students/admissions" },
+    { label: "New admission" },
   ]],
   [/^\/students\/admissions\/[^/]+$/, [
     { label: "Admissions", to: "/students/admissions" },
@@ -100,16 +103,45 @@ const RULES: [RegExp, Crumb[]][] = [
   [/^\/$/, [{ label: "Dashboard" }]],
 ];
 
-export function pageOrientation(pathname: string) {
+let recordLabel = "";
+const recordListeners = new Set<() => void>();
+
+function publishRecord(label: string) {
+  recordLabel = label;
+  recordListeners.forEach((listener) => listener());
+}
+
+export function useRecordLabel(label: string) {
+  useEffect(() => {
+    publishRecord(label);
+    return () => {
+      if (recordLabel === label) publishRecord("");
+    };
+  }, [label]);
+}
+
+export function useRecordTitle() {
+  return useSyncExternalStore(
+    (listener) => {
+      recordListeners.add(listener);
+      return () => recordListeners.delete(listener);
+    },
+    () => recordLabel,
+  );
+}
+
+export function pageOrientation(pathname: string, record = "") {
   const match = RULES.find(([pattern]) => pattern.test(pathname));
-  const crumbs = match ? match[1] : [{ label: "Vay Tutor" }];
+  const crumbs = match ? match[1].map((crumb) => ({ ...crumb })) : [{ label: "Vay Tutor" }];
+  if (record && crumbs.length > 1) crumbs[crumbs.length - 1] = { label: record };
   return { title: crumbs[crumbs.length - 1].label, crumbs };
 }
 
 export function Breadcrumbs() {
   const { pathname } = useLocation();
   const [params] = useSearchParams();
-  const { crumbs } = pageOrientation(pathname);
+  const record = useRecordTitle();
+  const { crumbs } = pageOrientation(pathname, record);
   const search = contextSearch(params).toString();
   if (crumbs.length < 2) return null;
   return (

@@ -6,7 +6,9 @@ import { Option, optionFits } from "../filters";
 import { BandMark } from "../bands";
 import { AcademicRecord, BLOOD_GROUPS, EMPTY_RECORD, GENDERS } from "../records";
 import { QuestionControl } from "../admissions/questions";
-import { StudentDialog as Dialog } from "../ui";
+import { useUnsaved } from "../guard";
+import { useRecordLabel } from "../orientation";
+import { confirmDiscard, moveTab, StudentDialog as Dialog } from "../ui";
 import { StudentEnrollment, recordedDate, recordedName, recordedStatus, safeBatchWorkspace, safeStudentList } from "./links";
 type CourseProfile = { course_id: string; course_name: string; answers: { question_id: string; label?: string; value: string; answer_type?: string; choices?: string[] }[] };
 type BusinessAnswer = { question_id: string; label?: string; value: string };
@@ -427,22 +429,15 @@ export function StudentPage() {
     };
   }, [studentId, phase, record, historyAttempt]);
 
-  useEffect(() => {
-    if (!editing || !dirty) return;
-    function onLeave(event: BeforeUnloadEvent) {
-      event.preventDefault();
-      event.returnValue = "";
-    }
-    window.addEventListener("beforeunload", onLeave);
-    return () => window.removeEventListener("beforeunload", onLeave);
-  }, [editing, dirty]);
+  useUnsaved(editing && dirty);
+  useRecordLabel(record && record.id === studentId ? record.display_name : "");
 
   useEffect(() => {
     if (editing) nameRef.current?.focus();
   }, [editing]);
 
   function discardPrompt() {
-    return !dirty || window.confirm("Discard the unsaved changes?");
+    return confirmDiscard(editing && dirty);
   }
 
   function closeEditor() {
@@ -787,7 +782,7 @@ export function StudentPage() {
 
   return (
     <section className="panel wide student-record" aria-busy={phase === "loading"}>
-      <Link className="quiet back-link" to={back} onClick={(event) => { if (!discardPrompt()) event.preventDefault(); }}>{batchBack ? "← Batch" : "← Students"}</Link>
+      <Link className="quiet back-link" to={back}>{batchBack ? "← Batch" : "← Students"}</Link>
       {phase === "loading" ? <h1>Loading this student…</h1> : null}
       {phase === "unavailable" ? (
         <>
@@ -821,7 +816,7 @@ export function StudentPage() {
               {shown.actions.card ? <Link to={cardHref()} aria-label="View progress card" title="View progress card"><Icon name="card" /></Link> : null}
             </div>
           </div>
-          <div className="page-tabs" role="tablist" aria-label="Student">
+          <div className="page-tabs" role="tablist" aria-label="Student" onKeyDown={(event) => moveTab(event, historyPermitted ? ["personal", "academics", "history"] as const : ["personal", "academics"] as const, visibleTab, chooseTab)}>
             <button type="button" role="tab" aria-selected={visibleTab === "personal"} onClick={() => chooseTab("personal")}>Personal</button>
             <button type="button" role="tab" aria-selected={visibleTab === "academics"} onClick={() => chooseTab("academics")}>Academics</button>
             {historyPermitted ? <button type="button" role="tab" aria-selected={visibleTab === "history"} onClick={() => chooseTab("history")}>History</button> : null}
@@ -902,9 +897,7 @@ export function StudentPage() {
               <div className="title-row">
                 <h2>Enrollments</h2>
                 {shown.actions.enroll ? (
-                  <div className="icon-actions">
-                    <button type="button" onClick={openAdd} aria-label="Add enrollment" title="Add enrollment"><Icon name="add" /></button>
-                  </div>
+                  <button type="button" onClick={openAdd}>Add enrollment</button>
                 ) : null}
               </div>
               {shown.enrollments.length === 0 ? <p>No enrollments in this view.</p> : (
@@ -1239,9 +1232,7 @@ export function StudentPage() {
                     <input value={aliasName} onChange={(event) => setAliasName(event.target.value)} aria-label="Previous name" />
                   </label>
                   <div className="dialog-actions">
-                    <div className="icon-actions">
-                      <button type="submit" disabled={!aliasName.trim()} aria-label="Add a previous name" title="Add a previous name"><Icon name="add" /></button>
-                    </div>
+                    <button type="submit" disabled={!aliasName.trim()}>Add name</button>
                   </div>
                 </form>
               ) : null}
@@ -1327,9 +1318,7 @@ export function StudentPage() {
                 {addError ? <p className="error span-2" role="alert">{addError}</p> : null}
                 <div className="dialog-actions span-2">
                   <button type="button" className="quiet" onClick={() => setAdding(false)}>Cancel</button>
-                  <div className="icon-actions">
-                    <button type="submit" disabled={addSaving} aria-label="Add enrollment" title="Add enrollment"><Icon name="add" /></button>
-                  </div>
+                  <button type="submit" disabled={addSaving}>{addSaving ? "Saving…" : "Add enrollment"}</button>
                 </div>
               </form>
             </Dialog>

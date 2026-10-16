@@ -4,7 +4,7 @@ import { api } from "../api";
 import { notify } from "../notify";
 import { CONTEXT_FIELDS, Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
 import { Band, BandMark, bandTone } from "../bands";
-import { Icon } from "../ui";
+import { Icon, moveTab } from "../ui";
 
 type Section = { id: string; label: string; students: number; results: number; percentage: number | null; band: string | null; band_name?: string | null; band_place?: string | null; coverage: string; missing?: number; absent?: number; marksheet_ids?: string[] };
 type Standing = {
@@ -574,14 +574,13 @@ export function ViewsPage() {
           </div>
         </div>
       </div>
-      <nav className="page-tabs" role="tablist" aria-label="Academic level">
+      <nav className="page-tabs" role="tablist" aria-label="Academic level" onKeyDown={(event) => moveTab(event, LEVELS, LEVELS.includes(level as (typeof LEVELS)[number]) ? level as (typeof LEVELS)[number] : "institute", goToLevel)}>
         {LEVELS.map((item) => (
           <button key={item} type="button" role="tab" aria-selected={level === item} onClick={() => goToLevel(item)}>{LEVEL_LABELS[item]}</button>
         ))}
       </nav>
       {filtersOpen ? (
         <Dialog title="Report filters" onClose={closeFilters}>
-          <p className="meta">Apply changes to update the entire view.</p>
           <form className="report-filters" onSubmit={(event: FormEvent) => { event.preventDefault(); applyDraft(); }}>
             <div className="form-grid">
               {CONTEXT_FIELDS.map(([key, label, dimension]) => (

@@ -2,6 +2,7 @@ import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
 import { notify } from "../notify";
+import { formatDisplayDate } from "../format";
 import { Icon, StudentDialog } from "../ui";
 
 type Unit = { id: string; name: string; kind: string };
@@ -237,9 +238,7 @@ export function InstitutePage({ session }: { session: Session }) {
       <div className="title-row">
         <h2>Branches</h2>
         {canCorrect ? (
-          <div className="icon-actions">
-            <button type="button" onClick={() => { setAdding(true); setBranchName(""); setLocalError(""); }} aria-label="Add branch" title="Add branch"><Icon name="add" /></button>
-          </div>
+          <button type="button" onClick={() => { setAdding(true); setBranchName(""); setLocalError(""); }}>Add branch</button>
         ) : null}
       </div>
       {branches.length === 0 ? <p>No branches yet.</p> : (
@@ -291,9 +290,7 @@ export function InstitutePage({ session }: { session: Session }) {
             {localError ? <p className="error" role="alert">{localError}</p> : null}
             <div className="dialog-actions">
               <button type="button" className="quiet" onClick={() => setAdding(false)}>Cancel</button>
-              <div className="icon-actions">
-                <button type="submit" disabled={!branchName.trim()} aria-label="Add branch" title="Add branch"><Icon name="add" /></button>
-              </div>
+              <button type="submit" disabled={!branchName.trim()}>Add branch</button>
             </div>
           </form>
         </StudentDialog>
@@ -414,9 +411,7 @@ export function CoursesPage({ session }: { session: Session }) {
           <h1>Courses</h1>
         </div>
         {canCorrect ? (
-          <div className="icon-actions">
-            <button type="button" onClick={() => { setAddingCourse(true); setCourseName(""); setError(""); }} aria-label="Add course" title="Add course"><Icon name="add" /></button>
-          </div>
+          <button type="button" onClick={() => { setAddingCourse(true); setCourseName(""); setError(""); }}>Add course</button>
         ) : null}
       </div>
       {courses.length === 0 ? <p>No courses yet.</p> : (
@@ -470,9 +465,7 @@ export function CoursesPage({ session }: { session: Session }) {
             {error ? <p className="error" role="alert">{error}</p> : null}
             <div className="dialog-actions">
               <button type="button" className="quiet" onClick={() => setAddingCourse(false)}>Cancel</button>
-              <div className="icon-actions">
-                <button type="submit" disabled={!courseName.trim()} aria-label="Add course" title="Add course"><Icon name="add" /></button>
-              </div>
+              <button type="submit" disabled={!courseName.trim()}>Add course</button>
             </div>
           </form>
         </StudentDialog>
@@ -637,7 +630,6 @@ export function CoursePage({ session }: { session: Session }) {
               <span key={branch.id}>{index > 0 ? ", " : ""}<Link to={`/institute/branches/${branch.id}`}>{branch.name}</Link></span>
             ))}.
           </p>
-          <p className="meta">Marklists use Unit, Part, and Chapter. These names stay the same for every course.</p>
         </div>
         <div className="icon-actions">
           {canCorrect ? <button type="button" onClick={() => setEditing({ kind: "courses", row: course })} aria-label={`Edit ${course.name}`} title="Edit"><Icon name="edit" /></button> : null}
@@ -648,9 +640,7 @@ export function CoursePage({ session }: { session: Session }) {
       <div className="title-row">
         <h2>Subjects</h2>
         {canCorrect ? (
-          <div className="icon-actions">
-            <button type="button" onClick={() => { setAddingSubject(true); setError(""); }} aria-label="Add subject" title="Add subject"><Icon name="add" /></button>
-          </div>
+          <button type="button" onClick={() => { setAddingSubject(true); setError(""); }}>Add subject</button>
         ) : null}
       </div>
       {subjects.length === 0 ? <p>No subjects yet.</p> : (
@@ -663,10 +653,12 @@ export function CoursePage({ session }: { session: Session }) {
           <div className="title-row">
             <h2>Papers, chapters, and modules</h2>
             {canCorrect && subject ? (
-              <div className="icon-actions">
-                <button type="button" onClick={() => setEditing({ kind: "subjects", row: subject })} aria-label={`Edit ${subject.name}`} title="Edit subject"><Icon name="edit" /></button>
-                <button type="button" onClick={() => setAddingItem(true)} aria-label="Add paper, chapter, or module" title="Add paper, chapter, or module"><Icon name="add" /></button>
-              </div>
+              <>
+                <div className="icon-actions">
+                  <button type="button" onClick={() => setEditing({ kind: "subjects", row: subject })} aria-label={`Edit ${subject.name}`} title="Edit subject"><Icon name="edit" /></button>
+                </div>
+                <button type="button" onClick={() => setAddingItem(true)}>Add paper</button>
+              </>
             ) : null}
           </div>
           <SubjectItems subject={subject} papers={papers} canCorrect={canCorrect} onEditPaper={(row) => setEditing({ kind: "papers", row })} onChanged={async () => { notify(`Saved ${subject?.name || "the subject"}.`); await reload(); }} onError={setError} />
@@ -691,7 +683,7 @@ export function CoursePage({ session }: { session: Session }) {
 
 export function BatchesPage({ session }: { session: Session }) {
   const { catalog, error, correct, reload, setError } = useCatalog();
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
   const [editing, setEditing] = useState<Row | null>(null);
   const [adding, setAdding] = useState(false);
   const canCorrect = session.actions.includes("catalog.correct") || session.actions.includes("catalog.manage");
@@ -721,16 +713,6 @@ export function BatchesPage({ session }: { session: Session }) {
     return `/batches/${row.id}?${next.toString()}`;
   }
 
-  function chooseCourse(id: string) {
-    const next = new URLSearchParams(params);
-    next.delete("course");
-    if (id) next.set("course_id", id);
-    else next.delete("course_id");
-    const selected = catalog?.batches.find((row) => row.id === next.get("batch_id"));
-    if (selected && id && selected.course_id !== id) next.delete("batch_id");
-    setParams(next, { replace: true });
-  }
-
   function branchesFor(id: string) {
     const offered = new Set(catalog?.offerings.filter((item) => item.course_id === id).map((item) => item.branch_id));
     return byName((catalog?.branches || []).filter((row) => offered.has(row.id)));
@@ -743,17 +725,9 @@ export function BatchesPage({ session }: { session: Session }) {
         <div>
           <p className="eyebrow">Batches</p>
           <h1>Batches</h1>
-          <label>Course
-            <select value={courseId} aria-label="Course" onChange={(event) => chooseCourse(event.target.value)}>
-              <option value="">All courses</option>
-              {byName(catalog.courses).map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}
-            </select>
-          </label>
         </div>
         {canCorrect ? (
-          <div className="icon-actions">
-            <button type="button" onClick={() => { setAdding(true); setError(""); }} aria-label="Add batch" title="Add batch"><Icon name="add" /></button>
-          </div>
+          <button type="button" onClick={() => { setAdding(true); setError(""); }}>Add batch</button>
         ) : null}
       </div>
       {batches.length === 0 ? <p>{courseId || branchId || batchId || period ? "No batches match this context." : "No batches yet."}</p> : (
@@ -778,8 +752,8 @@ export function BatchesPage({ session }: { session: Session }) {
                   <td><Link to={batchHref(row)}>{row.name}</Link></td>
                   <td>{row.course_id ? <Link to={`/courses/${row.course_id}`}>{courseName(row.course_id)}</Link> : "Not recorded"}</td>
                   <td>{row.branch_id ? <Link to={`/institute/branches/${row.branch_id}`}>{branchName(row.branch_id)}</Link> : "Not recorded"}</td>
-                  <td>{row.started_on || "Not recorded"}</td>
-                  <td>{row.ended_on || "Not recorded"}</td>
+                  <td>{formatDisplayDate(row.started_on)}</td>
+                  <td>{formatDisplayDate(row.ended_on)}</td>
                   <td>{row.timings || "Not recorded"}</td>
                   <td>{row.archived ? "Archived" : "Active"}</td>
                   {canCorrect ? (
@@ -989,9 +963,7 @@ function BatchForm({
         {error ? <p className="error" role="alert">{error}</p> : null}
         <div className="dialog-actions">
           <button type="button" className="quiet" onClick={onClose}>Cancel</button>
-          <div className="icon-actions">
-            <button type="submit" disabled={saving || !name.trim()} aria-label="Add batch" title="Add batch"><Icon name="add" /></button>
-          </div>
+          <button type="submit" disabled={saving || !name.trim()}>Add batch</button>
         </div>
       </form>
     </StudentDialog>
@@ -1023,9 +995,7 @@ function SubjectForm({ courseId, onClose, onSaved }: { courseId: string; onClose
         {error ? <p className="error" role="alert">{error}</p> : null}
         <div className="dialog-actions">
           <button type="button" className="quiet" onClick={onClose}>Cancel</button>
-          <div className="icon-actions">
-            <button type="submit" disabled={saving || !name.trim()} aria-label="Add subject" title="Add subject"><Icon name="add" /></button>
-          </div>
+          <button type="submit" disabled={saving || !name.trim()}>Add subject</button>
         </div>
       </form>
     </StudentDialog>
@@ -1066,9 +1036,7 @@ function ItemForm({ subject, onClose, onSaved }: { subject: Row; onClose: () => 
         {error ? <p className="error" role="alert">{error}</p> : null}
         <div className="dialog-actions">
           <button type="button" className="quiet" onClick={onClose}>Cancel</button>
-          <div className="icon-actions">
-            <button type="submit" disabled={saving || !name.trim()} aria-label="Add paper, chapter, or module" title="Add paper, chapter, or module"><Icon name="add" /></button>
-          </div>
+          <button type="submit" disabled={saving || !name.trim()}>Add paper</button>
         </div>
       </form>
     </StudentDialog>

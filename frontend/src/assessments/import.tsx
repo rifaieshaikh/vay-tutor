@@ -383,6 +383,8 @@ export function ImportPage() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const fromList = useRef(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [error, setError] = useState("");
@@ -463,11 +465,48 @@ export function ImportPage() {
 
   useEffect(() => {
     if (!open) return;
+    const node = dialogRef.current;
+    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : openerRef.current;
+    const hidden: HTMLElement[] = [];
+    let current: HTMLElement | null = node;
+    while (current && current !== document.body) {
+      const parent = current.parentElement;
+      if (!parent) break;
+      for (const child of parent.children) {
+        if (child !== current && child instanceof HTMLElement && !child.hasAttribute("inert")) {
+          child.setAttribute("inert", "");
+          hidden.push(child);
+        }
+      }
+      current = parent;
+    }
+    const fields = node ? [...node.querySelectorAll<HTMLElement>("button, input, select, textarea")].filter((item) => !item.hasAttribute("disabled")) : [];
+    (fields.find((item) => item.matches("input, select, textarea")) || fields[0] || node)?.focus();
     function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") closeWizard();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeWizard();
+        return;
+      }
+      if (event.key !== "Tab" || !node) return;
+      const items = [...node.querySelectorAll<HTMLElement>("button, input, select, textarea")].filter((item) => !item.hasAttribute("disabled"));
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      hidden.forEach((item) => item.removeAttribute("inert"));
+      openerRef.current?.focus();
+    };
   }, [open]);
 
   function levelChange(field: string, key: "mode" | "value", value: string) {
@@ -637,7 +676,7 @@ export function ImportPage() {
 
       {open ? (
         <div className="modal-backdrop">
-          <div className={preview && (step === 2 || step === 3) ? "modal sheet-view" : "modal"} role="dialog" aria-modal="true" aria-labelledby="import-title">
+          <div ref={dialogRef} className={preview && (step === 2 || step === 3) ? "modal sheet-view" : "modal"} role="dialog" aria-modal="true" aria-labelledby="import-title" tabIndex={-1}>
             <div className="modal-head">
               <h2 id="import-title">{preview?.filename || "Import marklist"}</h2>
               <button type="button" className="text-button" onClick={closeWizard}>Close</button>

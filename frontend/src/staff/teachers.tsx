@@ -108,8 +108,8 @@ export function TeachersPage() {
           <div className="icon-actions">
             {query ? <button type="button" onClick={() => setParams({})} aria-label="Clear filters" title="Clear filters"><Icon name="clear" /></button> : null}
             <button type="button" onClick={() => { setDraftQuery(query); setFiltersOpen(true); }} aria-label={query ? "Filters, 1 applied" : "Filters"} title="Filters"><Icon name="filter" /></button>
-            <button type="button" onClick={() => { setAdding(true); setError(""); }} aria-label="Add teacher" title="Add teacher"><Icon name="add" /></button>
-          </div>
+            </div>
+          <button type="button" onClick={() => { setAdding(true); setError(""); }}>Add teacher</button>
         </div>
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
@@ -262,9 +262,7 @@ export function TeacherPage() {
       {preview.app_user && wide ? <p className="meta">A Teacher grant also covers every course. Remove it from Users and access when this teacher should stay inside the courses below.</p> : null}
       <div className="title-row">
         <h2>Courses</h2>
-        <div className="icon-actions">
-          <button type="button" onClick={() => { setAdding(true); setError(""); }} aria-label="Add course" title="Add course"><Icon name="add" /></button>
-        </div>
+        <button type="button" onClick={() => { setAdding(true); setError(""); }}>Add course</button>
       </div>
       {courses.length === 0 ? <p>No course is assigned yet.</p> : (
         <div className="table-wrap">
@@ -516,9 +514,7 @@ function TeacherForm({ onClose, onSaved }: { onClose: () => void; onSaved: (teac
         {error ? <p className="error span-2" role="alert">{error}</p> : null}
         <div className="dialog-actions span-2">
           <button type="button" className="quiet" onClick={onClose}>Cancel</button>
-          <div className="icon-actions">
-            <button type="submit" disabled={saving || !ready} aria-label="Add teacher" title="Add teacher"><Icon name="add" /></button>
-          </div>
+          <button type="submit" disabled={saving || !ready}>{saving ? "Saving…" : "Add teacher"}</button>
         </div>
       </form>
     </StudentDialog>

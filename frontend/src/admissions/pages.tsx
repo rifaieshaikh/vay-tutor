@@ -2,10 +2,12 @@ import { FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api, Session } from "../api";
 import { Option, optionFits } from "../filters";
-import { IntakeTabs } from "../peopleTabs";
+import { formatDisplayDate } from "../format";
+import { useUnsaved } from "../guard";
 import { notify } from "../notify";
+import { useRecordLabel } from "../orientation";
 import { AcademicRecord, BLOOD_GROUPS, EMPTY_RECORD, GENDERS } from "../records";
-import { StudentDialog } from "../ui";
+import { confirmDiscard, StudentDialog } from "../ui";
 import { AnswerFields, FormQuestions, Question } from "./questions";
 
 type CourseOption = { id: string; name: string };
@@ -78,52 +80,85 @@ type PreviewRow = {
 const INTERESTS = ["High", "Medium", "Low"];
 const BLOOD = BLOOD_GROUPS;
 
+function readable(text: string) {
+  return text.replace(/\d{4}-\d{2}-\d{2}/g, (value) => formatDisplayDate(value));
+}
+
+function withParam(params: URLSearchParams, key: string, value: string) {
+  const next = new URLSearchParams(params);
+  if (value) next.set(key, value);
+  else next.delete(key);
+  if (key !== "page") next.delete("page");
+  return next;
+}
+
+function missingAnswers(questions: Question[], answers: { question_id: string; value: string }[]) {
+  return questions.filter((question) => question.required && !answers.some((item) => item.question_id === question.id && item.value.trim()));
+}
+
 function coursesOf(catalog: { courses: CourseOption[] } | null) {
   return [...(catalog?.courses || [])].sort((left, right) => left.name.localeCompare(right.name));
 }
 
 export function EnquiriesPage({ session }: { session: Session }) {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const followUp = params.get("follow_up") || "";
   const courseId = params.get("course_id") || "";
+  const query = params.get("q") || "";
+  const page = Math.max(1, Number(params.get("page")) || 1);
   const canManage = session.actions.includes("student.manage");
   const canEditQuestions = session.actions.includes("catalog.correct") || session.actions.includes("catalog.manage");
   const [items, setItems] = useState<Enquiry[]>([]);
   const [total, setTotal] = useState(0);
-  const [query, setQuery] = useState("");
+  const [pages, setPages] = useState(1);
+  const [draft, setDraft] = useState(query);
   const [courses, setCourses] = useState<CourseOption[]>([]);
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [questionsOpen, setQuestionsOpen] = useState(false);
+  const [revision, setRevision] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const filtered = Boolean(query || followUp || courseId);
 
-  function load(search = query) {
-    const searchParams = new URLSearchParams();
-    if (search) searchParams.set("q", search);
-    if (followUp) searchParams.set("follow_up", followUp);
-    if (courseId) searchParams.set("course_id", courseId);
-    setLoading(true);
-    api<{ items: Enquiry[]; total: number }>(`/api/v1/enquiries?${searchParams.toString()}`)
-      .then((result) => {
-        setItems(result.items);
-        setTotal(result.total);
-        setError("");
-      })
-      .catch((reason: Error) => setError(reason.message))
-      .finally(() => setLoading(false));
-  }
+  useEffect(() => { setDraft(query); }, [query]);
 
   useEffect(() => {
-    load("");
-    api<{ courses: CourseOption[] }>("/api/v1/catalog").then((catalog) => setCourses(coursesOf(catalog))).catch(() => undefined);
-  }, [followUp, courseId]);
+    const handle = window.setTimeout(() => {
+      if (draft === query) return;
+      setParams(withParam(params, "q", draft.trim()));
+    }, 300);
+    return () => window.clearTimeout(handle);
+  }, [draft, query, params, setParams]);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams();
+    if (query) searchParams.set("q", query);
+    if (followUp) searchParams.set("follow_up", followUp);
+    if (courseId) searchParams.set("course_id", courseId);
+    searchParams.set("page", String(page));
+    let cancelled = false;
+    setLoading(true);
+    api<{ items: Enquiry[]; total: number; pages: number }>(`/api/v1/enquiries?${searchParams.toString()}`)
+      .then((result) => {
+        if (cancelled) return;
+        setItems(result.items);
+        setTotal(result.total);
+        setPages(result.pages);
+        setError("");
+      })
+      .catch((reason: Error) => { if (!cancelled) setError(reason.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    api<{ courses: CourseOption[] }>("/api/v1/catalog").then((catalog) => { if (!cancelled) setCourses(coursesOf(catalog)); }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [followUp, courseId, query, page, revision]);
 
   return (
     <section className="panel wide">
       <div className="page-title">
         <div>
           <p className="eyebrow">Admissions</p>
-          <h1>Enquiry</h1>
+          <h1>Enquiries</h1>
           {followUp === "due" ? <p className="page-lead">Enquiries awaiting follow-up.</p> : null}
         </div>
         {canManage ? (
@@ -133,17 +168,38 @@ export function EnquiriesPage({ session }: { session: Session }) {
           </div>
         ) : null}
       </div>
-      <IntakeTabs current="enquiries" />
-      <FormQuestions form="enquiry" canEdit={canEditQuestions} />
+      {canEditQuestions ? (
+        <p className="actions">
+          <button type="button" className="secondary" aria-expanded={questionsOpen} onClick={() => setQuestionsOpen((open) => !open)}>Form questions</button>
+        </p>
+      ) : null}
+      {questionsOpen ? <FormQuestions form="enquiry" canEdit={canEditQuestions} /> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
-      <form className="filter-row" onSubmit={(event) => { event.preventDefault(); load(query); }}>
+      <form className="filter-row" onSubmit={(event) => { event.preventDefault(); setParams(withParam(params, "q", draft.trim())); }}>
         <label>Search
-          <input value={query} aria-label="Search enquiries" onChange={(event) => setQuery(event.target.value)} />
+          <input value={draft} aria-label="Search enquiries" onChange={(event) => setDraft(event.target.value)} />
         </label>
-        <button type="submit">Search</button>
+        <label>Follow-up
+          <select aria-label="Follow-up" value={followUp} onChange={(event) => setParams(withParam(params, "follow_up", event.target.value))}>
+            <option value="">Any</option>
+            <option value="due">Due</option>
+          </select>
+        </label>
+        <label>Course
+          <select aria-label="Course" value={courseId} onChange={(event) => setParams(withParam(params, "course_id", event.target.value))}>
+            <option value="">Any course</option>
+            {courses.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+        </label>
       </form>
-      <p className="filter-row"><span>{loading ? "Loading enquiries…" : `${total} enquir${total === 1 ? "y" : "ies"}`}</span></p>
-      {items.length === 0 && !loading ? <p>{query.trim() || followUp || courseId ? "No enquiries match." : "No enquiries yet."}</p> : null}
+      <p className="filter-row">
+        <span>{loading ? "Loading enquiries…" : `${total} enquir${total === 1 ? "y" : "ies"}`}</span>
+        {followUp ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "follow_up", ""))}>Due</button> : null}
+        {courseId ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "course_id", ""))}>{courses.find((item) => item.id === courseId)?.name || "Course"}</button> : null}
+        {query ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "q", ""))}>{query}</button> : null}
+        {filtered ? <button type="button" className="quiet" onClick={() => setParams(new URLSearchParams())}>Clear</button> : null}
+      </p>
+      {items.length === 0 && !loading ? <p>{filtered ? "No enquiries match." : "No enquiries yet."}</p> : null}
       {items.length > 0 ? (
         <div className="table-wrap">
           <table className="people-table">
@@ -159,15 +215,22 @@ export function EnquiriesPage({ session }: { session: Session }) {
                   <td>{item.course_name || "Not recorded"}</td>
                   <td>{item.interest || "Not recorded"}</td>
                   <td>{item.stage || (item.admission_id ? "Admitted" : "Enquiry")}</td>
-                  <td>{item.admission_id ? <Link to={`/students/admissions/${item.admission_id}`}>Open admission</Link> : <Link to={`/students/enquiries/${item.id}`}>{item.next_action || "Follow up"}</Link>}</td>
+                  <td>{item.admission_id ? <Link to={`/students/admissions/${item.admission_id}`}>Open admission</Link> : readable(item.next_action || "Follow up")}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       ) : null}
-      {adding ? <EnquiryForm courses={courses} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); load(); }} /> : null}
-      {importing ? <ImportDialog kind="enquiries" onClose={() => setImporting(false)} onSaved={() => { setImporting(false); load(); }} /> : null}
+      {pages > 1 ? (
+        <p className="actions">
+          <button type="button" className="secondary" disabled={page <= 1} onClick={() => setParams(withParam(params, "page", String(page - 1)))}>Previous</button>
+          <span>Page {page} of {pages}</span>
+          <button type="button" className="secondary" disabled={page >= pages} onClick={() => setParams(withParam(params, "page", String(page + 1)))}>Next</button>
+        </p>
+      ) : null}
+      {adding ? <EnquiryForm courses={courses} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); setRevision((value) => value + 1); }} /> : null}
+      {importing ? <ImportDialog kind="enquiries" onClose={() => setImporting(false)} onSaved={() => { setImporting(false); setRevision((value) => value + 1); }} /> : null}
     </section>
   );
 }
@@ -180,7 +243,12 @@ export function EnquiryPage({ session }: { session: Session }) {
   const [courses, setCourses] = useState<CourseOption[]>([]);
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState("");
+  const [admitting, setAdmitting] = useState(false);
+  const [savingFollow, setSavingFollow] = useState(false);
   const [follow, setFollow] = useState({ at: "", note: "", interest: "", next_on: "" });
+  const followDirty = Boolean(follow.at || follow.note || follow.interest || follow.next_on);
+  useRecordLabel(enquiry?.name || "");
+  useUnsaved(followDirty);
 
   function load() {
     api<Enquiry>(`/api/v1/enquiries/${enquiryId}`).then(setEnquiry).catch((reason: Error) => setError(reason.message));
@@ -193,6 +261,8 @@ export function EnquiryPage({ session }: { session: Session }) {
 
   async function addFollow(event: FormEvent) {
     event.preventDefault();
+    if (savingFollow) return;
+    setSavingFollow(true);
     setError("");
     try {
       await api(`/api/v1/enquiries/${enquiryId}/follow-ups`, { method: "POST", body: JSON.stringify(follow) });
@@ -201,16 +271,21 @@ export function EnquiryPage({ session }: { session: Session }) {
       load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The follow-up was not saved.");
+    } finally {
+      setSavingFollow(false);
     }
   }
 
   async function convert() {
+    if (admitting) return;
+    setAdmitting(true);
     setError("");
     try {
       const result = await api<{ id: string }>(`/api/v1/enquiries/${enquiryId}/convert`, { method: "POST" });
       notify("Opened the admission.");
       navigate(`/students/admissions/${result.id}`);
     } catch (reason) {
+      setAdmitting(false);
       setError(reason instanceof Error ? reason.message : "The enquiry was not admitted.");
     }
   }
@@ -220,17 +295,15 @@ export function EnquiryPage({ session }: { session: Session }) {
   }
   return (
     <section className="panel wide">
-      <Link className="quiet back-link" to="/students/enquiries">← Enquiry</Link>
-      <IntakeTabs current="enquiries" />
       <div className="title-row">
         <div>
           <p className="eyebrow">Enquiry</p>
           <h1>{enquiry.name}</h1>
-          <p className="meta">{enquiry.stage || (enquiry.admission_id ? "Admitted" : "Enquiry")} · {enquiry.next_action || (enquiry.admission_id ? "Open the admission" : "Record a follow-up")}</p>
+          <p className="meta">{enquiry.stage || (enquiry.admission_id ? "Admitted" : "Enquiry")} · {readable(enquiry.next_action || (enquiry.admission_id ? "Open the admission" : "Record a follow-up"))}</p>
         </div>
         <div className="actions">
           {canManage ? <button type="button" onClick={() => setEditing(true)}>Edit</button> : null}
-          {enquiry.admission_id ? <Link to={`/students/admissions/${enquiry.admission_id}`}>Open admission</Link> : canManage ? <button type="button" onClick={() => void convert()}>Admit</button> : null}
+          {enquiry.admission_id ? <Link className="button" to={`/students/admissions/${enquiry.admission_id}`}>Open admission</Link> : canManage ? <button type="button" disabled={admitting} onClick={() => void convert()}>{admitting ? "Admitting…" : "Admit"}</button> : null}
         </div>
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
@@ -254,10 +327,10 @@ export function EnquiryPage({ session }: { session: Session }) {
             <tbody>
               {enquiry.follow_ups.map((item) => (
                 <tr key={item.id}>
-                  <td>{item.at}</td>
+                  <td>{formatDisplayDate(item.at)}</td>
                   <td>{item.note}</td>
                   <td>{item.interest || "Not recorded"}</td>
-                  <td>{item.next_on || "Not recorded"}</td>
+                  <td>{formatDisplayDate(item.next_on)}</td>
                 </tr>
               ))}
             </tbody>
@@ -281,7 +354,7 @@ export function EnquiryPage({ session }: { session: Session }) {
           <label>Next follow-up
             <input type="date" value={follow.next_on} onChange={(event) => setFollow({ ...follow, next_on: event.target.value })} />
           </label>
-          <div className="dialog-actions span-2"><button type="submit">Add follow-up</button></div>
+          <div className="dialog-actions span-2"><button type="submit" disabled={savingFollow}>{savingFollow ? "Saving…" : "Add follow-up"}</button></div>
         </form>
       ) : null}
       {editing ? <EnquiryForm courses={courses} initial={enquiry} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); }} /> : null}
@@ -301,6 +374,18 @@ function EnquiryForm({ courses, initial, onClose, onSaved }: { courses: CourseOp
   const [answers, setAnswers] = useState<Record<string, string>>(Object.fromEntries((initial?.answers || []).map((item) => [item.question_id, item.value])));
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const answersDirty = questions.some((item) => (answers[item.id] || "") !== ((initial?.answers || []).find((answer) => answer.question_id === item.id)?.value || ""));
+  const dirty = !saving && (
+    name !== (initial?.name || "")
+    || whatsapp !== (initial?.whatsapp || "")
+    || institution !== (initial?.present_institution || "")
+    || courseId !== (initial?.course_id || "")
+    || interest !== (initial?.interest || "")
+    || references !== (initial?.references || "")
+    || details !== (initial?.details || "")
+    || answersDirty
+  );
+  useUnsaved(dirty);
 
   useEffect(() => {
     if (initial) return;
@@ -336,7 +421,7 @@ function EnquiryForm({ courses, initial, onClose, onSaved }: { courses: CourseOp
   }
 
   return (
-    <StudentDialog title={initial ? "Edit enquiry" : "Add enquiry"} onClose={onClose}>
+    <StudentDialog title={initial ? "Edit enquiry" : "Add enquiry"} dirty={dirty} onClose={onClose}>
       <form className="form-grid" onSubmit={save}>
         <label className="span-2">Name
           <input value={name} required onChange={(event) => setName(event.target.value)} />
@@ -368,7 +453,7 @@ function EnquiryForm({ courses, initial, onClose, onSaved }: { courses: CourseOp
         <AnswerFields questions={questions} answers={answers} onChange={(id, value) => setAnswers({ ...answers, [id]: value })} requiredNote="required to admit" />
         {error ? <p className="error span-2" role="alert">{error}</p> : null}
         <div className="dialog-actions span-2">
-          <button type="button" className="quiet" onClick={onClose}>Cancel</button>
+          <button type="button" className="quiet" onClick={() => { if (confirmDiscard(dirty)) onClose(); }}>Cancel</button>
           <button type="submit" disabled={saving || !name.trim()}>{saving ? "Saving…" : "Save"}</button>
         </div>
       </form>
@@ -377,40 +462,56 @@ function EnquiryForm({ courses, initial, onClose, onSaved }: { courses: CourseOp
 }
 
 export function AdmissionsPage({ session }: { session: Session }) {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const status = params.get("status") || "";
   const courseId = params.get("course_id") || "";
+  const query = params.get("q") || "";
+  const page = Math.max(1, Number(params.get("page")) || 1);
   const canManage = session.actions.includes("student.manage");
   const canEditQuestions = session.actions.includes("catalog.correct") || session.actions.includes("catalog.manage");
   const [items, setItems] = useState<Admission[]>([]);
   const [total, setTotal] = useState(0);
-  const [query, setQuery] = useState("");
-  const [courses, setCourses] = useState<CourseOption[]>([]);
-  const [adding, setAdding] = useState(false);
+  const [pages, setPages] = useState(1);
+  const [draft, setDraft] = useState(query);
   const [importing, setImporting] = useState(false);
+  const [questionsOpen, setQuestionsOpen] = useState(false);
+  const [revision, setRevision] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const filtered = Boolean(query || status || courseId);
+  const [courses, setCourses] = useState<CourseOption[]>([]);
 
-  function load(search = query) {
-    const searchParams = new URLSearchParams();
-    if (search) searchParams.set("q", search);
-    if (status) searchParams.set("status", status);
-    if (courseId) searchParams.set("course_id", courseId);
-    setLoading(true);
-    api<{ items: Admission[]; total: number }>(`/api/v1/admissions?${searchParams.toString()}`)
-      .then((result) => {
-        setItems(result.items);
-        setTotal(result.total);
-        setError("");
-      })
-      .catch((reason: Error) => setError(reason.message))
-      .finally(() => setLoading(false));
-  }
+  useEffect(() => { setDraft(query); }, [query]);
 
   useEffect(() => {
-    load("");
-    api<{ courses: CourseOption[] }>("/api/v1/catalog").then((catalog) => setCourses(coursesOf(catalog))).catch(() => undefined);
-  }, [status, courseId]);
+    const handle = window.setTimeout(() => {
+      if (draft === query) return;
+      setParams(withParam(params, "q", draft.trim()));
+    }, 300);
+    return () => window.clearTimeout(handle);
+  }, [draft, query, params, setParams]);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams();
+    if (query) searchParams.set("q", query);
+    if (status) searchParams.set("status", status);
+    if (courseId) searchParams.set("course_id", courseId);
+    searchParams.set("page", String(page));
+    let cancelled = false;
+    setLoading(true);
+    api<{ items: Admission[]; total: number; pages: number }>(`/api/v1/admissions?${searchParams.toString()}`)
+      .then((result) => {
+        if (cancelled) return;
+        setItems(result.items);
+        setTotal(result.total);
+        setPages(result.pages);
+        setError("");
+      })
+      .catch((reason: Error) => { if (!cancelled) setError(reason.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    api<{ courses: CourseOption[] }>("/api/v1/catalog").then((catalog) => { if (!cancelled) setCourses(coursesOf(catalog)); }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [status, courseId, query, page, revision]);
 
   return (
     <section className="panel wide">
@@ -418,26 +519,48 @@ export function AdmissionsPage({ session }: { session: Session }) {
         <div>
           <p className="eyebrow">Admissions</p>
           <h1>Admissions</h1>
-          {status === "open" ? <p className="page-lead">Admissions awaiting conversion.</p> : null}
+          {status === "open" ? <p className="page-lead">Admissions awaiting enrollment.</p> : null}
         </div>
         {canManage ? (
           <div className="actions">
-            <button type="button" onClick={() => setImporting(true)}>Import</button>
-            <button type="button" onClick={() => setAdding(true)}>Add admission</button>
+            <button type="button" className="secondary" onClick={() => setImporting(true)}>Import</button>
+            <Link className="button" to="/students/admissions/new">Add admission</Link>
           </div>
         ) : null}
       </div>
-      <IntakeTabs current="admissions" />
-      <FormQuestions form="admission" canEdit={canEditQuestions} />
+      {canEditQuestions ? (
+        <p className="actions">
+          <button type="button" className="secondary" aria-expanded={questionsOpen} onClick={() => setQuestionsOpen((open) => !open)}>Form questions</button>
+        </p>
+      ) : null}
+      {questionsOpen ? <FormQuestions form="admission" canEdit={canEditQuestions} /> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
-      <form className="filter-row" onSubmit={(event) => { event.preventDefault(); load(query); }}>
+      <form className="filter-row" onSubmit={(event) => { event.preventDefault(); setParams(withParam(params, "q", draft.trim())); }}>
         <label>Search
-          <input value={query} aria-label="Search admissions" onChange={(event) => setQuery(event.target.value)} />
+          <input value={draft} aria-label="Search admissions" onChange={(event) => setDraft(event.target.value)} />
         </label>
-        <button type="submit">Search</button>
+        <label>Status
+          <select aria-label="Status" value={status} onChange={(event) => setParams(withParam(params, "status", event.target.value))}>
+            <option value="">Any</option>
+            <option value="open">Open</option>
+            <option value="converted">Enrolled</option>
+          </select>
+        </label>
+        <label>Course
+          <select aria-label="Course" value={courseId} onChange={(event) => setParams(withParam(params, "course_id", event.target.value))}>
+            <option value="">Any course</option>
+            {courses.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+        </label>
       </form>
-      <p className="filter-row"><span>{loading ? "Loading admissions…" : `${total} admission${total === 1 ? "" : "s"}`}</span></p>
-      {items.length === 0 && !loading ? <p>{query.trim() || status || courseId ? "No admissions match." : "No admissions yet."}</p> : null}
+      <p className="filter-row">
+        <span>{loading ? "Loading admissions…" : `${total} admission${total === 1 ? "" : "s"}`}</span>
+        {status ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "status", ""))}>{status === "converted" ? "Enrolled" : "Open"}</button> : null}
+        {courseId ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "course_id", ""))}>{courses.find((item) => item.id === courseId)?.name || "Course"}</button> : null}
+        {query ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "q", ""))}>{query}</button> : null}
+        {filtered ? <button type="button" className="quiet" onClick={() => setParams(new URLSearchParams())}>Clear</button> : null}
+      </p>
+      {items.length === 0 && !loading ? <p>{filtered ? "No admissions match." : "No admissions yet."}</p> : null}
       {items.length > 0 ? (
         <div className="table-wrap">
           <table className="people-table">
@@ -450,15 +573,21 @@ export function AdmissionsPage({ session }: { session: Session }) {
                   <td>{item.phone}</td>
                   <td>{item.course_name || "Not recorded"}</td>
                   <td>{item.stage || (item.status === "converted" ? "Enrolled" : "Open")}</td>
-                  <td>{item.student_id ? <Link to={`/students/${item.student_id}`}>Open student</Link> : <Link to={`/students/admissions/${item.id}`}>{item.next_action || "Enroll in a batch"}</Link>}</td>
+                  <td>{item.student_id ? <Link to={`/students/${item.student_id}`}>Open student</Link> : "Enroll in a batch"}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       ) : null}
-      {adding ? <AdmissionEditor courses={courses} onClose={() => setAdding(false)} onSaved={(id) => { setAdding(false); if (id) load(); }} /> : null}
-      {importing ? <ImportDialog kind="admissions" onClose={() => setImporting(false)} onSaved={() => { setImporting(false); load(); }} /> : null}
+      {pages > 1 ? (
+        <p className="actions">
+          <button type="button" className="secondary" disabled={page <= 1} onClick={() => setParams(withParam(params, "page", String(page - 1)))}>Previous</button>
+          <span>Page {page} of {pages}</span>
+          <button type="button" className="secondary" disabled={page >= pages} onClick={() => setParams(withParam(params, "page", String(page + 1)))}>Next</button>
+        </p>
+      ) : null}
+      {importing ? <ImportDialog kind="admissions" onClose={() => setImporting(false)} onSaved={() => { setImporting(false); setRevision((value) => value + 1); }} /> : null}
     </section>
   );
 }
@@ -476,6 +605,10 @@ export function AdmissionPage({ session }: { session: Session }) {
   const [error, setError] = useState("");
   const [matches, setMatches] = useState<Match[] | null>(null);
   const [saving, setSaving] = useState(false);
+  const [gaps, setGaps] = useState<string[]>([]);
+  const [businessQuestions, setBusinessQuestions] = useState<Question[]>([]);
+  useRecordLabel(admission?.name || "");
+  useUnsaved(!editing && !saving && Boolean(branchId || batchId));
 
   function load() {
     api<Admission>(`/api/v1/admissions/${admissionId}`).then(setAdmission).catch((reason: Error) => setError(reason.message));
@@ -485,11 +618,25 @@ export function AdmissionPage({ session }: { session: Session }) {
     load();
     api<{ courses: CourseOption[] }>("/api/v1/catalog").then((catalog) => setCourses(coursesOf(catalog))).catch(() => undefined);
     if (canManage) {
-      api<{ branches: Option[]; batches: Option[] }>("/api/v1/students/options?manage=true").then(setOptions).catch(() => undefined);
+      api<{ branches: Option[]; batches: Option[] }>("/api/v1/students/options?manage=true").then(setOptions).catch((reason: Error) => setError(reason.message || "Branches could not be loaded."));
     }
+    api<{ items: Question[] }>("/api/v1/form-questions?form=admission").then((result) => setBusinessQuestions(result.items)).catch(() => setBusinessQuestions([]));
   }, [admissionId]);
 
+  function enrollmentGaps() {
+    if (!admission) return [];
+    const missing = missingAnswers(businessQuestions, admission.business_answers || []).map((item) => item.label);
+    missing.push(...missingAnswers(admission.questions || [], admission.course_answers).map((item) => item.label));
+    if (!branchId) missing.push("Branch");
+    if (!batchId) missing.push("Batch");
+    return missing;
+  }
+
   async function convert(decision = "", studentId = "") {
+    if (saving) return;
+    const missing = enrollmentGaps();
+    setGaps(missing);
+    if (missing.length) return;
     setSaving(true);
     setError("");
     try {
@@ -497,7 +644,7 @@ export function AdmissionPage({ session }: { session: Session }) {
         method: "POST",
         body: JSON.stringify({ branch_id: branchId, batch_id: batchId, decision, student_id: studentId }),
       });
-      notify("Saved the student.");
+      notify(`Enrolled ${admission?.name || "the student"}.`);
       navigate(`/students/${result.id}`);
     } catch (reason) {
       setSaving(false);
@@ -517,8 +664,6 @@ export function AdmissionPage({ session }: { session: Session }) {
   const open = admission.status !== "converted";
   return (
     <section className="panel wide">
-      <Link className="quiet back-link" to="/students/admissions">← Admissions</Link>
-      <IntakeTabs current="admissions" />
       <div className="title-row">
         <div>
           <p className="eyebrow">Admission</p>
@@ -527,15 +672,24 @@ export function AdmissionPage({ session }: { session: Session }) {
         </div>
         <div className="actions">
           {admission.enquiry_id ? <Link to={`/students/enquiries/${admission.enquiry_id}`}>Open enquiry</Link> : null}
-          {canManage && open ? <button type="button" onClick={() => setEditing(true)}>Edit</button> : null}
+          {canManage && open && !editing ? <button type="button" className="secondary" onClick={() => setEditing(true)}>Edit</button> : null}
           {admission.student_id ? <Link to={`/students/${admission.student_id}`}>Open student</Link> : null}
           {admission.batch_id ? <Link to={`/batches/${admission.batch_id}?branch_id=${admission.branch_id || ""}&course_id=${admission.course_id}&batch_id=${admission.batch_id}`}>Open batch</Link> : null}
         </div>
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
+      {editing ? (
+        <AdmissionForm
+          courses={courses}
+          initial={admission}
+          onCancel={() => setEditing(false)}
+          onSaved={() => { setEditing(false); load(); }}
+        />
+      ) : (
+      <>
       <dl className="facts">
         <div><dt>Contact number</dt><dd>{admission.phone}</dd></div>
-        <div><dt>Date of birth</dt><dd className={admission.date_of_birth ? undefined : "is-empty"}>{admission.date_of_birth || "Not recorded"}</dd></div>
+        <div><dt>Date of birth</dt><dd className={admission.date_of_birth ? undefined : "is-empty"}>{formatDisplayDate(admission.date_of_birth)}</dd></div>
         <div><dt>Gender</dt><dd className={admission.gender ? undefined : "is-empty"}>{admission.gender || "Not recorded"}</dd></div>
         <div><dt>Blood group</dt><dd className={admission.blood_group ? undefined : "is-empty"}>{admission.blood_group || "Not recorded"}</dd></div>
         <div className="span-2"><dt>Email</dt><dd className={admission.email ? undefined : "is-empty"}>{admission.email || "Not recorded"}</dd></div>
@@ -567,27 +721,35 @@ export function AdmissionPage({ session }: { session: Session }) {
       ) : null}
       {canManage && open ? (
         <form className="form-grid" onSubmit={(event) => { event.preventDefault(); void convert(admission.match_decision, admission.match_student_id); }}>
-          <h2 className="span-2">Make this a student</h2>
+          <h2 className="span-2">Enroll</h2>
           {admission.match_decision === "attach" ? <p className="span-2">This import was confirmed for an existing student. Choose the branch and batch, or create a new student instead.</p> : null}
           {admission.matches.length > 0 && !admission.match_decision ? <p className="span-2">A student with this name and contact number is already on file. You will be asked to confirm before anything is changed.</p> : null}
           <label>Branch
-            <select value={branchId} required onChange={(event) => { setBranchId(event.target.value); setBatchId(""); }}>
+            <select value={branchId} onChange={(event) => { setBranchId(event.target.value); setBatchId(""); setGaps([]); setError(""); }}>
               <option value="">Choose</option>
               {options.branches.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
             </select>
           </label>
           <label>Batch
-            <select value={batchId} required onChange={(event) => setBatchId(event.target.value)}>
+            <select value={batchId} onChange={(event) => { setBatchId(event.target.value); setGaps([]); setError(""); }}>
               <option value="">Choose</option>
               {batches.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
             </select>
           </label>
+          {gaps.length ? (
+            <div className="span-2" role="alert">
+              <p className="error">Enroll needs:</p>
+              <ul>{gaps.map((item) => <li key={item}>{item}</li>)}</ul>
+            </div>
+          ) : null}
           <div className="dialog-actions span-2">
-            <button type="submit" disabled={saving || !branchId || !batchId}>{saving ? "Saving…" : "Continue"}</button>
+            <button type="submit" disabled={saving}>{saving ? "Enrolling…" : "Enroll"}</button>
             {admission.match_decision === "attach" ? <button type="button" className="quiet" disabled={saving} onClick={() => void convert("create")}>Create a new student</button> : null}
           </div>
         </form>
       ) : null}
+      </>
+      )}
       {matches ? (
         <StudentDialog title="This student may already exist" onClose={() => setMatches(null)}>
           <p>Add this course to the existing student, or create a new student.</p>
@@ -603,14 +765,25 @@ export function AdmissionPage({ session }: { session: Session }) {
           </div>
         </StudentDialog>
       ) : null}
-      {editing ? (
-        <AdmissionEditor
-          courses={courses}
-          initial={admission}
-          onClose={() => setEditing(false)}
-          onSaved={() => { setEditing(false); load(); }}
-        />
-      ) : null}
+    </section>
+  );
+}
+
+export function AdmissionCreatePage() {
+  const navigate = useNavigate();
+  const [courses, setCourses] = useState<CourseOption[]>([]);
+  useEffect(() => {
+    api<{ courses: CourseOption[] }>("/api/v1/catalog").then((catalog) => setCourses(coursesOf(catalog))).catch(() => undefined);
+  }, []);
+  return (
+    <section className="panel wide">
+      <div className="page-title">
+        <div>
+          <p className="eyebrow">Admissions</p>
+          <h1>New admission</h1>
+        </div>
+      </div>
+      <AdmissionForm courses={courses} onSaved={(id) => navigate(`/students/admissions/${id}`)} />
     </section>
   );
 }
@@ -638,7 +811,7 @@ function RecordTable({ records }: { records: AcademicRecord[] }) {
   );
 }
 
-function AdmissionEditor({ courses, initial, onClose, onSaved }: { courses: CourseOption[]; initial?: Admission; onClose: () => void; onSaved: (id?: string) => void }) {
+function AdmissionForm({ courses, initial, onSaved, onCancel }: { courses: CourseOption[]; initial?: Admission; onSaved: (id: string) => void; onCancel?: () => void }) {
   const [courseId, setCourseId] = useState(initial?.course_id || "");
   const [questions, setQuestions] = useState<Question[]>(initial?.questions || []);
   const [name, setName] = useState(initial?.name || "");
@@ -661,6 +834,28 @@ function AdmissionEditor({ courses, initial, onClose, onSaved }: { courses: Cour
   const [business, setBusiness] = useState<Record<string, string>>(Object.fromEntries((initial?.business_answers || []).map((item) => [item.question_id, item.value])));
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const stored = (list: Answer[] | undefined, id: string) => list?.find((item) => item.question_id === id)?.value || "";
+  const dirty = !saving && (
+    name !== (initial?.name || "")
+    || phone !== (initial?.phone || "")
+    || courseId !== (initial?.course_id || "")
+    || dob !== (initial?.date_of_birth || "")
+    || gender !== (initial?.gender || "")
+    || blood !== (initial?.blood_group || "")
+    || email !== (initial?.email || "")
+    || street !== (initial?.street || "")
+    || line2 !== (initial?.address_line_2 || "")
+    || place !== (initial?.place || "")
+    || district !== (initial?.district || "")
+    || stateName !== (initial?.state || "")
+    || pin !== (initial?.pin || "")
+    || guardian !== (initial?.guardian_name || "")
+    || guardianPhone !== (initial?.guardian_phone || "")
+    || questions.some((item) => (answers[item.id] || "") !== stored(initial?.course_answers, item.id))
+    || businessQuestions.some((item) => (business[item.id] || "") !== stored(initial?.business_answers, item.id))
+    || JSON.stringify(records) !== JSON.stringify(initial?.academic_records?.length ? initial.academic_records : [{ ...EMPTY_RECORD }])
+  );
+  useUnsaved(dirty);
 
   useEffect(() => {
     if (!courseId) {
@@ -703,10 +898,11 @@ function AdmissionEditor({ courses, initial, onClose, onSaved }: { courses: Cour
       business_answers: businessQuestions.map((item) => ({ question_id: item.id, value: business[item.id] || "" })),
     };
     try {
-      if (initial) await api(`/api/v1/admissions/${initial.id}`, { method: "PATCH", body: JSON.stringify(body) });
-      else await api("/api/v1/admissions", { method: "POST", body: JSON.stringify(body) });
+      const saved = initial
+        ? await api<{ id: string }>(`/api/v1/admissions/${initial.id}`, { method: "PATCH", body: JSON.stringify(body) })
+        : await api<{ id: string }>("/api/v1/admissions", { method: "POST", body: JSON.stringify(body) });
       notify(`Saved ${name}.`);
-      onSaved(initial?.id);
+      onSaved(saved.id || initial?.id || "");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The admission was not saved.");
       setSaving(false);
@@ -714,20 +910,26 @@ function AdmissionEditor({ courses, initial, onClose, onSaved }: { courses: Cour
   }
 
   return (
-    <StudentDialog title={initial ? "Edit admission" : "Add admission"} onClose={onClose}>
       <form className="form-grid" onSubmit={save}>
-        <label className="span-2">Course
-          <select value={courseId} required onChange={(event) => setCourseId(event.target.value)}>
-            <option value="">Choose</option>
-            {courses.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </select>
-        </label>
+        <h2 className="span-2">Person</h2>
         <label>Name
           <input value={name} required onChange={(event) => setName(event.target.value)} />
         </label>
         <label>Contact number
           <input value={phone} required onChange={(event) => setPhone(event.target.value)} />
         </label>
+        <h2 className="span-2">Course</h2>
+        <label className="span-2">Course
+          <select value={courseId} required onChange={(event) => setCourseId(event.target.value)}>
+            <option value="">Choose</option>
+            {courses.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+        </label>
+        <h2 className="span-2">Required to enroll</h2>
+        <p className="span-2">Save is allowed without these. Enroll asks for any that are still empty.</p>
+        <AnswerFields questions={businessQuestions} answers={business} onChange={(id, value) => setBusiness({ ...business, [id]: value })} requiredNote="required to enroll" />
+        <AnswerFields questions={questions} answers={answers} onChange={(id, value) => setAnswers({ ...answers, [id]: value })} requiredNote="required to enroll" />
+        <h2 className="span-2">Optional details</h2>
         <label>Date of birth
           <input type="date" value={dob} onChange={(event) => setDob(event.target.value)} />
         </label>
@@ -770,11 +972,7 @@ function AdmissionEditor({ courses, initial, onClose, onSaved }: { courses: Cour
         <label>Parent contact
           <input value={guardianPhone} onChange={(event) => setGuardianPhone(event.target.value)} />
         </label>
-        {businessQuestions.length ? <p className="span-2 section-label">Questions</p> : null}
-        <AnswerFields questions={businessQuestions} answers={business} onChange={(id, value) => setBusiness({ ...business, [id]: value })} requiredNote="required to enrol" />
-        {questions.length ? <p className="span-2 section-label">Course questions</p> : null}
-        <AnswerFields questions={questions} answers={answers} onChange={(id, value) => setAnswers({ ...answers, [id]: value })} requiredNote="required to enrol" />
-        <p className="span-2 section-label">Academic records</p>
+        <h2 className="span-2">Academic records</h2>
         {records.map((record, index) => (
           <div className="span-2 form-grid" key={index}>
             <label>Qualification
@@ -799,11 +997,10 @@ function AdmissionEditor({ courses, initial, onClose, onSaved }: { courses: Cour
         </div>
         {error ? <p className="error span-2" role="alert">{error}</p> : null}
         <div className="dialog-actions span-2">
-          <button type="button" className="quiet" onClick={onClose}>Cancel</button>
+          {onCancel ? <button type="button" className="secondary" onClick={() => { if (confirmDiscard(dirty)) onCancel(); }}>Cancel</button> : <Link className="secondary" to="/students/admissions">Cancel</Link>}
           <button type="submit" disabled={saving || !name.trim() || !phone.trim() || !courseId}>{saving ? "Saving…" : "Save"}</button>
         </div>
       </form>
-    </StudentDialog>
   );
 }
 
@@ -812,6 +1009,8 @@ function ImportDialog({ kind, onClose, onSaved }: { kind: "enquiries" | "admissi
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const blocked = rows.length === 0 || rows.some((row) => row.errors.length > 0 || ((row.matches || []).length > 0 && row.decision !== "attach" && row.decision !== "create"));
+  const dirty = rows.length > 0 && !saving;
+  useUnsaved(dirty);
 
   async function preview(file: File) {
     setError("");
@@ -877,7 +1076,7 @@ function ImportDialog({ kind, onClose, onSaved }: { kind: "enquiries" | "admissi
   }
 
   return (
-    <StudentDialog title={kind === "enquiries" ? "Import enquiries" : "Import admissions"} onClose={onClose}>
+    <StudentDialog title={kind === "enquiries" ? "Import enquiries" : "Import admissions"} dirty={dirty} onClose={onClose}>
       <p>Only name is required for an enquiry. An admission needs a name and a contact number. Other columns can be filled in later.</p>
       <label>Workbook
         <input type="file" accept=".xlsx" aria-label="Workbook" onChange={(event) => {
@@ -922,7 +1121,7 @@ function ImportDialog({ kind, onClose, onSaved }: { kind: "enquiries" | "admissi
       ) : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
       <div className="dialog-actions">
-        <button type="button" className="quiet" onClick={onClose}>Cancel</button>
+        <button type="button" className="quiet" onClick={() => { if (confirmDiscard(dirty)) onClose(); }}>Cancel</button>
         <button type="button" disabled={blocked || saving} onClick={() => void commit()}>{saving ? "Saving…" : "Save import"}</button>
       </div>
     </StudentDialog>

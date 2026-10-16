@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { api, Session } from "../api";
 import { notify } from "../notify";
 import { Band, BandFields, bandsPayload, bandsReady, draftsFrom } from "../bands";
-import { Icon, StudentDialog } from "../ui";
+import { Icon, moveTab, StudentDialog } from "../ui";
 
 type Policy = {
   version: number;
@@ -65,7 +65,7 @@ export function SettingsPage({ session }: { session: Session }) {
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
       {loading ? <p>Loading settings…</p> : null}
-      <div className="page-tabs" role="tablist" aria-label="Settings">
+      <div className="page-tabs" role="tablist" aria-label="Settings" onKeyDown={(event) => moveTab(event, ["preferences", "policy", "operations"] as const, tab, setTab)}>
         <button type="button" role="tab" aria-selected={tab === "preferences"} onClick={() => setTab("preferences")}>Preferences</button>
         <button type="button" role="tab" aria-selected={tab === "policy"} onClick={() => setTab("policy")}>Academic policy</button>
         <button type="button" role="tab" aria-selected={tab === "operations"} onClick={() => setTab("operations")}>Operations</button>
@@ -165,7 +165,7 @@ export function SettingsPage({ session }: { session: Session }) {
             <h2>Factory reset</h2>
             <p>Remove the institute, people, courses, marks, and uploaded files. Setup starts again from the beginning.</p>
           </div>
-          <button type="button" onClick={() => setResetting(true)}>Factory reset</button>
+          <button type="button" className="destructive" onClick={() => setResetting(true)}>Factory reset</button>
         </div>
       ) : null}
       {resetting ? <FactoryReset onClose={() => setResetting(false)} /> : null}
@@ -214,7 +214,7 @@ function FactoryReset({ onClose }: { onClose: () => void }) {
         {error ? <p className="error span-2" role="alert">{error}</p> : null}
         <div className="dialog-actions span-2">
           <button type="button" className="quiet" onClick={onClose}>Cancel</button>
-          <button type="submit" disabled={saving || phrase !== "RESET"}>{saving ? "Wiping…" : "Wipe all data"}</button>
+          <button type="submit" className="destructive" disabled={saving || phrase !== "RESET"}>{saving ? "Wiping…" : "Wipe all data"}</button>
         </div>
       </form>
     </StudentDialog>

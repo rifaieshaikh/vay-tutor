@@ -118,9 +118,7 @@ export function BandFields({ rows, onChange }: { rows: BandDraft[]; onChange: (r
           </div>
         );
       })}
-      <div className="icon-actions">
-        <button type="button" aria-label="Add band" title="Add band" onClick={add}><Icon name="add" /></button>
-      </div>
+      <button type="button" onClick={add}>Add band</button>
     </div>
   );
 }

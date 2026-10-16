@@ -51,7 +51,6 @@ export function SetupPage({ onReady }: { onReady: () => Promise<void> }) {
     <section className="panel narrow">
       <p className="eyebrow">First-time setup</p>
       <h1>Create the institute</h1>
-      <p>No branches, courses, or students are required. Those come from a marklist.</p>
       <form onSubmit={submit}>
         <label>
           Institute name

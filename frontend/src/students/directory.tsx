@@ -2,8 +2,6 @@ import { FormEvent, useEffect, useState } from "react";
 import { Link, Navigate, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
 import { notify } from "../notify";
-import { Option, optionFits } from "../filters";
-import { IntakeTabs } from "../peopleTabs";
 import { Icon, StudentDialog } from "../ui";
 import { StudentEnrollment, StudentFilters, recordedDate, recordedName, recordedStatus, studentRecordHref } from "./links";
 
@@ -28,7 +26,6 @@ function Notes({ error }: { error: string }) {
 
 type StudentActions = { edit: boolean; card: boolean };
 type StudentRow = { id: string; student_code: string; display_name: string; enrollments: StudentEnrollment[]; actions: StudentActions };
-type StudentOptions = { branches: Option[]; courses: Option[]; batches: Option[] };
 
 function readStudentFilters(params: URLSearchParams): StudentFilters {
   return {
@@ -174,7 +171,7 @@ function MergeDialog({ catalog, onClose, onMerged }: { catalog: Catalog; onClose
           <p>The source name is kept as a previous name.</p>
           <label><input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} /> I have reviewed this impact.</label>
           <div className="dialog-actions">
-            <button type="button" onClick={merge} disabled={!acknowledged || busy}>Confirm merge</button>
+            <button type="button" className="destructive" onClick={merge} disabled={!acknowledged || busy}>Confirm merge</button>
           </div>
         </section>
       ) : null}
@@ -185,19 +182,16 @@ function MergeDialog({ catalog, onClose, onMerged }: { catalog: Catalog; onClose
 export function StudentsPage({ session }: { session: Session }) {
   const [params, setParams] = useSearchParams();
   const applied = readStudentFilters(params);
-  const appliedKey = params.toString();
   const legacyId = params.get("student") || "";
   const sort = readSort(params.get("sort"));
   const direction = params.get("direction") === "desc" ? "desc" : "asc";
   const page = Math.max(1, Number(params.get("page")) || 1);
   const canMerge = session.actions.includes("catalog.manage");
-  const [draft, setDraft] = useState<StudentFilters>(applied);
-  const [options, setOptions] = useState<StudentOptions>({ branches: [], courses: [], batches: [] });
+  const [query, setQuery] = useState(applied.q);
   const [students, setStudents] = useState<StudentRow[]>([]);
   const [total, setTotal] = useState(0);
   const [pages, setPages] = useState(1);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
-  const [filtersOpen, setFiltersOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
   const [sortDraft, setSortDraft] = useState<SortField>(sort);
   const [directionDraft, setDirectionDraft] = useState<"asc" | "desc">(direction);
@@ -209,12 +203,22 @@ export function StudentsPage({ session }: { session: Session }) {
   const listKey = [applied.q, applied.branch_id, applied.course_id, applied.batch_id, period, sort, direction, page, listNonce].join("|");
 
   useEffect(() => {
-    setDraft(readStudentFilters(params));
-  }, [appliedKey]);
+    setQuery(applied.q);
+  }, [applied.q]);
 
   useEffect(() => {
-    api<StudentOptions>("/api/v1/students/options").then(setOptions).catch((reason: Error) => setError(reason.message));
-  }, []);
+    const handle = window.setTimeout(() => {
+      const trimmed = query.trim();
+      if (trimmed === applied.q) return;
+      const next = new URLSearchParams(params);
+      next.delete("student");
+      next.delete("page");
+      if (trimmed) next.set("q", trimmed);
+      else next.delete("q");
+      setParams(next);
+    }, 300);
+    return () => window.clearTimeout(handle);
+  }, [query, applied.q, params, setParams]);
 
   useEffect(() => {
     if (!canMerge) return;
@@ -257,68 +261,24 @@ export function StudentsPage({ session }: { session: Session }) {
     setParams(next);
   }
 
-  function openFilters() {
-    setDraft(applied);
-    setFiltersOpen(true);
-  }
-
-  function closeFilters() {
-    setDraft(applied);
-    setFiltersOpen(false);
-  }
-
-  function applyFilters(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const next = new URLSearchParams();
-    if (draft.q.trim()) next.set("q", draft.q.trim());
-    if (draft.branch_id) next.set("branch_id", draft.branch_id);
-    if (draft.course_id) next.set("course_id", draft.course_id);
-    if (draft.batch_id) next.set("batch_id", draft.batch_id);
-    if (period) next.set("period", period);
-    writeSort(next, sort, direction);
-    setError("");
-    setFiltersOpen(false);
+  function clearSearch() {
+    setQuery("");
+    const next = new URLSearchParams(params);
+    next.delete("q");
+    next.delete("page");
+    next.delete("student");
     write(next);
   }
 
-  function resetFilters() {
-    const next = new URLSearchParams();
-    writeSort(next, sort, direction);
-    setDraft({ q: "", branch_id: "", course_id: "", batch_id: "" });
-    setError("");
-    setFiltersOpen(false);
+  function commitSearch() {
+    const trimmed = query.trim();
+    if (trimmed === applied.q) return;
+    const next = new URLSearchParams(params);
+    next.delete("student");
+    next.delete("page");
+    if (trimmed) next.set("q", trimmed);
+    else next.delete("q");
     write(next);
-  }
-
-  function removeFilter(key: keyof StudentFilters) {
-    const nextFilters = { ...applied, [key]: "" };
-    if (key === "branch_id") {
-      nextFilters.course_id = "";
-      nextFilters.batch_id = "";
-    }
-    if (key === "course_id") nextFilters.batch_id = "";
-    const next = new URLSearchParams();
-    if (nextFilters.q) next.set("q", nextFilters.q);
-    if (nextFilters.branch_id) next.set("branch_id", nextFilters.branch_id);
-    if (nextFilters.course_id) next.set("course_id", nextFilters.course_id);
-    if (nextFilters.batch_id) next.set("batch_id", nextFilters.batch_id);
-    if (period) next.set("period", period);
-    writeSort(next, sort, direction);
-    write(next);
-  }
-
-  function chooseDraft(key: keyof StudentFilters, value: string) {
-    const next = { ...draft, [key]: value };
-    if (key === "branch_id" || key === "course_id") {
-      const course = options.courses.find((item) => item.id === next.course_id);
-      if (course && !optionFits(course, next)) {
-        next.course_id = "";
-        next.batch_id = "";
-      }
-      const batch = options.batches.find((item) => item.id === next.batch_id);
-      if (batch && !optionFits(batch, next)) next.batch_id = "";
-    }
-    setDraft(next);
   }
 
   function chooseSort(value: SortField, nextDirection: "asc" | "desc" = sort === value && direction === "asc" ? "desc" : "asc") {
@@ -352,8 +312,8 @@ export function StudentsPage({ session }: { session: Session }) {
   function listPath() {
     const next = new URLSearchParams(params);
     next.delete("student");
-    const query = next.toString();
-    return query ? `/students?${query}` : "/students";
+    const search = next.toString();
+    return search ? `/students?${search}` : "/students";
   }
 
   function cardHref(id: string) {
@@ -370,21 +330,12 @@ export function StudentsPage({ session }: { session: Session }) {
   if (legacyId) {
     const back = new URLSearchParams(params);
     back.delete("student");
-    const query = back.toString();
+    const search = back.toString();
     const target = new URLSearchParams();
-    target.set("returnTo", query ? `/students?${query}` : "/students");
+    target.set("returnTo", search ? `/students?${search}` : "/students");
     return <Navigate to={`/students/${legacyId}?${target.toString()}`} replace />;
   }
 
-  const courses = options.courses.filter((item) => optionFits(item, draft));
-  const batches = options.batches.filter((item) => optionFits(item, draft));
-  const active = (["q", "branch_id", "course_id", "batch_id"] as const).filter((key) => applied[key]);
-  const labels: Record<string, string> = { q: "Search", branch_id: "Branch", course_id: "Course", batch_id: "Batch" };
-  function chipLabel(key: keyof StudentFilters) {
-    if (key === "q") return applied.q;
-    const group = key === "branch_id" ? options.branches : key === "course_id" ? options.courses : options.batches;
-    return group.find((item) => item.id === applied[key])?.label || applied[key];
-  }
   const rangeFrom = total === 0 ? 0 : (page - 1) * 8 + 1;
   const rangeTo = Math.min(total, (page - 1) * 8 + students.length);
   const path = listPath();
@@ -396,20 +347,20 @@ export function StudentsPage({ session }: { session: Session }) {
           <p className="eyebrow">People</p>
           <h1>Students</h1>
         </div>
-        <div className="actions">
-          {active.map((key) => (
-            <button key={key} type="button" className="chip-button" onClick={() => removeFilter(key)}>{labels[key]}: {chipLabel(key)}</button>
-          ))}
-          <div className="icon-actions">
-            {active.length ? <button type="button" onClick={resetFilters} aria-label="Clear filters" title="Clear filters"><Icon name="clear" /></button> : null}
-            <button type="button" onClick={openSort} aria-label={`Sort by ${SORT_LABELS[sort]}, ${direction === "desc" ? "descending" : "ascending"}`} title="Sort"><Icon name="sort" /></button>
-            <button type="button" onClick={openFilters} aria-label={active.length ? `Filters, ${active.length} applied` : "Filters"} title="Filters"><Icon name="filter" /></button>
-          </div>
-        </div>
+        <button type="button" className="quiet" onClick={openSort} aria-label={`Sort by ${SORT_LABELS[sort]}, ${direction === "desc" ? "descending" : "ascending"}`}>Sort</button>
       </div>
-      <IntakeTabs current="students" />
       <Notes error={error} />
-      <p className="filter-row"><span>{loading ? "Loading students…" : `${total} student${total === 1 ? "" : "s"}`}</span></p>
+      {error ? <button type="button" className="secondary" onClick={() => setListNonce((value) => value + 1)}>Try again</button> : null}
+      <div className="toolbar common">
+        <label>Search
+          <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitSearch(); } }} placeholder="Name or student id" />
+        </label>
+      </div>
+      <p className="filter-row">
+        {applied.q ? <button type="button" className="chip-button" onClick={clearSearch}>Search: {applied.q}</button> : null}
+        {applied.q ? <button type="button" className="quiet" onClick={clearSearch}>Clear</button> : null}
+        <span>{loading ? "Loading students…" : `${total} student${total === 1 ? "" : "s"}`}</span>
+      </p>
       {sortOpen ? (
         <StudentDialog title="Sort" onClose={() => setSortOpen(false)}>
           <form className="form-grid" onSubmit={applySort}>
@@ -431,38 +382,7 @@ export function StudentsPage({ session }: { session: Session }) {
           </form>
         </StudentDialog>
       ) : null}
-      {filtersOpen ? (
-        <StudentDialog title="Filters" onClose={closeFilters}>
-          <form className="form-grid" onSubmit={applyFilters}>
-            <label>Branch
-              <select value={draft.branch_id} onChange={(event) => chooseDraft("branch_id", event.target.value)}>
-                <option value="">All</option>
-                {options.branches.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-              </select>
-            </label>
-            <label>Course
-              <select value={draft.course_id} onChange={(event) => chooseDraft("course_id", event.target.value)}>
-                <option value="">All</option>
-                {courses.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-              </select>
-            </label>
-            <label>Batch
-              <select value={draft.batch_id} onChange={(event) => chooseDraft("batch_id", event.target.value)}>
-                <option value="">All</option>
-                {batches.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-              </select>
-            </label>
-            <label className="span-2">Search
-              <input value={draft.q} onChange={(event) => chooseDraft("q", event.target.value)} placeholder="Name or student id" />
-            </label>
-            <div className="dialog-actions span-2">
-              <button type="button" className="quiet" onClick={resetFilters}>Reset</button>
-              <button type="submit">Apply</button>
-            </div>
-          </form>
-        </StudentDialog>
-      ) : null}
-      {!loading && total === 0 ? <p>No students match these filters.</p> : null}
+      {!loading && !error && total === 0 ? <p>{applied.q ? "No students match this search. Clear it to see the full list." : "No students match this context."}</p> : null}
       {students.length > 0 ? (
         <div className="table-wrap">
           <table className="people-table directory">
@@ -482,7 +402,7 @@ export function StudentsPage({ session }: { session: Session }) {
                 const enrollments: Array<StudentEnrollment | null> = row.enrollments.length ? row.enrollments : [null];
                 return enrollments.map((item, index) => (
                   <tr key={`${row.id}-${item?.id || index}`}>
-                    {index === 0 ? <td rowSpan={enrollments.length}>{recordedName(row.display_name)}</td> : null}
+                    {index === 0 ? <td rowSpan={enrollments.length}><Link to={studentRecordHref(row.id, path, applied)}>{recordedName(row.display_name)}</Link></td> : null}
                     {index === 0 ? <td className="nowrap" rowSpan={enrollments.length}>{row.student_code}</td> : null}
                     <td>{recordedName(item?.branch_name)}</td>
                     <td>{recordedName(item?.course_name)}</td>
@@ -493,7 +413,6 @@ export function StudentsPage({ session }: { session: Session }) {
                     {index === 0 ? (
                       <td rowSpan={enrollments.length}>
                         <div className="icon-actions">
-                          <Link to={studentRecordHref(row.id, path, applied)} aria-label={`View ${row.display_name}`} title="View student"><Icon name="view" /></Link>
                           {row.actions?.edit ? <Link to={studentRecordHref(row.id, path, applied, true)} aria-label={`Edit ${row.display_name}`} title="Edit"><Icon name="edit" /></Link> : null}
                           {row.actions?.card ? <Link to={cardHref(row.id)} aria-label={`View progress card for ${row.display_name}`} title="View progress card"><Icon name="card" /></Link> : null}
                         </div>

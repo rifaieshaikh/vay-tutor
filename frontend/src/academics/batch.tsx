@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { Session, api } from "../api";
+import { formatDisplayDate } from "../format";
 import { safeBatchWorkspace } from "../students";
 
 type Person = {
@@ -78,7 +79,10 @@ export function BatchPage({ session }: { session: Session }) {
   const [saving, setSaving] = useState(false);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<StudentHit[]>([]);
+  const [searched, setSearched] = useState(false);
   const [enrolling, setEnrolling] = useState("");
+  const [addingStudent, setAddingStudent] = useState(false);
+  const [assigning, setAssigning] = useState(false);
 
   function loadKey() {
     return `${batchId}|${studentPage}|${assessmentPage}`;
@@ -148,6 +152,7 @@ export function BatchPage({ session }: { session: Session }) {
       setSubjectId("");
       setPaperId("");
       setStartedOn("");
+      setAssigning(false);
       const search = new URLSearchParams({
         student_page: String(studentPage),
         assessment_page: String(assessmentPage),
@@ -190,6 +195,7 @@ export function BatchPage({ session }: { session: Session }) {
     try {
       const result = await api<{ items: StudentHit[] }>(`/api/v1/students?${search.toString()}`);
       setHits(result.items);
+      setSearched(true);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not search students.");
     }
@@ -212,6 +218,8 @@ export function BatchPage({ session }: { session: Session }) {
       setBoard(await api<Workspace>(`/api/v1/batches/${board.id}?${search.toString()}`));
       setHits([]);
       setQuery("");
+      setSearched(false);
+      setAddingStudent(false);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not enroll the student.");
     } finally {
@@ -235,13 +243,13 @@ export function BatchPage({ session }: { session: Session }) {
     <section className="panel wide">
       <p className="eyebrow">Batch</p>
       <h1>{board.name}</h1>
-      <p className="page-lead">{board.closed ? "Closed batch." : "Current batch."}</p>
+      {board.closed ? <p className="page-lead">Closed batch. New enrollments stay out.</p> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
       <dl className="facts">
         <div><dt>Branch</dt><dd>{board.branch_id ? <Link to={`/institute/branches/${board.branch_id}?${contextQuery(board)}`}>{board.branch_name || "Branch"}</Link> : "Not recorded"}</dd></div>
         <div><dt>Course</dt><dd>{board.course_id ? <Link to={`/courses/${board.course_id}?${contextQuery(board)}`}>{board.course_name || "Course"}</Link> : "Not recorded"}</dd></div>
-        <div><dt>From</dt><dd>{board.started_on || "Not recorded"}</dd></div>
-        <div><dt>Until</dt><dd>{board.ended_on || "Not recorded"}</dd></div>
+        <div><dt>From</dt><dd>{formatDisplayDate(board.started_on)}</dd></div>
+        <div><dt>Until</dt><dd>{formatDisplayDate(board.ended_on)}</dd></div>
         <div><dt>Timings</dt><dd>{board.timings || "Not recorded"}</dd></div>
       </dl>
 
@@ -257,8 +265,8 @@ export function BatchPage({ session }: { session: Session }) {
                   <tr key={row.enrollment_id}>
                     <td><Link to={`/students/${row.id}?${contextQuery(board)}&returnTo=${returnTo}`}>{row.display_name}</Link></td>
                     <td>{row.student_code || "Not recorded"}</td>
-                    <td>{row.started_on || "Not recorded"}</td>
-                    <td>{row.ended_on || "Not recorded"}</td>
+                    <td>{formatDisplayDate(row.started_on)}</td>
+                    <td>{formatDisplayDate(row.ended_on)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -271,15 +279,18 @@ export function BatchPage({ session }: { session: Session }) {
           </p>
         </>
       )}
-      {canEnroll && !board.closed ? (
+      {canEnroll && !board.closed && !addingStudent ? <button type="button" onClick={() => setAddingStudent(true)}>Add a student</button> : null}
+      {canEnroll && !board.closed && addingStudent ? (
         <form className="form-grid" onSubmit={findStudents}>
           <label className="span-2">Enroll an existing student
             <input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="Find a student" />
           </label>
           <div className="dialog-actions span-2">
+            <button type="button" className="secondary" onClick={() => { setAddingStudent(false); setHits([]); setSearched(false); }}>Cancel</button>
             <button type="submit" disabled={!query.trim()}>Find</button>
             <Link to={`/students/admissions?course_id=${board.course_id}`}>Open admissions</Link>
           </div>
+          {searched && hits.length === 0 ? <p className="span-2">No students match. Clear the search or open admissions.</p> : null}
           {hits.length === 0 ? null : (
             <ul className="span-2">
               {hits.map((row) => (
@@ -319,8 +330,8 @@ export function BatchPage({ session }: { session: Session }) {
                   <td><Link to={`/teachers/${row.teacher_id}?returnTo=${returnTo}`}>{row.teacher_name}</Link></td>
                   <td>{row.subject_name || "Not recorded"}</td>
                   <td>{row.paper_name || "Every paper"}</td>
-                  <td>{row.started_on || "Not recorded"}</td>
-                  <td>{row.ended_on || "Not recorded"}</td>
+                  <td>{formatDisplayDate(row.started_on)}</td>
+                  <td>{formatDisplayDate(row.ended_on)}</td>
                   <td>{row.status === "ended" ? "Ended" : "Current"}</td>
                   {canAssign ? (
                     <td>{row.status === "current" ? <button type="button" className="quiet" onClick={() => endAssignment(row)}>End</button> : null}</td>
@@ -331,7 +342,8 @@ export function BatchPage({ session }: { session: Session }) {
           </table>
         </div>
       )}
-      {canAssign && !board.closed ? (
+      {canAssign && !board.closed && !assigning ? <button type="button" onClick={() => setAssigning(true)}>Add a teacher</button> : null}
+      {canAssign && !board.closed && assigning ? (
         <form className="form-grid" onSubmit={assign}>
           <label>Teacher
             <select value={teacherId} aria-label="Teacher" onChange={(event) => setTeacherId(event.target.value)}>
@@ -355,6 +367,7 @@ export function BatchPage({ session }: { session: Session }) {
             <input type="date" value={startedOn} aria-label="Assignment from" onChange={(event) => setStartedOn(event.target.value)} />
           </label>
           <div className="dialog-actions span-2">
+            <button type="button" className="secondary" onClick={() => setAssigning(false)}>Cancel</button>
             <button type="submit" disabled={saving || !teacherId || !subjectId}>Assign</button>
           </div>
         </form>
@@ -372,7 +385,7 @@ export function BatchPage({ session }: { session: Session }) {
                   <tr key={row.id}>
                     <td><Link to={`/marksheets/${row.id}?${contextQuery(board)}&returnTo=${returnTo}`}>{row.title}</Link></td>
                     <td>{row.status || "Not recorded"}</td>
-                    <td>{row.exam_date || "Not recorded"}</td>
+                    <td>{formatDisplayDate(row.exam_date)}</td>
                   </tr>
                 ))}
               </tbody>

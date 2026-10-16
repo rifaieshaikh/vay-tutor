@@ -107,8 +107,63 @@ def test_cloud_admin_requires_totp(tmp_path, monkeypatch):
         missing = client.post(
             "/api/v1/auth/login", json={"email": "admin@iam.test", "password": "correct-horse"}
         )
-        assert missing.status_code == 401
+        assert missing.status_code == 200
+        assert missing.json()["verification"] == "totp"
+        assert client.get("/api/v1/auth/session").status_code == 401
+        wrong = client.post(
+            "/api/v1/auth/login/verify",
+            json={"challenge": missing.json()["challenge"], "code": "000000"},
+        )
+        assert wrong.status_code == 401
+        assert client.get("/api/v1/auth/session").status_code == 401
         code = pyotp.TOTP(secret).now()
+        verified = client.post(
+            "/api/v1/auth/login/verify",
+            json={"challenge": missing.json()["challenge"], "code": code},
+        )
+        assert verified.status_code == 200
+        assert client.get("/api/v1/auth/session").status_code == 200
+        replayed = client.post(
+            "/api/v1/auth/login/verify",
+            json={"challenge": missing.json()["challenge"], "code": code},
+        )
+        assert replayed.status_code == 401
+        client.post("/api/v1/auth/logout")
+        again = client.post(
+            "/api/v1/auth/login", json={"email": "admin@iam.test", "password": "correct-horse"}
+        )
+        client.post("/api/v1/auth/login/cancel", json={"challenge": again.json()["challenge"]})
+        cancelled = client.post(
+            "/api/v1/auth/login/verify",
+            json={"challenge": again.json()["challenge"], "code": code},
+        )
+        assert cancelled.status_code == 401
+        expired = client.post(
+            "/api/v1/auth/login", json={"email": "admin@iam.test", "password": "correct-horse"}
+        )
+        from datetime import datetime, timedelta, timezone
+
+        sync_db(client).login_challenges.update_one(
+            {"used": False}, {"$set": {"expires_at": datetime.now(timezone.utc) - timedelta(minutes=1)}}
+        )
+        stale = client.post(
+            "/api/v1/auth/login/verify",
+            json={"challenge": expired.json()["challenge"], "code": code},
+        )
+        assert stale.status_code == 401
+        limited = client.post(
+            "/api/v1/auth/login", json={"email": "admin@iam.test", "password": "correct-horse"}
+        )
+        for _ in range(5):
+            client.post(
+                "/api/v1/auth/login/verify",
+                json={"challenge": limited.json()["challenge"], "code": "000000"},
+            )
+        blocked = client.post(
+            "/api/v1/auth/login/verify",
+            json={"challenge": limited.json()["challenge"], "code": code},
+        )
+        assert blocked.status_code == 429
         signed_in = client.post(
             "/api/v1/auth/login",
             json={"email": "admin@iam.test", "password": "correct-horse", "totp": code},

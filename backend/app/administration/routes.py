@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -38,12 +38,15 @@ from app.deps import (
 from app.errors import AppError
 from app.jobs import process_due_jobs
 from app.security import (
+    CHALLENGE_MINUTES,
     LOGIN_WINDOW_MINUTES,
+    MAX_CHALLENGE_ATTEMPTS,
     MAX_LOGIN_FAILURES,
     SESSION_COOKIE,
     hash_password,
     hash_token,
     name_key,
+    new_token,
     new_totp_secret,
     recovery_codes,
     totp_uri,
@@ -65,6 +68,11 @@ class LoginBody(BaseModel):
     email: str
     password: str
     totp: str | None = None
+
+
+class ChallengeBody(BaseModel):
+    challenge: str
+    code: str = ""
 
 
 class RecoveryBody(BaseModel):
@@ -283,6 +291,19 @@ async def login(request: Request, body: LoginBody):
     needs_totp = settings(request).deployment_mode == "cloud" and allows(
         grants, "grant.manage", {"institute_id": user["institute_id"]}
     )
+    if needs_totp and not body.totp:
+        token = new_token()
+        await db(request).login_challenges.insert_one(
+            {
+                "_id": new_id(),
+                "token_hash": hash_token(token),
+                "user_id": user["_id"],
+                "expires_at": _now() + timedelta(minutes=CHALLENGE_MINUTES),
+                "attempts": 0,
+                "used": False,
+            }
+        )
+        return JSONResponse({"verification": "totp", "challenge": token})
     if needs_totp and not verify_totp(user.get("totp_secret") or "", body.totp or ""):
         raise AppError(401, "auth.totp_required", "Enter the current authentication code.")
     await db(request).login_attempts.delete_many({"email_key": email_key})
@@ -291,6 +312,44 @@ async def login(request: Request, body: LoginBody):
     )
     await open_session(request, user, response)
     return response
+
+
+@router.post("/auth/login/verify")
+async def verify_login(request: Request, body: ChallengeBody):
+    from fastapi.responses import JSONResponse
+
+    challenge = await db(request).login_challenges.find_one({"token_hash": hash_token(body.challenge)})
+    expires_at = challenge["expires_at"] if challenge else None
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if challenge is None or expires_at <= _now():
+        raise AppError(401, "auth.challenge_expired", "That sign-in expired. Start again.")
+    if challenge.get("attempts", 0) >= MAX_CHALLENGE_ATTEMPTS:
+        raise AppError(429, "auth.rate_limited", "Too many sign-in attempts. Try again later.")
+    if challenge.get("used"):
+        raise AppError(401, "auth.challenge_expired", "That sign-in expired. Start again.")
+    user = await db(request).users.find_one({"_id": challenge["user_id"], "active": True})
+    if user is None or not verify_totp(user.get("totp_secret") or "", body.code):
+        attempts = challenge.get("attempts", 0) + 1
+        await db(request).login_challenges.update_one(
+            {"_id": challenge["_id"]}, {"$set": {"attempts": attempts, "used": attempts >= MAX_CHALLENGE_ATTEMPTS}}
+        )
+        if attempts >= MAX_CHALLENGE_ATTEMPTS:
+            raise AppError(429, "auth.rate_limited", "Too many sign-in attempts. Try again later.")
+        raise AppError(401, "auth.totp_required", "Enter the current authentication code.")
+    await db(request).login_challenges.update_one({"_id": challenge["_id"]}, {"$set": {"used": True}})
+    await db(request).login_attempts.delete_many({"email_key": user["email_key"]})
+    response = JSONResponse(
+        {"user": public_user(user), "institute": await public_institute(request, user["institute_id"])}
+    )
+    await open_session(request, user, response)
+    return response
+
+
+@router.post("/auth/login/cancel")
+async def cancel_login(request: Request, body: ChallengeBody):
+    await db(request).login_challenges.delete_many({"token_hash": hash_token(body.challenge)})
+    return {"ok": True}
 
 
 @router.post("/auth/logout")

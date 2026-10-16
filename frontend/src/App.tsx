@@ -4,7 +4,7 @@ import { api, Health, Session } from "./api";
 import { AccessPage, UserAccessPage } from "./administration/access";
 import { AuditPage } from "./administration/audit";
 import { SettingsPage } from "./administration/settings";
-import { AdmissionPage, AdmissionsPage, EnquiriesPage, EnquiryPage } from "./admissions/pages";
+import { AdmissionCreatePage, AdmissionPage, AdmissionsPage, EnquiriesPage, EnquiryPage } from "./admissions/pages";
 import { BatchPage } from "./academics/batch";
 import { BranchPage } from "./academics/branch";
 import { BatchesPage, CoursePage, CoursesPage, InstitutePage } from "./academics/catalog";
@@ -74,6 +74,7 @@ export function App() {
         <Route path="/students/enquiries" element={can("student.lookup") ? <EnquiriesPage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/students/enquiries/:enquiryId" element={can("student.lookup") ? <EnquiryPage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/students/admissions" element={can("student.lookup") ? <AdmissionsPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/students/admissions/new" element={can("student.manage") ? <AdmissionCreatePage /> : <Navigate to="/students/admissions" replace />} />
         <Route path="/students/admissions/:admissionId" element={can("student.lookup") ? <AdmissionPage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/teachers" element={can("user.manage") ? <TeachersPage /> : <Navigate to="/" replace />} />
         <Route path="/teachers/:teacherId" element={can("user.manage") ? <TeacherPage /> : <Navigate to="/" replace />} />

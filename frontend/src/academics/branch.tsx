@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { api, Session } from "../api";
 import { notify } from "../notify";
 import { Place, PlaceFacts } from "./catalog";
-import { Icon, StudentDialog } from "../ui";
+import { Icon, moveTab, StudentDialog } from "../ui";
 
 type Batch = { id: string; name: string; started_on: string | null; ended_on: string | null; timings: string | null; session_key?: string | null; archived: boolean };
 type CourseOffer = { id: string; name: string; batches: Batch[] };
@@ -55,7 +55,7 @@ export function BranchPage({ session }: { session: Session }) {
         </div>
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
-      <div className="page-tabs" role="tablist" aria-label="Branch">
+      <div className="page-tabs" role="tablist" aria-label="Branch" onKeyDown={(event) => moveTab(event, ["details", "courses", "students"] as const, tab, setTab)}>
         <button type="button" role="tab" aria-selected={tab === "details"} onClick={() => setTab("details")}>Details</button>
         <button type="button" role="tab" aria-selected={tab === "courses"} onClick={() => setTab("courses")}>Courses</button>
         <button type="button" role="tab" aria-selected={tab === "students"} onClick={() => setTab("students")}>Students</button>
@@ -64,18 +64,14 @@ export function BranchPage({ session }: { session: Session }) {
       {tab === "courses" ? (
         <>
           {canCorrect ? (
-            <div className="icon-actions">
-              <button type="button" onClick={() => setOffering(true)} aria-label="Offer a course" title="Offer a course"><Icon name="add" /></button>
-            </div>
+            <button type="button" onClick={() => setOffering(true)}>Offer a course</button>
           ) : null}
           {branch.courses.length === 0 ? <p>This branch does not offer a course yet.</p> : branch.courses.map((course) => (
             <section key={course.id}>
               <div className="title-row">
                 <h2><Link to={`/courses/${course.id}`}>{course.name}</Link></h2>
                 {canCorrect ? (
-                  <div className="icon-actions">
-                    <button type="button" onClick={() => setAddingFor(course)} aria-label={`Add batch to ${course.name}`} title="Add batch"><Icon name="add" /></button>
-                  </div>
+                  <button type="button" onClick={() => setAddingFor(course)}>Add batch</button>
                 ) : null}
               </div>
               {course.batches.length === 0 ? <p>No batches yet.</p> : (
@@ -230,9 +226,7 @@ function OfferCourse({ available, onClose, onSaved }: { available: CourseOption[
         {error ? <p className="error" role="alert">{error}</p> : null}
         <div className="dialog-actions">
           <button type="button" className="quiet" onClick={onClose}>Cancel</button>
-          <div className="icon-actions">
-            <button type="submit" disabled={saving || !courseId} aria-label="Offer a course" title="Offer a course"><Icon name="add" /></button>
-          </div>
+          <button type="submit" disabled={saving || !courseId}>{saving ? "Saving…" : "Offer a course"}</button>
         </div>
       </form>
     </StudentDialog>
@@ -281,9 +275,7 @@ function BranchBatchForm({ branchId, course, onClose, onSaved }: { branchId: str
         {error ? <p className="error" role="alert">{error}</p> : null}
         <div className="dialog-actions">
           <button type="button" className="quiet" onClick={onClose}>Cancel</button>
-          <div className="icon-actions">
-            <button type="submit" disabled={saving || !name.trim()} aria-label="Add batch" title="Add batch"><Icon name="add" /></button>
-          </div>
+          <button type="submit" disabled={saving || !name.trim()}>{saving ? "Saving…" : "Add batch"}</button>
         </div>
       </form>
     </StudentDialog>

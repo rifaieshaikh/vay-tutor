@@ -48,8 +48,8 @@ export function OverviewPage() {
       <h1>Pending work</h1>
       {loading ? <p>Loading the dashboard…</p> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
-      {!loading && !error && items.length === 0 ? <p>Nothing on this dashboard is assigned to you.</p> : null}
-      {!loading && !error && items.length > 0 && waiting === 0 ? <p>Nothing is waiting on you.</p> : null}
+      {!loading && !error && items.length === 0 ? <p>Nothing on this dashboard is available to you.</p> : null}
+      {!loading && !error && items.length > 0 && waiting === 0 ? <p>Nothing is waiting.</p> : null}
       {!loading && !error && board && board.dropped.length > 0 ? (
         <p>A context choice outside your access was left unused.</p>
       ) : null}

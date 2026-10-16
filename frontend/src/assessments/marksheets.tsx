@@ -4,7 +4,8 @@ import { ApiError, api } from "../api";
 import { notify } from "../notify";
 import { CONTEXT_FIELDS, Option, clearIncompatible, optionFits } from "../filters";
 import { Band, BandFields, bandsPayload, bandsReady, draftsFrom } from "../bands";
-import { Icon, StudentDialog } from "../ui";
+import { useUnsaved } from "../guard";
+import { Icon, moveTab, StudentDialog } from "../ui";
 
 type Marksheet = {
   id: string;
@@ -42,7 +43,8 @@ type Detail = Marksheet & { attempt_kind?: string; available_students?: Person[]
 type Draft = { score: string; status: string };
 
 const FILTER_KEYS = ["q", "status", "exam_type", "branch_id", "course_id", "batch_id", "period", "subject_id", "paper_id", "exam_date_from", "exam_date_to", "sort", "page"];
-const ADVANCED_KEYS = ["exam_type", "branch_id", "course_id", "paper_id", "exam_date_from", "exam_date_to"];
+const ADVANCED_KEYS = ["exam_type", "paper_id", "exam_date_from", "exam_date_to"];
+const PAGE_FILTERS = ["q", "status", "subject_id", ...ADVANCED_KEYS];
 const STATUS_OPTIONS = [
   { id: "draft", label: "Draft" },
   { id: "submitted", label: "Submitted" },
@@ -172,6 +174,9 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
   const [pages, setPages] = useState(1);
   const [options, setOptions] = useState<Record<string, Option[]>>({});
   const [error, setError] = useState("");
+  const [optionsError, setOptionsError] = useState("");
+  const [optionsAttempt, setOptionsAttempt] = useState(0);
+  const [draftQuery, setDraftQuery] = useState(filters.q);
   const [loading, setLoading] = useState(true);
 
   function write(next: Record<string, string>) {
@@ -206,8 +211,11 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
         const page = await api<{ items: Option[] }>(`/api/v1/context/options?dimension=${dimension}`);
         return [dimension, page.items] as const;
       }),
-    ).then((pairs) => setOptions(Object.fromEntries(pairs))).catch(() => undefined);
-  }, [params]);
+    ).then((pairs) => {
+      setOptions(Object.fromEntries(pairs));
+      setOptionsError("");
+    }).catch((reason: Error) => setOptionsError(reason.message || "The filter choices could not be loaded."));
+  }, [params, optionsAttempt]);
 
   useEffect(() => {
     if (loading) return;
@@ -216,6 +224,18 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
     sessionStorage.removeItem("vay-marksheets-scroll");
     window.scrollTo(0, Number(saved));
   }, [loading, items.length]);
+
+  useEffect(() => {
+    setDraftQuery(filters.q);
+  }, [filters.q]);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      if (draftQuery.trim() === filters.q) return;
+      choose("q", draftQuery.trim());
+    }, 300);
+    return () => window.clearTimeout(handle);
+  }, [draftQuery]);
 
   function choose(key: string, value: string) {
     const merged = { ...filters, [key]: value, page: "1" };
@@ -245,7 +265,17 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
     return [optionLabel("subject", sheet.subject_id), optionLabel("paper", sheet.paper_id), batches.join(", ")].filter(Boolean).join(" · ");
   }
 
-  const active = Object.entries(filters).filter(([key, value]) => value && !["page", "sort"].includes(key));
+  const active = PAGE_FILTERS.filter((key) => filters[key]).map((key) => [key, filters[key]] as const);
+  function clearPageFilters() {
+    write({
+      branch_id: filters.branch_id,
+      course_id: filters.course_id,
+      batch_id: filters.batch_id,
+      period: filters.period,
+      sort: filters.sort,
+    });
+    setDraftQuery("");
+  }
   const advancedCount = ADVANCED_KEYS.filter((key) => filters[key]).length;
   const page = Number(filters.page) || 1;
   const rangeFrom = total === 0 ? 0 : (page - 1) * 8 + 1;
@@ -265,16 +295,14 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
           <h1>Marksheets</h1>
         </div>
         {canAdd ? (
-          <div className="icon-actions">
-            <button type="button" onClick={() => { setError(""); setPanel("choose"); }} aria-label="Add marksheet" title="Add marksheet"><Icon name="add" /></button>
-          </div>
+          <button type="button" onClick={() => { setError(""); setPanel("choose"); }}>Add marksheet</button>
         ) : null}
       </div>
-      <p className="page-lead">Enter marks here, or import a workbook. A draft stays off progress cards until it is published.</p>
+      <p className="page-lead">A draft stays off progress cards until it is published.</p>
       <div className="toolbar common">
         <label>
           Search
-          <input value={filters.q} onChange={(event) => choose("q", event.target.value)} placeholder="Assessment or student" />
+          <input value={draftQuery} onChange={(event) => setDraftQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); choose("q", draftQuery.trim()); } }} placeholder="Assessment or student" />
         </label>
         <label>
           Status
@@ -292,26 +320,16 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
             ))}
           </select>
         </label>
-        <label>
-          Batch
-          <select value={filters.batch_id} onChange={(event) => choose("batch_id", event.target.value)}>
-            <option value="">All</option>
-            {(options.batch || []).filter((option) => optionFits(option, filters)).map((option) => (
-              <option key={option.id} value={option.id}>{option.label}</option>
-            ))}
-          </select>
-        </label>
-        <div className="icon-actions">
-          <button type="button" onClick={() => setPanel("filters")} aria-label={advancedCount ? `Filters, ${advancedCount} applied` : "Filters"} title="Filters"><Icon name="filter" /></button>
-        </div>
+        <button type="button" className="secondary" onClick={() => setPanel("filters")}>More filters{advancedCount ? ` (${advancedCount})` : ""}</button>
       </div>
+      {optionsError ? <p className="error" role="alert">{optionsError} <button type="button" className="quiet" onClick={() => setOptionsAttempt((value) => value + 1)}>Try again</button></p> : null}
       <p className="filter-row">
         {active.map(([key, value]) => (
           <button key={key} type="button" className="chip-button" onClick={() => choose(key, "")}>{LABELS[key]}: {labelFor(key, value)}</button>
         ))}
         {active.length ? (
           <div className="icon-actions">
-            <button type="button" onClick={() => write({ sort: filters.sort })} aria-label="Clear filters" title="Clear filters"><Icon name="clear" /></button>
+            <button type="button" className="quiet" onClick={clearPageFilters}>Clear</button>
           </div>
         ) : null}
         <span>{total} marksheet{total === 1 ? "" : "s"}</span>
@@ -319,22 +337,6 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
       {panel === "filters" ? (
         <Dialog title="Filter marksheets" onClose={() => setPanel(null)}>
           <div className="form-grid">
-            <label>
-              Branch
-              <select value={filters.branch_id} onChange={(event) => choose("branch_id", event.target.value)}>
-                <option value="">All</option>
-                {(options.branch || []).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-              </select>
-            </label>
-            <label>
-              Course
-              <select value={filters.course_id} onChange={(event) => choose("course_id", event.target.value)}>
-                <option value="">All</option>
-                {(options.course || []).filter((option) => optionFits(option, filters)).map((option) => (
-                  <option key={option.id} value={option.id}>{option.label}</option>
-                ))}
-              </select>
-            </label>
             <label>
               Paper
               <select value={filters.paper_id} onChange={(event) => choose("paper_id", event.target.value)}>
@@ -355,7 +357,7 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
             <label>To<input type="date" value={filters.exam_date_to} onChange={(event) => choose("exam_date_to", event.target.value)} /></label>
           </div>
           <div className="dialog-actions">
-            {active.length ? <button type="button" className="text-button" onClick={() => write({ sort: filters.sort })}>Clear</button> : null}
+            {active.length ? <button type="button" className="text-button" onClick={clearPageFilters}>Clear</button> : null}
             <button type="button" onClick={() => setPanel(null)}>Done</button>
           </div>
         </Dialog>
@@ -455,7 +457,7 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
       ) : null}
       {error && panel !== "add" ? <p className="error" role="alert">{error}</p> : null}
       {loading && items.length === 0 ? <p role="status">Loading marksheets…</p> : null}
-      {!loading && items.length === 0 ? <p>No marksheets match these filters.</p> : null}
+      {!loading && items.length === 0 ? <p>{active.length ? "No marksheets match these filters. Clear them to see the full list." : "No marksheets yet."}</p> : null}
       {items.length > 0 ? (
         <div className="table-wrap">
           <table className="register">
@@ -584,14 +586,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
     ).then((pairs) => setOptions(Object.fromEntries(pairs))).catch(() => undefined);
   }, []);
 
-  useEffect(() => {
-    if (!editing) return;
-    function warn(event: BeforeUnloadEvent) {
-      event.preventDefault();
-    }
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [editing]);
+  useUnsaved(editing);
 
   function startEdit() {
     if (!detail) return;
@@ -822,14 +817,15 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
   ];
   return (
     <section className="panel wide">
-      <Link className="quiet back-link" to={back} onClick={(event) => { if (editing && !window.confirm("Leave without saving these edits?")) event.preventDefault(); }}>{backLabel}</Link>
+      <Link className="quiet back-link" to={back}>{backLabel}</Link>
       <div className="title-row">
-        <h1>{detail.title}</h1>
+        <div>
+          <h1>{detail.title}</h1>
+          <p className="page-lead">{detail.status === "draft" ? "Enter the scores, then publish. A draft stays off progress cards." : detail.status === "submitted" ? "Publish when the scores are ready." : detail.status === "published" ? "These scores are on progress cards. Withdraw them to correct a published sheet." : "Correct the scores before publishing again."}</p>
+        </div>
         <div className="actions">
           {!editing && canAddStudent ? (
-            <div className="icon-actions">
-              <button type="button" onClick={() => setPanel("student")} aria-label="Add a student" title="Add a student"><Icon name="add" /></button>
-            </div>
+            <button type="button" onClick={() => setPanel("student")}>Add a student</button>
           ) : null}
           {!editing && (detail.status === "draft" || detail.status === "published") ? <button type="button" className="text-button" onClick={startEdit}>Edit scores</button> : null}
           {editing ? <button type="button" onClick={saveEdits} disabled={saveState === "saving"}>{saveState === "saving" ? "Saving…" : "Save"}</button> : null}
@@ -838,7 +834,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
           {!editing && detail.status === "published" ? <button type="button" className="text-button" onClick={() => setPanel("withdraw")}>Withdraw</button> : null}
         </div>
       </div>
-      <div className="page-tabs" role="tablist" aria-label="Marksheet sections">
+      <div className="page-tabs" role="tablist" aria-label="Marksheet sections" onKeyDown={(event) => moveTab(event, ["results", "details"] as const, tab, setTab)}>
         <button type="button" role="tab" aria-selected={tab === "results"} onClick={() => setTab("results")}>Results</button>
         <button type="button" role="tab" aria-selected={tab === "details"} onClick={() => setTab("details")}>Details</button>
       </div>
@@ -1000,9 +996,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
             <div className="dialog-actions">
               <button type="button" className="text-button" onClick={() => setPanel(null)}>Cancel</button>
               {(detail.available_students || []).length ? (
-                <div className="icon-actions">
-                  <button type="submit" aria-label="Add to marksheet" title="Add to marksheet"><Icon name="add" /></button>
-                </div>
+                <button type="submit">Add to marksheet</button>
               ) : null}
             </div>
           </form>
@@ -1015,7 +1009,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
             {error ? <p className="error" role="alert">{error}</p> : null}
             <div className="dialog-actions">
               <button type="button" className="text-button" onClick={() => setPanel(null)}>Cancel</button>
-              <button type="submit">Withdraw</button>
+              <button type="submit" className="destructive">Withdraw</button>
             </div>
           </form>
         </Dialog>

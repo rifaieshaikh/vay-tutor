@@ -34,6 +34,8 @@ export function ContextBar() {
   const [params, setParams] = useSearchParams();
   const [options, setOptions] = useState<Record<string, Option[]>>({});
   const [ready, setReady] = useState(false);
+  const [optionsError, setOptionsError] = useState("");
+  const [attempt, setAttempt] = useState(0);
   const branchId = params.get("branch_id") || "";
   const courseId = params.get("course_id") || "";
   const batchId = params.get("batch_id") || "";
@@ -51,13 +53,18 @@ export function ContextBar() {
       .then((pairs) => {
         if (cancelled) return;
         setOptions(Object.fromEntries(pairs));
+        setOptionsError("");
         setReady(true);
       })
-      .catch(() => undefined);
+      .catch((reason: Error) => {
+        if (cancelled) return;
+        setOptionsError(reason.message || "The context choices could not be loaded.");
+        setReady(false);
+      });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [attempt]);
 
   useEffect(() => {
     if (!ready) return;
@@ -136,6 +143,12 @@ export function ContextBar() {
 
   return (
     <form className="context-bar" aria-label="Academic context" onSubmit={clear}>
+      {optionsError ? (
+        <p className="error span-2" role="alert">
+          {optionsError}{" "}
+          <button type="button" className="quiet" onClick={() => setAttempt((value) => value + 1)}>Try again</button>
+        </p>
+      ) : null}
       <label>
         Branch
         <select value={branchId} onChange={(event) => write("branch_id", event.target.value)}>
