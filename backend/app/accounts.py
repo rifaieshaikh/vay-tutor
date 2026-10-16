@@ -54,8 +54,15 @@ async def open_session(request: Request, user: dict, response) -> None:
 
 
 async def public_institute(request: Request, institute_id: str) -> dict:
+    from app.clock import coerce_timezone
+
     institute = await db(request).institutes.find_one({"_id": institute_id})
-    return {"id": institute["_id"], "name": institute["name"], "code": institute["code"]}
+    return {
+        "id": institute["_id"],
+        "name": institute["name"],
+        "code": institute["code"],
+        "timezone": coerce_timezone(institute.get("timezone")),
+    }
 
 
 def _checked_actions(user: dict, actions: list[str]) -> list[str]:

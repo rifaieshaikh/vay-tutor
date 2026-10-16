@@ -94,6 +94,10 @@ export function SettingsPage({ session }: { session: Session }) {
             <dt>Absence</dt>
             <dd>No percentage and no rank</dd>
           </div>
+          <div className="span-2">
+            <dt>Timezone</dt>
+            <dd><TimezoneField initial={session.institute.timezone || "Asia/Kolkata"} canEdit={canEdit} /></dd>
+          </div>
         </dl>
       ) : null}
       {tab === "policy" && policy ? (
@@ -183,6 +187,46 @@ export function SettingsPage({ session }: { session: Session }) {
         />
       ) : null}
     </section>
+  );
+}
+
+const TIMEZONES = ["Asia/Kolkata", "Asia/Dubai", "Asia/Singapore", "Asia/Tokyo", "Europe/London", "America/New_York", "UTC"];
+
+function TimezoneField({ initial, canEdit }: { initial: string; canEdit: boolean }) {
+  const [zone, setZone] = useState(initial);
+  const [draft, setDraft] = useState(initial);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const choices = TIMEZONES.includes(zone) ? TIMEZONES : [zone, ...TIMEZONES];
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const saved = await api<{ timezone: string }>("/api/v1/institute", {
+        method: "PATCH",
+        body: JSON.stringify({ timezone: draft }),
+      });
+      setZone(saved.timezone);
+      setDraft(saved.timezone);
+      notify("Saved the institute timezone. Follow-up dates use this calendar.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save the timezone.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!canEdit) return <>{zone}</>;
+  return (
+    <form onSubmit={save} className="inline-correct">
+      <select aria-label="Institute timezone" value={draft} onChange={(event) => setDraft(event.target.value)}>
+        {choices.map((item) => <option key={item} value={item}>{item}</option>)}
+      </select>
+      <button type="submit" disabled={saving || draft === zone}>Save</button>
+      {error ? <span className="error" role="alert">{error}</span> : null}
+    </form>
   );
 }
 

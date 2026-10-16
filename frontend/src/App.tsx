@@ -66,7 +66,7 @@ export function App() {
     <Shell session={session} onChange={refresh}>
       <Routes>
         <Route path="/" element={<OverviewPage />} />
-        <Route path="/import" element={can("marksheet.upload") ? <ImportPage /> : <Navigate to="/" replace />} />
+        <Route path="/import" element={can("marksheet.upload") || can("marksheet.view") ? <ImportPage canUpload={can("marksheet.upload")} /> : <Navigate to="/" replace />} />
         <Route path="/marksheets" element={can("marksheet.view") ? <MarksheetsPage canAdd={can("marksheet.upload")} /> : <Navigate to="/" replace />} />
         <Route path="/marksheets/:marksheetId" element={can("marksheet.view") ? <MarksheetPage canSetBands={can("marksheet.edit_draft") || can("marksheet.correct")} /> : <Navigate to="/" replace />} />
         <Route path="/cards" element={can("progress_card.view") ? <CardsPage session={session} /> : <Navigate to="/" replace />} />

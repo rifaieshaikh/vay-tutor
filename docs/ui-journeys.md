@@ -259,7 +259,7 @@ From the student, the enrollment card, the batch, or Progress Cards / Academic V
 
 ### Start from the dashboard
 
-Open Dashboard → open the queue. Enquiries awaiting follow-up opens Enquiries with `follow_up=due`. Admissions awaiting conversion opens Admissions with `status=open`. Marksheets awaiting review opens Marksheets with `status=submitted`. Failed imports opens Import with `state=failed`. A zero count still opens that filtered register. The register shows the filter that produced the count. Queues are institute work the grant can see. They are not described as personally assigned.
+Open Dashboard → open a figure or a queue. Currently enrolled opens Students with `enrollment=current`. Active batches opens Batches with `active=1`. Admissions awaiting enrollment opens Admissions with `status=open`. Follow-ups due opens Enquiries with `follow_up=overdue`. Marksheets awaiting review opens Marksheets with `status=submitted`. Failed imports opens Import with `state=failed`. Branch, course, and batch travel with students, batches, marksheets, and imports. Enquiries and admissions take the course only. A zero count still opens that filtered register. The register shows the filter that produced the count. Queues are institute work the grant can see. They are not described as personally assigned.
 
 ## What the redesign changed
 

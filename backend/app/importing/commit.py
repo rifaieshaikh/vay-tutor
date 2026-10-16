@@ -49,6 +49,7 @@ async def commit_import(db, client, job: dict, actor: dict, confirm_updates: boo
     outcomes = list(job.get("outcomes") or [])
     job_ledger = _ledger()
     by_sheet = []
+    attributed: set[str] = set(job.get("batch_ids") or [])
     for sheet in plan["sheets"]:
         if not sheet["included"]:
             if not any(item.get("sheet_id") == sheet["id"] and item.get("status") == "skipped" for item in outcomes):
@@ -62,9 +63,16 @@ async def commit_import(db, client, job: dict, actor: dict, confirm_updates: boo
         try:
             async with await client.start_session() as session:
                 async with session.start_transaction():
-                    published_changes = await _commit_sheet(db, session, job, actor, sheet, ledger)
+                    published_changes, sheet_batches = await _commit_sheet(db, session, job, actor, sheet, ledger)
         except DuplicateKeyError as exc:
             raise AppError(409, "import.conflict", "Another import saved this record first. Open the preview again.") from exc
+        except AppError:
+            raise
+        except Exception:
+            attributed.update(await _existing_batch_ids(db, actor["institute_id"], sheet))
+            await _mark_sheet_failed(db, job, actor, sheet, outcomes, committed, attributed)
+            raise
+        attributed.update(sheet_batches)
         await _apply_published_corrections(db, client, actor, published_changes, ledger)
         for kind, buckets in ledger.items():
             for bucket, keys in buckets.items():
@@ -74,7 +82,12 @@ async def commit_import(db, client, job: dict, actor: dict, confirm_updates: boo
         outcomes.append({"sheet_id": sheet["id"], "name": sheet["name"], "status": "committed"})
         await db.import_jobs.update_one(
             {"_id": job["_id"]},
-            {"$set": {"committed_sheets": list(committed), "outcomes": outcomes, "state": "committing"}},
+            {"$set": {
+                "committed_sheets": list(committed),
+                "outcomes": outcomes,
+                "state": "committing",
+                "batch_ids": sorted(attributed),
+            }},
         )
     summary = _from_ledger(job_ledger)
     for item in by_sheet:
@@ -83,8 +96,16 @@ async def commit_import(db, client, job: dict, actor: dict, confirm_updates: boo
     stored_summary = {"counts": summary, "by_sheet": by_sheet}
     await db.import_jobs.update_one(
         {"_id": job["_id"]},
-        {"$set": {"state": "committed", "committed_sheets": list(committed), "outcomes": outcomes, "summary": stored_summary, "committed_at": _now()}},
+        {"$set": {
+            "state": "committed",
+            "committed_sheets": list(committed),
+            "outcomes": outcomes,
+            "summary": stored_summary,
+            "committed_at": _now(),
+            "batch_ids": sorted(attributed),
+        }},
     )
+    await _record_import(db, actor, job, attributed, "Imported a marklist", "/import")
     await db.audit_events.insert_one(
         {
             "_id": str(ObjectId()),
@@ -96,6 +117,74 @@ async def commit_import(db, client, job: dict, actor: dict, confirm_updates: boo
         }
     )
     return {"state": "committed", "outcomes": outcomes, "summary": stored_summary}
+
+
+async def _existing_batch_ids(db, institute_id: str, sheet: dict) -> list[str]:
+    branch = await db.branches.find_one({
+        "institute_id": institute_id,
+        "name_key": name_key(sheet.get("branch_name") or ""),
+    })
+    course = await db.courses.find_one({
+        "institute_id": institute_id,
+        "name_key": name_key(sheet.get("course_name") or ""),
+    })
+    if branch is None or course is None:
+        return []
+    offering = await db.offerings.find_one({"branch_id": branch["_id"], "course_id": course["_id"]})
+    if offering is None:
+        return []
+    found = []
+    for batch in sheet.get("batches") or []:
+        row = await db.batches.find_one({
+            "offering_id": offering["_id"],
+            "session_key": batch.get("session_key"),
+        })
+        if row:
+            found.append(row["_id"])
+    return found
+
+
+async def _mark_sheet_failed(db, job: dict, actor: dict, sheet: dict, outcomes: list, committed: set, batch_ids: set[str]) -> None:
+    failed = {
+        "sheet_id": sheet["id"],
+        "name": sheet["name"],
+        "status": "failed",
+        "error": "This sheet could not be saved.",
+    }
+    state = "failed" if not committed else "committing"
+    stored = {
+        "state": state,
+        "outcomes": [*outcomes, failed],
+        "batch_ids": sorted(batch_ids),
+        "committed_sheets": list(committed),
+    }
+    if state == "failed":
+        stored["error"] = "This import could not be saved."
+        stored["failed_at"] = _now()
+    await db.import_jobs.update_one({"_id": job["_id"]}, {"$set": stored})
+    if state == "failed":
+        await _record_import(db, actor, job, batch_ids, "An import failed", "/import?state=failed")
+
+
+async def _record_import(db, actor: dict, job: dict, batch_ids: set[str], action: str, href: str) -> None:
+    from app.business import write_business
+
+    sample = None
+    if batch_ids:
+        sample = await db.batches.find_one({"_id": sorted(batch_ids)[0], "institute_id": actor["institute_id"]})
+    await write_business(
+        db,
+        actor,
+        action=action,
+        record=job.get("filename") or "Import",
+        href=href,
+        permission="marksheet.view",
+        collection="import_jobs",
+        record_id=job["_id"],
+        course_id=(sample or {}).get("course_id") or "",
+        branch_id=(sample or {}).get("branch_id") or "",
+        batch_id=(sample or {}).get("_id") or "",
+    )
 
 
 def _ledger() -> dict:
@@ -214,7 +303,7 @@ async def _commit_sheet(db, session, job: dict, actor: dict, sheet: dict, ledger
                 _note(ledger, "results", "skip", f"{sheet['id']}:{group['id']}:{student['row']}")
             continue
         queued.extend(await _commit_group(db, session, job, actor, sheet, group, branch, course, subject, paper, batch_ids, session_to_batch, ledger))
-    return queued
+    return queued, batch_ids
 
 
 async def _commit_group(db, session, job, actor, sheet, group, branch, course, subject, paper, batch_ids, session_to_batch, ledger: dict) -> list:

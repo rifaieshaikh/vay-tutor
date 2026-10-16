@@ -1,6 +1,6 @@
 # DASH-01 — Professional institute overview dashboard
 
-Date: 16 October 2026 · Status: ready for design and implementation planning; not implemented or accepted.
+Date: 16 October 2026 · Status: implemented; staff acceptance is still open.
 
 ## User story
 
@@ -10,17 +10,26 @@ As an institute staff member, I want a clear dashboard showing the institute's c
 
 A compact header shows **Overview**, institute name, the current institute-local date, **Filters** and **Quick actions**. Below it, show lightweight summary figures, a prominent Needs attention section and a secondary Recent activity feed. Use neutral surfaces, readable typography, subtle separators and deliberate spacing. Reserve warning colors for actual exceptions. Avoid decorative charts, unnecessary descriptions and a separate card around every element.
 
-Remove the always-visible Branch / Course / Period / Batch bar from the dashboard. The default view contains all data the signed-in user is authorized to access. Selected filters appear as readable removable chips only after selection.
+Remove the always-visible Branch / Course / Period / Batch bar from the dashboard. Dashboard filters are branch, course, and batch only. Period is not a dashboard filter. The default view contains all data the signed-in user is authorized to access. Selected filters appear as readable removable chips only after selection.
 
 This story changes the dashboard and its destination-query integration. Removing context bars or redesigning filters on other pages belongs to the broader [modern UI plan](modern-ui-task-list.md).
 
-## Scope and decisions to resolve before implementation
+## Decisions
+
+Decided 16 October 2026:
+
+- Dashboard filters are branch, course, and batch. Period is not a dashboard filter. It stays the batch session key on the registers and reports that already own it. The dashboard does not offer it, does not treat a `period` query as applied scope, and does not send `period` on destination links.
+- **Follow-ups due** is one count. It is not also shown as overdue follow-ups. An enquiry is included when it is not yet an admission and its latest follow-up date is before the institute-local today. A missing date, today, and a later date are not due.
+- **Admissions awaiting enrollment** is one count. It is not also shown as incomplete admissions. It counts open admissions that are not yet enrolled, including those still missing answers or an identity decision.
+- The institute stores a timezone. The header date and follow-up due use that zone's calendar date. They do not use the browser zone or the server's UTC date.
+- Failed imports are counted per batch. Branch and course narrow the count through the batches they contain. A selected batch includes only imports attributed to that batch. An import with no batch is not presented as part of a filtered batch.
+- Recent activity reads a business-change log. That log is separate from the technical audit log. Audit payloads are not its source.
+
+Still required before coding:
 
 - Inspect existing dashboard contracts, status definitions, record links and permissions before adding endpoints or fields.
-- Document precise definitions for each summary metric and queue. Decide whether unavailable/inapplicable items are hidden or explicitly unavailable; do not render them as zero.
-- Confirm institute timezone/date handling. Date-only follow-up deadlines must be evaluated against the institute-local calendar date, not the browser or server's incidental timezone.
-- Agree which academic filters apply to each section using actual entity relationships. Branch/course/period/batch selections must not imply links that enquiries or unassigned admissions do not have.
-- Define **Period** precisely; use **Batch intake period** if it filters a batch session. Any date range for activity is a separate criterion.
+- A metric the person cannot access is hidden. A zero is shown only after a successful authorized query. A section that cannot honor a selected filter states its real scope.
+- Branch, course, and batch apply to enrolled students, active batches, marksheets awaiting review, and failed imports. Enquiries and open admissions take course only.
 - Review populated desktop/mobile designs plus filtered, loading, empty and error states before coding, consistent with UI-03 in the modern UI plan.
 
 ## Acceptance criteria
@@ -56,21 +65,21 @@ This story changes the dashboard and its destination-query integration. Removing
 ### AC-05 — Summary figures
 
 - [ ] Display the applicable authorized metrics: currently enrolled students, active batches, admissions awaiting enrollment and follow-ups due.
-- [ ] Metric definitions specify counting unit, status/date boundaries, archived/closed-record treatment and supported filters. Student counts use distinct people where the label promises students.
+- [ ] Follow-ups due counts enquiries that are not yet admissions and whose latest follow-up date is before the institute-local today. Admissions awaiting enrollment counts open admissions that are not yet enrolled. Student counts use distinct people. Active batches are batches with no end date.
 - [ ] Each figure opens a destination whose filters and count reconcile with the figure; any required destination-query support is implemented before enabling the link.
 - [ ] No illustrative data, unsupported trend comparisons or unavailable values are presented as live metrics.
 
 ### AC-06 — Needs attention
 
-- [ ] Show applicable queues for overdue follow-ups, incomplete admissions, marksheets awaiting review and failed imports, each with a labeled destination action.
-- [ ] Supporting context, such as oldest outstanding date, is shown only when available and accurately calculated.
-- [ ] Queue predicates match existing workflow rules; incomplete admission and awaiting enrollment remain distinct definitions.
+- [ ] Show applicable queues for marksheets awaiting review and failed imports, each with a labeled destination action. Follow-ups due and admissions awaiting enrollment are the summary figures, not second queues.
+- [ ] Failed imports are counted per batch and follow the selected branch, course, and batch. Supporting context, such as oldest outstanding date, is shown only when available and accurately calculated.
+- [ ] Marksheets awaiting review remain submitted sheets. Drafts stay out.
 - [ ] When all successfully loaded authorized queues are empty, show a quiet completion state. Loading/error/unavailable queues never produce a false all-clear.
 
 ### AC-07 — Recent activity and quick actions
 
-- [ ] Recent activity shows authorized business changes with record identity, understandable action, context, timestamp and a valid record link.
-- [ ] Technical audit payloads and sensitive hidden fields are not copied into the activity feed; missing/deleted records have a defined non-broken presentation.
+- [ ] Recent activity shows authorized entries from the business-change log, with record identity, understandable action, context, timestamp and a valid record link.
+- [ ] The business-change log is separate from the technical audit log. Audit payloads and sensitive hidden fields are not copied into the feed. Missing or deleted records have a defined non-broken presentation.
 - [ ] Quick actions offers only permitted supported tasks, such as Add enquiry, Create admission and Enter marks, without becoming a duplicate sidebar.
 - [ ] Navigating through any dashboard action respects existing unsaved-work guards and normal backend authorization.
 
@@ -110,9 +119,9 @@ This story changes the dashboard and its destination-query integration. Removing
 |---|---|
 | Administrator, no filters | All authorized metrics/queues agree with contributing records; no academic dropdown bar. |
 | Scoped staff and disjoint grants | No cross-combination records, options, activity or aggregate leakage through UI or direct API requests. |
-| Combined branch/course/batch/period | Only supported relationships filter each section; exceptions are labeled; linked destination counts agree. |
+| Combined branch/course/batch | Only supported relationships filter each section; exceptions are labeled; linked destination counts agree. A `period` query does not narrow the dashboard or its destination links. |
 | Apply/Cancel/Reset/chip removal/Clear all | Correct draft-versus-applied behavior, dependency clearing and URL state. |
-| Multiple enrollments and date boundaries | Distinct student counts and correct institute-local due/overdue calculations. |
+| Multiple enrollments and date boundaries | Distinct student counts. Follow-ups due include only dates before the institute timezone's today, and exclude today. |
 | Reload, Back/Forward and record return | Applied view is restored without dropped or silently broadened scope. |
 | Empty, no match, unavailable and failed requests | Distinct states; no false zero/all-clear; retry recovers without discarding valid state. |
 | Slow/out-of-order requests | Latest selected view wins; stale data is not labeled current. |
@@ -124,10 +133,10 @@ All acceptance criteria and execution steps are checked with evidence. Relevant 
 
 ## Evidence and completion record
 
-- Metric definitions and section/filter mapping: pending.
-- Design/prototype and user review: pending.
-- Implementation references: pending.
-- Test commands/results and dataset: pending.
-- Authenticated screenshots, viewport and role: pending.
-- Staff review and unresolved issues: pending.
+- Metric definitions and section/filter mapping: decided 16 October 2026. Period is excluded. Follow-ups due and admissions awaiting enrollment are single counts. The institute stores a timezone. Failed imports are per batch. Recent activity uses a separate business-change log.
+- Design/prototype and user review: pending. The overview was built from the written criteria. A reviewed design file is not linked.
+- Implementation references: `frontend/src/pages/Overview.tsx`, `backend/app/dashboard/routes.py`, `backend/app/clock.py`, `backend/app/business.py`, institute timezone on Settings, batch visibility in `backend/app/academics/catalog.py`, and import batch attribution in `backend/app/importing/commit.py`.
+- Test commands/results and dataset: `cd backend && PYTHONPATH=. .venv/bin/ruff check app && PYTHONPATH=. .venv/bin/python -m pytest tests/test_dashboard.py tests/test_phase6.py tests/test_m3.py`. Passed 16 October 2026. Frontend `tsc --noEmit` passed. The dataset covers a past follow-up, a follow-up today-or-later, an ended second enrollment, a draft marksheet, an unattributed failed import, disjoint branch-and-course grants, and a failed commit that keeps its batch.
+- Authenticated screenshots, viewport and role: checked in the signed-in IAM session on desktop. Narrow widths and text zoom were checked after the layout pass.
+- Staff review and unresolved issues: pending. A person who uses the institute has not accepted the overview.
 - Named owner / acceptance reviewer: unassigned.

@@ -195,6 +195,7 @@ async def bootstrap(request: Request, body: BootstrapBody):
                         "_id": institute_id,
                         "name": body.institute_name.strip(),
                         "code": body.institute_code.strip(),
+                        "timezone": "Asia/Kolkata",
                     },
                     session=session,
                 )
@@ -270,6 +271,25 @@ async def bootstrap(request: Request, body: BootstrapBody):
         {"institute_id": institute_id},
     )
     return response
+
+
+class InstituteTimezone(BaseModel):
+    timezone: str = Field(min_length=1)
+
+
+@router.patch("/institute")
+async def update_institute_timezone(request: Request, body: InstituteTimezone) -> dict:
+    from app.clock import require_timezone
+
+    user = await current_user(request)
+    require(user, "grant.manage", institute_resource(user))
+    try:
+        zone = require_timezone(body.timezone)
+    except ValueError:
+        raise AppError(422, "institute.timezone", "Choose a known timezone.", field="timezone") from None
+    await db(request).institutes.update_one({"_id": user["institute_id"]}, {"$set": {"timezone": zone}})
+    await write_audit(request, user, "institute.timezone", None, {"timezone": zone}, institute_resource(user))
+    return await public_institute(request, user["institute_id"])
 
 
 @router.post("/auth/login")

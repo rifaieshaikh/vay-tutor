@@ -243,7 +243,7 @@ def test_disjoint_scope_and_revocation_hide_connected_records(client):
     assert client.get(f"/api/v1/marksheets/{sheet_id}").status_code == 404
     assert client.get(f"/api/v1/batches/{batch_id}").status_code == 404
     dashboard = client.get("/api/v1/dashboard").json()
-    counts = {item["key"]: item["count"] for item in dashboard["items"]}
+    counts = {item["key"]: item["count"] for item in dashboard["queues"]}
     assert counts["marksheets"] == 0
     listed = client.get("/api/v1/students", params={"branch_id": tirur}).json()
     assert listed["items"] == []

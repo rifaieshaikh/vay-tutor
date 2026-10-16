@@ -533,7 +533,7 @@ def enquiry_next_on(row: dict) -> str:
 
 
 def follow_up_state(row: dict, today: str) -> str:
-    """Overdue, today, and upcoming use the institute date, which is the UTC calendar date."""
+    """Overdue, today, and upcoming use the institute timezone's calendar date."""
     if row.get("admission_id"):
         return "admitted"
     next_on = enquiry_next_on(row)
@@ -975,6 +975,19 @@ async def create_enquiry(request: Request, body: EnquiryBody) -> dict:
         }
     )
     await write_audit(request, user, "enquiry.create", None, {"name": fields["name"]}, {"enquiry_id": enquiry_id})
+    from app.business import write_business
+
+    await write_business(
+        db(request),
+        user,
+        action="Added an enquiry",
+        record=fields["name"],
+        href=f"/students/enquiries/{enquiry_id}",
+        permission="student.lookup",
+        collection="enquiries",
+        record_id=enquiry_id,
+        course_id=fields.get("course_id") or "",
+    )
     return {"id": enquiry_id}
 
 
@@ -1119,6 +1132,19 @@ async def convert_enquiry(request: Request, enquiry_id: str) -> dict:
         None,
         {"name": row.get("name") or "", "admission_id": admission_id},
         {"enquiry_id": enquiry_id},
+    )
+    from app.business import write_business
+
+    await write_business(
+        db(request),
+        user,
+        action="Created an admission",
+        record=row.get("name") or "",
+        href=f"/students/admissions/{admission_id}",
+        permission="student.lookup",
+        collection="admissions",
+        record_id=admission_id,
+        course_id=row.get("course_id") or "",
     )
     return {"id": admission_id, "existing": False}
 
@@ -1408,6 +1434,19 @@ async def _save_admission(
         await write_audit(
             request, user, "admission.create", None, {"name": fields["name"]}, {"admission_id": admission_id}
         )
+        from app.business import write_business
+
+        await write_business(
+            db(request),
+            user,
+            action="Created an admission",
+            record=fields["name"],
+            href=f"/students/admissions/{admission_id}",
+            permission="student.lookup",
+            collection="admissions",
+            record_id=admission_id,
+            course_id=fields.get("course_id") or "",
+        )
         return {"id": admission_id}
     await db(request).admissions.update_one({"_id": existing["_id"]}, {"$set": fields})
     await write_audit(
@@ -1509,6 +1548,21 @@ async def _commit_student(
             "student.identity",
             "Another student in that batch already uses this name. Add the course to that student instead.",
         ) from exc
+    from app.business import write_business
+
+    await write_business(
+        db(request),
+        user,
+        action="Enrolled a student",
+        record=admission.get("name") or "",
+        href=f"/students/{student_id}",
+        permission="student.lookup",
+        collection="students",
+        record_id=student_id,
+        course_id=admission.get("course_id") or "",
+        branch_id=batch.get("branch_id") or "",
+        batch_id=batch["_id"],
+    )
     return {"id": student_id, "created": created, "enrollment_id": enrollment_id}
 
 
@@ -1621,8 +1675,13 @@ async def _list_people(
     selected_course, _dropped = applied_intake_course(user["grants"], course_id)
     if selected_course:
         rows = [row for row in rows if (row.get("course_id") or "") == selected_course]
+    today = ""
+    if collection == "enquiries":
+        from app.clock import local_today
+
+        institute = await db(request).institutes.find_one({"_id": user["institute_id"]}, {"timezone": 1})
+        today = local_today((institute or {}).get("timezone"))
     if collection == "enquiries" and follow_up:
-        today = _now().date().isoformat()
         if follow_up == "due":
             rows = [row for row in rows if enquiry_awaiting_follow_up(row, today)]
         elif follow_up in {"overdue", "today", "upcoming", "unscheduled", "admitted"}:
@@ -1653,7 +1712,7 @@ async def _list_people(
     items = []
     for row in chosen:
         if collection == "enquiries":
-            view = _enquiry_view(row, names.get(row.get("course_id"), ""))
+            view = _enquiry_view(row, names.get(row.get("course_id"), ""), today)
             view["follow_up_count"] = len(row.get("follow_ups") or [])
             items.append(view)
         else:

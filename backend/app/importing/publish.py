@@ -53,8 +53,26 @@ async def publish_revision(db, client, user: dict, sheet: dict) -> dict:
 async def submit_marksheet(db, user: dict, sheet: dict) -> dict:
     if sheet.get("status") != "draft":
         raise AppError(422, "marksheet.state", "Only a draft can be submitted.")
-    await db.marksheets.update_one({"_id": sheet["_id"]}, {"$set": {"status": "submitted"}})
+    await db.marksheets.update_one(
+        {"_id": sheet["_id"]}, {"$set": {"status": "submitted", "submitted_at": _now()}}
+    )
     await _audit(db, user, "marksheet.submit", {"marksheet_id": sheet["_id"]})
+    from app.business import write_business
+
+    batch_ids = sheet.get("batch_ids") or []
+    await write_business(
+        db,
+        user,
+        action="Submitted a marksheet",
+        record=sheet.get("title") or "Marksheet",
+        href=f"/marksheets/{sheet['_id']}",
+        permission="marksheet.view",
+        collection="marksheets",
+        record_id=sheet["_id"],
+        course_id=sheet.get("course_id") or "",
+        branch_id=sheet.get("branch_id") or "",
+        batch_id=batch_ids[0] if batch_ids else "",
+    )
     return {"id": sheet["_id"], "status": "submitted"}
 
 

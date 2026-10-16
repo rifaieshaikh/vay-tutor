@@ -733,6 +733,20 @@ class CatalogPatch(BaseModel):
     timings: str | None = None
 
 
+def batch_visible(user: dict, batch: dict) -> bool:
+    """Same batch visibility the overview uses for its active-batch figure."""
+    resource = {
+        "institute_id": user["institute_id"],
+        "branch_id": batch.get("branch_id"),
+        "course_id": batch.get("course_id"),
+        "batch_id": batch.get("_id"),
+    }
+    return any(
+        allows(user["grants"], action, resource, True)
+        for action in ("dashboard.view", "student.lookup", "catalog.manage", "catalog.correct")
+    )
+
+
 @router.get("/catalog")
 async def catalog(request: Request) -> dict:
     user = await current_user(request)
@@ -745,7 +759,11 @@ async def catalog(request: Request) -> dict:
     database = db(request)
     branches = await database.branches.find({"institute_id": user["institute_id"]}).to_list(length=200)
     courses = await database.courses.find({"institute_id": user["institute_id"]}).to_list(length=200)
-    batches = await database.batches.find({"institute_id": user["institute_id"]}).to_list(length=200)
+    batches = [
+        item
+        for item in await database.batches.find({"institute_id": user["institute_id"]}).to_list(length=200)
+        if batch_visible(user, item)
+    ]
     subjects = await database.subjects.find({"institute_id": user["institute_id"]}).to_list(length=200)
     students = await database.students.find({"institute_id": user["institute_id"]}).to_list(length=500)
     papers = await database.papers.find({"institute_id": user["institute_id"]}).to_list(length=200)

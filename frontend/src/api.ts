@@ -27,7 +27,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export type Session = {
   user: { id: string; name: string; email: string; active: boolean };
-  institute: { id: string; name: string; code: string };
+  institute: { id: string; name: string; code: string; timezone?: string };
   actions: string[];
   deployment_mode: string;
 };

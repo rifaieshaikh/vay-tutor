@@ -460,8 +460,20 @@ async def cancel_import(request: Request, import_id: str) -> dict:
     return {"id": job["_id"], "state": "cancelled"}
 
 
+def _import_allowed(user: dict, batch: dict) -> bool:
+    resource = {
+        "institute_id": user["institute_id"],
+        "branch_id": batch.get("branch_id"),
+        "course_id": batch.get("course_id"),
+        "batch_id": batch["_id"],
+    }
+    return any(allows(user["grants"], action, resource, True) for action in ("marksheet.view", "marksheet.upload"))
+
+
 @router.get("/imports")
-async def list_imports(request: Request, state: str = "") -> dict:
+async def list_imports(
+    request: Request, state: str = "", branch_id: str = "", course_id: str = "", batch_id: str = ""
+) -> dict:
     user = await current_user(request)
     if not any(
         "marksheet.upload" in grant["actions"] or "marksheet.view" in grant["actions"] for grant in user["grants"]
@@ -470,20 +482,40 @@ async def list_imports(request: Request, state: str = "") -> dict:
     query: dict = {"institute_id": user["institute_id"]}
     if state:
         query["state"] = state
+    narrowed = bool(branch_id or course_id or batch_id or state == "failed")
+    allowed = await _import_batch_ids(request, user, branch_id, course_id, batch_id) if narrowed else set()
     items = []
     cursor = db(request).import_jobs.find(query).sort("created_at", -1)
     async for job in cursor:
+        if narrowed and not set(job.get("batch_ids") or []).intersection(allowed):
+            continue
         items.append(
             {
                 "id": job["_id"],
                 "filename": job.get("filename"),
                 "state": job.get("state"),
                 "created_at": job.get("created_at").isoformat() if job.get("created_at") else None,
+                "batch_ids": list(job.get("batch_ids") or []),
                 "outcomes": job.get("outcomes") or [],
                 "summary": job.get("summary"),
             }
         )
-    return {"items": items}
+    return {"items": items, "total": len(items)}
+
+
+async def _import_batch_ids(request: Request, user: dict, branch_id: str, course_id: str, batch_id: str) -> set[str]:
+    rows = await db(request).batches.find({"institute_id": user["institute_id"]}).to_list(length=500)
+    allowed = set()
+    for batch in rows:
+        if branch_id and batch.get("branch_id") != branch_id:
+            continue
+        if course_id and batch.get("course_id") != course_id:
+            continue
+        if batch_id and batch["_id"] != batch_id:
+            continue
+        if _import_allowed(user, batch):
+            allowed.add(batch["_id"])
+    return allowed
 
 
 @router.post("/marksheets")

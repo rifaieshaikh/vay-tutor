@@ -23,6 +23,7 @@ async def ensure_schema(db: AsyncIOMotorDatabase) -> None:
     await db.course_questions.create_index([("course_id", 1), ("order", 1)])
     await db.form_questions.create_index([("institute_id", 1), ("order", 1)])
     await db.students.create_index([("institute_id", 1), ("name_key", 1)])
+    await db.business_events.create_index([("institute_id", 1), ("at", -1)])
     current = await db.schema_meta.find_one({"_id": "schema"})
     if current and current.get("version", 0) >= 1:
         return

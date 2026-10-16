@@ -570,7 +570,7 @@ export function CoursePage({ session }: { session: Session }) {
 
 export function BatchesPage({ session }: { session: Session }) {
   const { catalog, error, correct, reload, setError } = useCatalog();
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const [editing, setEditing] = useState<Row | null>(null);
   const [adding, setAdding] = useState(false);
   const canCorrect = session.actions.includes("catalog.correct") || session.actions.includes("catalog.manage");
@@ -587,6 +587,7 @@ export function BatchesPage({ session }: { session: Session }) {
     if (branchId && row.branch_id !== branchId) return false;
     if (batchId && row.id !== batchId) return false;
     if (period && row.session_key !== period) return false;
+    if (params.get("active") === "1" && row.ended_on) return false;
     return true;
   }));
   const courseName = (id?: string) => catalog.courses.find((row) => row.id === id)?.name || "Not recorded";
@@ -617,7 +618,12 @@ export function BatchesPage({ session }: { session: Session }) {
           <button type="button" onClick={() => { setAdding(true); setError(""); }}>Add batch</button>
         ) : null}
       </div>
-      {batches.length === 0 ? <p>{courseId || branchId || batchId || period ? "No batches match this context." : "No batches yet."}</p> : (
+      {params.get("active") === "1" ? (
+        <p className="filter-row">
+          <button type="button" className="quiet" onClick={() => { const next = new URLSearchParams(params); next.delete("active"); setParams(next); }}>Active</button>
+        </p>
+      ) : null}
+      {batches.length === 0 ? <p>{courseId || branchId || batchId || period || params.get("active") ? "No batches match this context." : "No batches yet."}</p> : (
         <div className="table-wrap">
           <table className="people-table">
             <caption className="sr-only">Batches.</caption>

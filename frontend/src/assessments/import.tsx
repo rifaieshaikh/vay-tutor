@@ -379,7 +379,7 @@ const GROUP_CHOICES = [
   ["skip_duplicate", "Skip duplicate"],
 ] as const;
 
-export function ImportPage() {
+export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const fromList = useRef(false);
@@ -398,17 +398,27 @@ export function ImportPage() {
 
   const stateFilter = params.get("state") || "";
   const [inheritedLabel, setInheritedLabel] = useState("");
+  const [scopeLabels, setScopeLabels] = useState<Record<string, string>>({});
   const inheritedDefaults = useRef<Record<string, { mode: string; value: string }>>({});
 
+  const branchFilter = params.get("branch_id") || "";
+  const courseFilter = params.get("course_id") || "";
+  const batchFilter = params.get("batch_id") || "";
+
   async function loadHistory() {
-    const search = stateFilter ? `?state=${encodeURIComponent(stateFilter)}` : "";
-    const loaded = await api<{ items: HistoryItem[] }>(`/api/v1/imports${search}`);
+    const search = new URLSearchParams();
+    if (stateFilter) search.set("state", stateFilter);
+    if (branchFilter) search.set("branch_id", branchFilter);
+    if (courseFilter) search.set("course_id", courseFilter);
+    if (batchFilter) search.set("batch_id", batchFilter);
+    const query = search.toString();
+    const loaded = await api<{ items: HistoryItem[] }>(`/api/v1/imports${query ? `?${query}` : ""}`);
     setHistory(loaded.items);
   }
 
   useEffect(() => {
     loadHistory().catch((reason: Error) => setError(reason.message));
-  }, [stateFilter]);
+  }, [stateFilter, branchFilter, courseFilter, batchFilter]);
 
   useEffect(() => {
     const branchId = params.get("branch_id") || "";
@@ -440,6 +450,11 @@ export function ImportPage() {
       inheritedDefaults.current = next;
       setDefaults((current) => ({ ...next, ...current }));
       setInheritedLabel(labels.join(" · "));
+      setScopeLabels({
+        branch_id: branch?.label || "",
+        course_id: course?.label || "",
+        batch_id: batch?.label || "",
+      });
     }).catch(() => undefined);
     return () => {
       cancelled = true;
@@ -647,12 +662,15 @@ export function ImportPage() {
           <h1>Import history</h1>
           {stateFilter === "failed" ? <p className="page-lead">Failed imports.</p> : null}
         </div>
-        <button type="button" onClick={() => { setPreview(null); setStep(0); setError(""); setOpen(true); }}>Import marklist</button>
+        {canUpload ? <button type="button" onClick={() => { setPreview(null); setStep(0); setError(""); setOpen(true); }}>Import marklist</button> : null}
       </div>
-      {stateFilter ? (
+      {stateFilter || branchFilter || courseFilter || batchFilter ? (
         <p className="filter-row">
-          <button type="button" className="quiet" onClick={() => { const next = new URLSearchParams(params); next.delete("state"); setParams(next); }}>{stateFilter === "failed" ? "Failed" : stateFilter}</button>
-          <button type="button" className="quiet" onClick={() => { const next = new URLSearchParams(params); next.delete("state"); setParams(next); }}>Clear</button>
+          {stateFilter ? <button type="button" className="quiet" onClick={() => { const next = new URLSearchParams(params); next.delete("state"); setParams(next); }}>{stateFilter === "failed" ? "Failed" : stateFilter}</button> : null}
+          {branchFilter ? <button type="button" className="quiet" onClick={() => { const next = new URLSearchParams(params); next.delete("branch_id"); setParams(next); }}>Branch{scopeLabels.branch_id ? `: ${scopeLabels.branch_id}` : ""}</button> : null}
+          {courseFilter ? <button type="button" className="quiet" onClick={() => { const next = new URLSearchParams(params); next.delete("course_id"); setParams(next); }}>Course{scopeLabels.course_id ? `: ${scopeLabels.course_id}` : ""}</button> : null}
+          {batchFilter ? <button type="button" className="quiet" onClick={() => { const next = new URLSearchParams(params); next.delete("batch_id"); setParams(next); }}>Batch{scopeLabels.batch_id ? `: ${scopeLabels.batch_id}` : ""}</button> : null}
+          <button type="button" className="quiet" onClick={() => setParams(new URLSearchParams())}>Clear</button>
         </p>
       ) : null}
       <p>Each workbook stays in this list. Opening the import wizard does not remove earlier imports. Close the window and the history is still here.</p>
@@ -672,7 +690,7 @@ export function ImportPage() {
                   <td><span className={`chip ${item.state}`}>{STATUS_LABEL[item.state] || item.state}</span></td>
                   <td>{item.outcomes.length ? `${item.outcomes.filter((outcome) => outcome.status === "committed").length} imported, ${item.outcomes.filter((outcome) => outcome.status === "skipped").length} skipped` : "—"}</td>
                   <td>{item.summary ? `${item.summary.counts.results.insert} inserted, ${item.summary.counts.results.update} updated` : "—"}</td>
-                  <td><button type="button" className="text-button" onClick={() => api<Preview>(`/api/v1/imports/${item.id}`).then(showImport).catch((reason: Error) => setError(reason.message))}>{item.state === "committed" ? "View" : "Continue"}</button></td>
+                  <td>{canUpload ? <button type="button" className="text-button" onClick={() => api<Preview>(`/api/v1/imports/${item.id}`).then(showImport).catch((reason: Error) => setError(reason.message))}>{item.state === "committed" ? "View" : "Continue"}</button> : null}</td>
                 </tr>
               ))}
             </tbody>

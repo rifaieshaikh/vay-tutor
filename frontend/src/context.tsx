@@ -11,7 +11,7 @@ const MONTHS = [
 ];
 
 export function showsContext(pathname: string) {
-  return pathname === "/" || pathname === "/students" || pathname === "/marksheets" || pathname === "/cards" || pathname === "/views" || pathname === "/batches" || pathname.startsWith("/batches/");
+  return pathname === "/students" || pathname === "/marksheets" || pathname === "/cards" || pathname === "/views" || pathname === "/batches" || pathname.startsWith("/batches/");
 }
 
 export function contextSearch(params: URLSearchParams) {
