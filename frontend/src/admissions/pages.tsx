@@ -8,7 +8,7 @@ import { notify } from "../notify";
 import { useRecordLabel } from "../orientation";
 import { AcademicRecord, BLOOD_GROUPS, EMPTY_RECORD, GENDERS } from "../records";
 import { confirmDiscard, StudentDialog } from "../ui";
-import { AnswerFields, FormQuestions, Question } from "./questions";
+import { AnswerFields, Question } from "./questions";
 
 type CourseOption = { id: string; name: string };
 type Answer = { question_id: string; label?: string; value: string };
@@ -30,6 +30,8 @@ type Enquiry = {
   admission_id: string | null;
   stage?: string;
   next_action?: string;
+  next_on?: string;
+  follow_up_state?: string;
 };
 type Match = { id: string; display_name: string; student_code: string; phone: string };
 type Admission = {
@@ -62,6 +64,7 @@ type Admission = {
   enquiry_id: string | null;
   stage?: string;
   next_action?: string;
+  blockers?: string[];
   match_decision: string;
   match_student_id: string;
   matches: Match[];
@@ -78,6 +81,25 @@ type PreviewRow = {
 };
 
 const INTERESTS = ["High", "Medium", "Low"];
+const FOLLOW_FILTERS = [
+  { value: "due", label: "Due" },
+  { value: "overdue", label: "Overdue" },
+  { value: "today", label: "Today" },
+  { value: "upcoming", label: "Upcoming" },
+  { value: "unscheduled", label: "Unscheduled" },
+  { value: "admitted", label: "Admitted" },
+];
+
+function followUpLabel(value: string) {
+  return FOLLOW_FILTERS.find((item) => item.value === value)?.label || value;
+}
+
+function followUpWhen(item: Enquiry) {
+  if (item.follow_up_state === "admitted" || item.admission_id) return "Admitted";
+  if (!item.next_on) return "Unscheduled";
+  const timing = item.follow_up_state === "overdue" ? "Overdue" : item.follow_up_state === "today" ? "Today" : "Upcoming";
+  return `${formatDisplayDate(item.next_on)} · ${timing}`;
+}
 const BLOOD = BLOOD_GROUPS;
 
 function readable(text: string) {
@@ -104,6 +126,7 @@ export function EnquiriesPage({ session }: { session: Session }) {
   const [params, setParams] = useSearchParams();
   const followUp = params.get("follow_up") || "";
   const courseId = params.get("course_id") || "";
+  const sort = params.get("sort") || "";
   const query = params.get("q") || "";
   const page = Math.max(1, Number(params.get("page")) || 1);
   const canManage = session.actions.includes("student.manage");
@@ -115,11 +138,10 @@ export function EnquiriesPage({ session }: { session: Session }) {
   const [courses, setCourses] = useState<CourseOption[]>([]);
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [questionsOpen, setQuestionsOpen] = useState(false);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const filtered = Boolean(query || followUp || courseId);
+  const filtered = Boolean(query || followUp || courseId || sort);
 
   useEffect(() => { setDraft(query); }, [query]);
 
@@ -136,6 +158,7 @@ export function EnquiriesPage({ session }: { session: Session }) {
     if (query) searchParams.set("q", query);
     if (followUp) searchParams.set("follow_up", followUp);
     if (courseId) searchParams.set("course_id", courseId);
+    if (sort) searchParams.set("sort", sort);
     searchParams.set("page", String(page));
     let cancelled = false;
     setLoading(true);
@@ -151,7 +174,7 @@ export function EnquiriesPage({ session }: { session: Session }) {
       .finally(() => { if (!cancelled) setLoading(false); });
     api<{ courses: CourseOption[] }>("/api/v1/catalog").then((catalog) => { if (!cancelled) setCourses(coursesOf(catalog)); }).catch(() => undefined);
     return () => { cancelled = true; };
-  }, [followUp, courseId, query, page, revision]);
+  }, [followUp, courseId, sort, query, page, revision]);
 
   return (
     <section className="panel wide">
@@ -163,18 +186,14 @@ export function EnquiriesPage({ session }: { session: Session }) {
         </div>
         {canManage ? (
           <div className="actions">
-            <button type="button" onClick={() => setImporting(true)}>Import</button>
+            <button type="button" className="secondary" onClick={() => setImporting(true)}>Import</button>
             <button type="button" onClick={() => setAdding(true)}>Add enquiry</button>
           </div>
         ) : null}
       </div>
-      {canEditQuestions ? (
-        <p className="actions">
-          <button type="button" className="secondary" aria-expanded={questionsOpen} onClick={() => setQuestionsOpen((open) => !open)}>Form questions</button>
-        </p>
-      ) : null}
-      {questionsOpen ? <FormQuestions form="enquiry" canEdit={canEditQuestions} /> : null}
+      {canEditQuestions ? <p className="meta"><Link to="/forms">Edit questions in Forms</Link></p> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
+      {error ? <button type="button" className="secondary" onClick={() => setRevision((value) => value + 1)}>Try again</button> : null}
       <form className="filter-row" onSubmit={(event) => { event.preventDefault(); setParams(withParam(params, "q", draft.trim())); }}>
         <label>Search
           <input value={draft} aria-label="Search enquiries" onChange={(event) => setDraft(event.target.value)} />
@@ -182,7 +201,13 @@ export function EnquiriesPage({ session }: { session: Session }) {
         <label>Follow-up
           <select aria-label="Follow-up" value={followUp} onChange={(event) => setParams(withParam(params, "follow_up", event.target.value))}>
             <option value="">Any</option>
-            <option value="due">Due</option>
+            {FOLLOW_FILTERS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+          </select>
+        </label>
+        <label>Sort
+          <select aria-label="Sort" value={sort} onChange={(event) => setParams(withParam(params, "sort", event.target.value))}>
+            <option value="">Newest</option>
+            <option value="next_on">Next follow-up</option>
           </select>
         </label>
         <label>Course
@@ -194,7 +219,8 @@ export function EnquiriesPage({ session }: { session: Session }) {
       </form>
       <p className="filter-row">
         <span>{loading ? "Loading enquiries…" : `${total} enquir${total === 1 ? "y" : "ies"}`}</span>
-        {followUp ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "follow_up", ""))}>Due</button> : null}
+        {followUp ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "follow_up", ""))}>{followUpLabel(followUp)}</button> : null}
+        {sort ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "sort", ""))}>Next follow-up</button> : null}
         {courseId ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "course_id", ""))}>{courses.find((item) => item.id === courseId)?.name || "Course"}</button> : null}
         {query ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "q", ""))}>{query}</button> : null}
         {filtered ? <button type="button" className="quiet" onClick={() => setParams(new URLSearchParams())}>Clear</button> : null}
@@ -205,7 +231,7 @@ export function EnquiriesPage({ session }: { session: Session }) {
           <table className="people-table">
             <caption className="sr-only">Enquiries</caption>
             <thead>
-              <tr><th>Name</th><th>WhatsApp</th><th>Course</th><th>Interest</th><th>Stage</th><th>Next</th></tr>
+              <tr><th>Name</th><th>Contact</th><th>Course</th><th>Interest</th><th>Next follow-up</th><th>Stage</th></tr>
             </thead>
             <tbody>
               {items.map((item) => (
@@ -214,8 +240,8 @@ export function EnquiriesPage({ session }: { session: Session }) {
                   <td>{item.whatsapp || "Not recorded"}</td>
                   <td>{item.course_name || "Not recorded"}</td>
                   <td>{item.interest || "Not recorded"}</td>
-                  <td>{item.stage || (item.admission_id ? "Admitted" : "Enquiry")}</td>
-                  <td>{item.admission_id ? <Link to={`/students/admissions/${item.admission_id}`}>Open admission</Link> : readable(item.next_action || "Follow up")}</td>
+                  <td>{followUpWhen(item)}</td>
+                  <td>{item.admission_id ? <Link to={`/students/admissions/${item.admission_id}`}>Admitted</Link> : (item.stage || "Enquiry")}</td>
                 </tr>
               ))}
             </tbody>
@@ -245,6 +271,7 @@ export function EnquiryPage({ session }: { session: Session }) {
   const [error, setError] = useState("");
   const [admitting, setAdmitting] = useState(false);
   const [savingFollow, setSavingFollow] = useState(false);
+  const [addingFollow, setAddingFollow] = useState(false);
   const [follow, setFollow] = useState({ at: "", note: "", interest: "", next_on: "" });
   const followDirty = Boolean(follow.at || follow.note || follow.interest || follow.next_on);
   useRecordLabel(enquiry?.name || "");
@@ -267,6 +294,7 @@ export function EnquiryPage({ session }: { session: Session }) {
     try {
       await api(`/api/v1/enquiries/${enquiryId}/follow-ups`, { method: "POST", body: JSON.stringify(follow) });
       setFollow({ at: "", note: "", interest: "", next_on: "" });
+      setAddingFollow(false);
       notify("Saved the follow-up.");
       load();
     } catch (reason) {
@@ -303,7 +331,7 @@ export function EnquiryPage({ session }: { session: Session }) {
         </div>
         <div className="actions">
           {canManage ? <button type="button" onClick={() => setEditing(true)}>Edit</button> : null}
-          {enquiry.admission_id ? <Link className="button" to={`/students/admissions/${enquiry.admission_id}`}>Open admission</Link> : canManage ? <button type="button" disabled={admitting} onClick={() => void convert()}>{admitting ? "Admitting…" : "Admit"}</button> : null}
+          {enquiry.admission_id ? <Link className="button" to={`/students/admissions/${enquiry.admission_id}`}>Open admission</Link> : canManage ? <button type="button" disabled={admitting} onClick={() => void convert()}>{admitting ? "Creating…" : "Create admission"}</button> : null}
         </div>
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
@@ -337,7 +365,10 @@ export function EnquiryPage({ session }: { session: Session }) {
           </table>
         </div>
       )}
-      {canManage ? (
+      {canManage && !enquiry.admission_id && !addingFollow ? (
+        <p className="actions"><button type="button" onClick={() => { setAddingFollow(true); setFollow((current) => ({ ...current, at: current.at || new Date().toISOString().slice(0, 10) })); }}>Add follow-up</button></p>
+      ) : null}
+      {canManage && !enquiry.admission_id && addingFollow ? (
         <form className="form-grid" onSubmit={addFollow}>
           <label>Date
             <input type="date" value={follow.at} required onChange={(event) => setFollow({ ...follow, at: event.target.value })} />
@@ -354,7 +385,10 @@ export function EnquiryPage({ session }: { session: Session }) {
           <label>Next follow-up
             <input type="date" value={follow.next_on} onChange={(event) => setFollow({ ...follow, next_on: event.target.value })} />
           </label>
-          <div className="dialog-actions span-2"><button type="submit" disabled={savingFollow}>{savingFollow ? "Saving…" : "Add follow-up"}</button></div>
+          <div className="dialog-actions span-2">
+            <button type="button" className="quiet" onClick={() => { if (confirmDiscard(followDirty)) { setAddingFollow(false); setFollow({ at: "", note: "", interest: "", next_on: "" }); } }}>Cancel</button>
+            <button type="submit" disabled={savingFollow}>{savingFollow ? "Saving…" : "Save follow-up"}</button>
+          </div>
         </form>
       ) : null}
       {editing ? <EnquiryForm courses={courses} initial={enquiry} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); }} /> : null}
@@ -389,7 +423,7 @@ function EnquiryForm({ courses, initial, onClose, onSaved }: { courses: CourseOp
 
   useEffect(() => {
     if (initial) return;
-    api<{ items: Question[] }>("/api/v1/form-questions?form=enquiry").then((result) => setQuestions(result.items)).catch(() => setQuestions([]));
+    api<{ items: Question[] }>("/api/v1/form-questions?form=enquiry").then((result) => setQuestions(result.items)).catch((reason: Error) => setError(reason.message || "Questions could not be loaded."));
   }, [initial]);
 
   async function save(event: FormEvent) {
@@ -474,7 +508,6 @@ export function AdmissionsPage({ session }: { session: Session }) {
   const [pages, setPages] = useState(1);
   const [draft, setDraft] = useState(query);
   const [importing, setImporting] = useState(false);
-  const [questionsOpen, setQuestionsOpen] = useState(false);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -528,13 +561,9 @@ export function AdmissionsPage({ session }: { session: Session }) {
           </div>
         ) : null}
       </div>
-      {canEditQuestions ? (
-        <p className="actions">
-          <button type="button" className="secondary" aria-expanded={questionsOpen} onClick={() => setQuestionsOpen((open) => !open)}>Form questions</button>
-        </p>
-      ) : null}
-      {questionsOpen ? <FormQuestions form="admission" canEdit={canEditQuestions} /> : null}
+      {canEditQuestions ? <p className="meta"><Link to="/forms">Edit questions in Forms</Link></p> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
+      {error ? <button type="button" className="secondary" onClick={() => setRevision((value) => value + 1)}>Try again</button> : null}
       <form className="filter-row" onSubmit={(event) => { event.preventDefault(); setParams(withParam(params, "q", draft.trim())); }}>
         <label>Search
           <input value={draft} aria-label="Search admissions" onChange={(event) => setDraft(event.target.value)} />
@@ -573,7 +602,7 @@ export function AdmissionsPage({ session }: { session: Session }) {
                   <td>{item.phone}</td>
                   <td>{item.course_name || "Not recorded"}</td>
                   <td>{item.stage || (item.status === "converted" ? "Enrolled" : "Open")}</td>
-                  <td>{item.student_id ? <Link to={`/students/${item.student_id}`}>Open student</Link> : "Enroll in a batch"}</td>
+                  <td>{item.student_id ? <Link to={`/students/${item.student_id}`}>Open student</Link> : (item.next_action || "Choose a batch")}</td>
                 </tr>
               ))}
             </tbody>
@@ -620,7 +649,7 @@ export function AdmissionPage({ session }: { session: Session }) {
     if (canManage) {
       api<{ branches: Option[]; batches: Option[] }>("/api/v1/students/options?manage=true").then(setOptions).catch((reason: Error) => setError(reason.message || "Branches could not be loaded."));
     }
-    api<{ items: Question[] }>("/api/v1/form-questions?form=admission").then((result) => setBusinessQuestions(result.items)).catch(() => setBusinessQuestions([]));
+    api<{ items: Question[] }>("/api/v1/form-questions?form=admission").then((result) => setBusinessQuestions(result.items)).catch((reason: Error) => setError(reason.message || "Questions could not be loaded."));
   }, [admissionId]);
 
   function enrollmentGaps() {
@@ -668,7 +697,7 @@ export function AdmissionPage({ session }: { session: Session }) {
         <div>
           <p className="eyebrow">Admission</p>
           <h1>{admission.name}</h1>
-          <p className="meta">{admission.course_name} · {admission.stage || (open ? "Open" : "Enrolled")} · {admission.next_action || (open ? "Enroll in a batch" : "Open the student")}</p>
+          <p className="meta">{admission.course_name} · {admission.stage || (open ? "Open" : "Enrolled")} · {admission.next_action || (open ? "Choose a batch" : "Open the student")}</p>
         </div>
         <div className="actions">
           {admission.enquiry_id ? <Link to={`/students/enquiries/${admission.enquiry_id}`}>Open enquiry</Link> : null}
@@ -678,6 +707,23 @@ export function AdmissionPage({ session }: { session: Session }) {
         </div>
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
+      {open ? (
+        <div>
+          <h2>Readiness</h2>
+          {(admission.blockers || []).length ? (
+            <>
+              <ul>
+                {(admission.blockers || []).map((item) => <li key={item}>{item}</li>)}
+              </ul>
+              {canManage ? <button type="button" className="secondary" onClick={() => setEditing(true)}>Complete details</button> : null}
+            </>
+          ) : admission.next_action === "Resolve identity" ? (
+            <p>Resolve identity before enrollment. A student with this name and contact number is already on file.</p>
+          ) : (
+            <p>Ready to choose a batch.</p>
+          )}
+        </div>
+      ) : null}
       {editing ? (
         <AdmissionForm
           courses={courses}
@@ -866,7 +912,7 @@ function AdmissionForm({ courses, initial, onSaved, onCancel }: { courses: Cours
   }, [courseId]);
 
   useEffect(() => {
-    api<{ items: Question[] }>("/api/v1/form-questions?form=admission").then((result) => setBusinessQuestions(result.items)).catch(() => setBusinessQuestions([]));
+    api<{ items: Question[] }>("/api/v1/form-questions?form=admission").then((result) => setBusinessQuestions(result.items)).catch((reason: Error) => setError(reason.message || "Questions could not be loaded."));
   }, []);
 
   function updateRecord(index: number, key: keyof AcademicRecord, value: string) {

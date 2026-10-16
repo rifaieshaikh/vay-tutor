@@ -47,12 +47,12 @@ Context means the branch, course, period, and batch bar. It appears on Dashboard
 | Enquiries | `/students/enquiries` | Find people who are not yet an admission | Lookup to read, manage to add | Sidebar, dashboard `follow_up=due` | Add enquiry | Enquiry record | Sidebar and an Enquiry / Admission / Student strip both navigate. Title says “Enquiry”. Search is a separate submit and is not kept in the address. Dashboard course and due filters have no control on the page. Question editing sits above the list. No pager, though the API pages. |
 | Add or edit enquiry | Dialog on the register or record | Record interest | Manage | Add enquiry, or Edit | Save | Stay on the list or record | Backdrop, Escape, and Cancel discard edits with no check. Required questions are marked “required to admit”, which is a later step. |
 | Import enquiries | Dialog on the register | Create many enquiries from a workbook | Manage | Import | Save the preview | Enquiry register | No initial focus, containment, or return of focus. |
-| Enquiry | `/students/enquiries/:enquiryId` | Follow up or admit one person | Lookup; manage to change | Name in the register | Add follow-up, or Admit when ready | Admission, after Admit | The strip remains. Breadcrumb says “Enquiry”, not the name, and both “Admissions” and “Enquiries” go to the same list. Follow-up dates are raw. The API can delete a follow-up; the page cannot. |
+| Enquiry | `/students/enquiries/:enquiryId` | Follow up or create an admission | Lookup; manage to change | Name in the register | Add follow-up, or Create admission | Admission, or Open admission once it exists | The strip remains. Breadcrumb says “Enquiry”, not the name, and both “Admissions” and “Enquiries” go to the same list. Follow-up dates are raw. The API can delete a follow-up; the page cannot. |
 | Enquiry questions | Dialog on the enquiry register | Add a question to the enquiry form | Catalog manage or correct | Add question | Save | Enquiry register | Form setup is on the working register. |
 | Admissions | `/students/admissions` | Find open and enrolled admissions | Lookup; manage to add | Sidebar, dashboard `status=open` | Add admission | Admission record | Same strip, hidden course filter, submit-only search, and question editor as enquiries. |
 | Add or edit admission | Dialog on the register or record | Record the person and course | Manage | Add admission, or Edit while open | Save | Admission record | One long form. Optional profile fields and answers required only at enrollment look the same. Backdrop and Escape discard edits. A converted admission cannot be edited; the server says to edit the student. |
 | Import admissions | Dialog on the register | Create admissions, and resolve people who already match | Manage | Import | Save after each match is attach or create | Admission register | Same focus gap as enquiry import. A matching name and phone blocks the row until the operator chooses. |
-| Admission | `/students/admissions/:admissionId` | Finish requirements and enroll | Lookup; manage to enroll | Register, or Admit from an enquiry | Continue, once branch and batch are chosen | Student record | Enrollment fields sit under the whole biography. Missing required answers appear only after Continue. Match confirmation is a second dialog. Sidebar highlight is correct; the breadcrumb title is “Admission”. |
+| Admission | `/students/admissions/:admissionId` | Finish requirements and enroll | Lookup; manage to enroll | Register, or Create admission from an enquiry | Enroll, once branch and batch are chosen | Student record | Enrollment fields sit under the whole biography. Missing required answers appear only after Continue. Match confirmation is a second dialog. Sidebar highlight is correct; the breadcrumb title is “Admission”. |
 | Possible duplicate | Dialog on the admission | Attach this course to an existing student, or create one | Manage | Continue when name and phone match | Add to this student, or Create a new student | Student record | Cancel returns to the admission with branch and batch still selected. The page does not explain which fields will be left unchanged on attach. |
 
 ### Students
@@ -62,7 +62,7 @@ Context means the branch, course, period, and batch bar. It appears on Dashboard
 | Students | `/students` | Find an enrolled person | Lookup | Sidebar, or return from a record | Open a student | Student record | The people strip repeats the sidebar. Search, branch, course, and batch live in a Filters dialog and also in the context bar. |
 | Sort students | Dialog | Choose sort field and direction | Lookup | Sort icon | Apply | Register | Icon-only, which is acceptable for this utility. |
 | Merge students | Dialog on the register | Keep one identity and archive the other | Manage | Merge students | Confirm the merge | Register | High-consequence action uses the same button weight as routine actions. |
-| Student | `/students/:studentId` | Profile, enrollments, and published progress | Lookup; manage to edit or enroll; card grant for progress | Directory, batch, or admission | Edit, or open the relevant section | Admission, enquiry, batch, marksheets, card, or views | Students in the sidebar does not stay highlighted, because that item is exact-match only so it will not light up on enquiries. Edit, add enrollment, and the card are icon-only. Personal, Academics, and History are real section tabs and stay. Back to the batch checks unsaved edits; other navigation does not. |
+| Student | `/students/:studentId` | Profile, enrollments, admissions, and published progress | Lookup; manage to edit or enroll; card grant for progress | Directory, batch, or admission | Edit, or open the relevant section | Admission, enquiry, batch, marksheets, card, or views | Students in the sidebar does not stay highlighted, because that item is exact-match only so it will not light up on enquiries. Edit, add enrollment, and the card are icon-only. Personal, Academics, and History are real section tabs and stay. Back to the batch checks unsaved edits; other navigation does not. |
 | Edit student | On the record, not a dialog | Correct profile, address, academic records, and answers | Manage, and not on History | Edit | Save | The same section | Contact and address are hidden from staff who cannot manage the student. |
 | Add enrollment | Dialog | Enroll this student in another open batch | Manage on that batch | Add enrollment | Save | Academics | Empty search is a separate problem on the batch page. |
 | Edit enrollment dates | Dialog | Set started and ended dates | Manage on that enrollment | Edit dates | Save | Academics | Ending a date makes the enrollment historical. It is not labeled as the transfer path. |
@@ -80,7 +80,7 @@ Context means the branch, course, period, and batch bar. It appears on Dashboard
 | Add batch on a branch | Dialog | Open a cohort for an offered course | Catalog | Add batch | Save | Batch | |
 | Courses | `/courses` | List courses | Lookup; catalog to add | Sidebar | Add course | Course | |
 | Add course | Dialog | Name a course | Catalog | Add course | Save | Course list | |
-| Course | `/courses/:courseId` | Subjects, papers, and course questions | Lookup; catalog to edit | Courses, or a batch curriculum link | Add subject or paper | Subject’s papers, or batches of this course | Admission questions are edited here as well as on the admissions register. |
+| Course | `/courses/:courseId` | Subjects, papers, and a link to course questions | Lookup; catalog to edit | Courses, or a batch curriculum link | Add subject or paper | Subject’s papers, batches of this course, or Forms | Admission questions are edited here as well as on the admissions register. |
 | Add subject, paper, or edit item | Dialogs | Change the curriculum | Catalog | Add or edit | Save | Course | |
 | Batches | `/batches` | List cohorts in the current context | Lookup; catalog to add | Sidebar | Add batch | Batch | Context bar and any local batch filters must not both be treated as the scope. The filter contract is DES-15. |
 | Add batch | Dialog | Create a cohort under a branch offering | Catalog | Add batch | Save | Batch list | |
@@ -124,10 +124,11 @@ Context means the branch, course, period, and batch bar. It appears on Dashboard
 | Add or remove grant | Dialogs | Change what this person can do | User manage | Add grant, or remove | Save or confirm | User | A grant is not a teaching assignment. |
 | Audit | `/audit` | Read recorded actions | Audit view | Sidebar | Filter | A related record only where the event already links one | Search, action, and date are in a dialog. |
 | Settings | `/settings` | Bands, ranking, blank-mark policy, and dangerous operations | Dashboard view; catalog to edit policy | Sidebar | Edit settings, or factory reset | Settings | Preferences, Academic policy, and Operations are section tabs and stay. Factory reset keeps its typed confirmation. |
+| Forms | `/forms` | Enquiry, admission, and course questions | Catalog manage or correct | Sidebar, or the link on an enquiry, admission, or course | Add question | The same page, with a preview of the enquiry or admission form | |
 
 ## Navigation
 
-One sidebar item is the way into each register. The Enquiry / Admission / Student strip on those registers and on enquiry and admission records is a second way into the same three URLs. DES-10 removes that strip. Section tabs inside a record stay: student Personal / Academics / History, branch Details / Courses / Students, marksheet Results / Details, access Users / Roles, settings Preferences / Academic policy / Operations, and the level controls on reports.
+One sidebar item is the way into each register. The Enquiry / Admission / Student strip on those registers and on enquiry and admission records is a second way into the same three URLs. DES-10 removes that strip. Section tabs inside a record stay: student Personal, Previous education, Enrollments, Progress, Admissions, and Activity; branch Details / Courses / Students; marksheet Results / Details; access Users / Roles; settings Preferences / Academic policy / Operations; and the level controls on reports. Forms is the administration page for questions.
 
 ### Destinations
 
@@ -148,8 +149,9 @@ One sidebar item is the way into each register. The Enquiry / Admission / Studen
 | Users and Access | `/access` | `/access/:userId` |
 | Audit | `/audit` | None |
 | Settings | `/settings` | None |
+| Forms | `/forms` | None |
 
-Highlight the item whose path is this page or is the parent of this record, using the exceptions in the table. Today, Students is exact-match only, so a student record highlights nothing. Enquiry and admission records already highlight the right item.
+Highlight the item whose path is this page or is the parent of this record. Students highlights on `/students` and on a student record, and stays off Enquiries and Admissions. Enquiry and admission records highlight their own sidebar item.
 
 ### Breadcrumbs and titles
 
@@ -180,11 +182,27 @@ An enquiry is interest in a course. An admission is the decision to enroll that 
 
 Staff do not re-enter a value the previous record already has. Enquiry conversion copies name, WhatsApp number as the contact number, course, present institution into an academic record’s institution, and any answer whose question also exists on the admission form. The admission then asks only for what is still empty. Attaching to an existing student fills only empty profile fields.
 
+### Field placement
+
+Built-in fields stay where they are collected. Extra questions are configured in Administration → Forms.
+
+| Information | Collected on | Shown later | Required |
+|---|---|---|---|
+| Name, WhatsApp, present institution, course, interest, references, other details | Enquiry | Copied into the admission and, for the institution, into previous education | Name to save. A required enquiry question before Create admission. |
+| Follow-up date, discussion, interest, next date | Enquiry, through Add follow-up | The enquiry’s follow-up list. The register shows the latest next date. | Date and discussion to save a follow-up. |
+| Name, contact number, date of birth, gender, blood group, email, address, guardian | Admission | The student Personal section. Empty fields are filled when an admission attaches to an existing student. | Name, contact number, and course to save. |
+| Previous education | Admission | Student → Previous education. This is not current performance. | Optional. |
+| General questions | Enquiry, admission, or both, in the section chosen in Forms | Admission answers on the admission and on Student → Admissions. A question marked for the student profile also appears under Personal. | Optional, required to create the admission, or required to enroll. |
+| Course questions | The admission for that course | That admission, and the course block on Student → Admissions | Optional, required to create the admission, or required to enroll. |
+| Branch and batch | Enrollment | Student → Enrollments, and the Students register summary | Both, and an open batch, to enroll. |
+
+Yes/No stores Yes, No, or Not answered. A consent checkbox stores Yes only when ticked. A blank consent is not a No. Dropdown options are one per line, so an option may contain a comma. Removing a question that already has answers retires it: new forms hide it, and the stored answer keeps its label. A newly required question applies to the next save or enrollment. It does not reopen an admission that is already enrolled. Follow-up timing uses the institute date, which is the UTC calendar date: overdue is before that date, today is that date, and upcoming is after it. Due remains the dashboard queue: not yet admitted, and unscheduled or due today or earlier. After Create admission, the enquiry keeps its follow-up history and does not offer another follow-up.
+
 ### Stages
 
 | Stage | Stored as | What staff can do | Required before the next step | Validation | Next |
 |---|---|---|---|---|---|
-| Enquiry | No `admission_id` | Add, edit, import, record a follow-up, admit | Name. WhatsApp and every required enquiry question before Admit. Course is optional and, once set, must exist. | Name present. Interest is High, Medium, Low, or blank. | Admission |
+| Enquiry | No `admission_id` | Add, edit, import, record a follow-up, create an admission | Name. WhatsApp and every required enquiry question before Create admission. Course is optional and, once set, must exist. | Name present. Interest is High, Medium, Low, or blank. | Admission |
 | Follow-up | Rows on the enquiry | Add a contact. The latest row drives the queue. | Date and what was discussed. Interest and next date are optional. | Dates are real dates. Interest is the same three values or blank. | Stay on the enquiry. Due when there is no follow-up, no next date, or the next date is today or earlier. |
 | Admitted | Enquiry has `admission_id`. Admission status `open`. | Edit the admission. Enroll. Open the enquiry. | Name, phone, and course to save. To enroll: branch, open batch of that course, required admission questions, required course questions. | Phone present. Email, PIN, date of birth, gender, and blood group follow the current field rules when filled. | Student |
 | Enrolled | Admission status `converted`, with `student_id` and `enrollment_id` | Open the student or the batch. Edit the student, not the admission. | Nothing further on the admission. | A second convert returns the same student. | Student record |
@@ -193,7 +211,7 @@ There is no cancelled, lost, or closed enquiry. Recording a future next date is 
 
 ### Routes
 
-**New enquiry.** Enquiries → Add enquiry → Save → open the row → record a follow-up when contact happens → Admit. Admit fails with the WhatsApp message when the number is empty, or with the question message when a required enquiry answer is empty. The new admission opens with the copied fields. The operator completes what enrollment requires and chooses branch and batch.
+**New enquiry.** Enquiries → Add enquiry → Save → open the row → Add follow-up when contact happens → Create admission. Create admission fails with the WhatsApp message when the number is empty, or with the question message when a required enquiry answer is empty. The new admission opens with the copied fields. The operator completes what enrollment requires and chooses branch and batch.
 
 **Direct admission.** Admissions → Add admission, which opens `/students/admissions/new`. There is no enquiry. Course, name, and phone are required to save. Enrollment uses Enroll.
 
@@ -201,7 +219,7 @@ There is no cancelled, lost, or closed enquiry. Recording a future next date is 
 
 **Incomplete admission.** Save is allowed without date of birth, address, academic detail, or required answers. Enroll lists every missing requirement before the request. The page keeps the branch and batch the operator chose. Changing either clears the previous gap list.
 
-**Duplicate attempt.** Admit on an enquiry that already has an admission opens that admission. Continue on a converted admission opens the student. Neither writes a second record.
+**Duplicate attempt.** Create admission on an enquiry that already has an admission opens that admission. Enroll on a converted admission opens the student. Neither writes a second record.
 
 **Unavailable batch.** The batch must belong to the selected branch and the admission’s course, and it must have no ended date. Otherwise Enroll stops with the context or closed-batch message and the admission stays open. A closed batch says “This batch is closed. New enrollments stay out.”
 
@@ -245,7 +263,7 @@ Open Dashboard → open the queue. Enquiries awaiting follow-up opens Enquiries 
 
 ## What the redesign changed
 
-The people strip is gone. Students stays highlighted on a student record and does not highlight on Enquiries or Admissions. Record titles use the person’s name. Search on the registers is inline and kept in the address. The context bar is the only branch, course, period, and batch control on the pages that show it. Enroll lists missing requirements before it sends. Unsaved enquiry, admission, student, and score edits ask before a sidebar link, Cancel, or Escape discards them. Batch enrollment and teacher assignment open from Add a student and Add a teacher. Sign-in shows email and password first. An authentication code appears only when the server requires it. The friction column above is the audit of the earlier screens.
+The people strip is gone. Students stays highlighted on a student record and does not highlight on Enquiries or Admissions. Record titles use the person’s name. Search on the registers is inline and kept in the address. The context bar is the only branch, course, period, and batch control on the pages that show it. Enroll lists missing requirements before it sends. Unsaved enquiry, admission, student, and score edits ask before a sidebar link, Cancel, or Escape discards them. Batch enrollment and teacher assignment open from Add a student and Add a teacher. Sign-in shows email and password first. An authentication code appears only when the server requires it. Questions are configured in Forms. Create admission is the enquiry action, and an open admission shows its readiness instead of a blanket enroll label. The friction column above is the audit of the earlier screens.
 
 ## Acceptance walk
 

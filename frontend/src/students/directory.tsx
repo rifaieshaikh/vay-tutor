@@ -2,8 +2,8 @@ import { FormEvent, useEffect, useState } from "react";
 import { Link, Navigate, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
 import { notify } from "../notify";
-import { Icon, StudentDialog } from "../ui";
-import { StudentEnrollment, StudentFilters, recordedDate, recordedName, recordedStatus, studentRecordHref } from "./links";
+import { StudentDialog } from "../ui";
+import { StudentEnrollment, StudentFilters, recordedName, studentRecordHref } from "./links";
 
 type Row = { id: string; name: string; archived?: boolean; student_code?: string };
 type Catalog = { students: Row[] };
@@ -48,6 +48,22 @@ const SORT_LABELS: Record<SortField, string> = {
   ended: "Until",
   status: "Status",
 };
+
+function enrollmentSummary(rows: StudentEnrollment[]) {
+  const current = rows.filter((item) => !item.ended_on && item.status !== "historical");
+  const shown = current.length ? current : rows;
+  if (!shown.length) return "No enrollment";
+  if (shown.length === 1) {
+    return [shown[0].branch_name, shown[0].course_name, shown[0].batch_name].filter(Boolean).join(" · ") || "Enrollment recorded";
+  }
+  return `${shown.length} current enrollments`;
+}
+
+function personStatus(rows: StudentEnrollment[]) {
+  if (!rows.length) return "No enrollment";
+  if (rows.some((item) => !item.ended_on && item.status !== "historical")) return "Active";
+  return "Ended";
+}
 
 function readSort(value: string | null): SortField {
   return SORT_FIELDS.includes(value as SortField) ? value as SortField : "name";
@@ -389,38 +405,32 @@ export function StudentsPage({ session }: { session: Session }) {
             <caption className="sr-only">{total} student{total === 1 ? "" : "s"}. Page {page} of {pages}. Sorted by {SORT_LABELS[sort]}, {direction === "desc" ? "descending" : "ascending"}.</caption>
             <thead>
               <tr>
-                {SORT_FIELDS.map((field) => (
-                  <th key={field} aria-sort={sort === field ? (direction === "desc" ? "descending" : "ascending") : "none"}>
-                    <button type="button" className="sort" onClick={() => chooseSort(field)}>{SORT_LABELS[field]}</button>
-                  </th>
-                ))}
+                <th aria-sort={sort === "name" ? (direction === "desc" ? "descending" : "ascending") : "none"}>
+                  <button type="button" className="sort" onClick={() => chooseSort("name")}>Name</button>
+                </th>
+                <th aria-sort={sort === "code" ? (direction === "desc" ? "descending" : "ascending") : "none"}>
+                  <button type="button" className="sort" onClick={() => chooseSort("code")}>Student ID</button>
+                </th>
+                <th>Enrollment</th>
+                <th>Status</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {students.map((row) => {
-                const enrollments: Array<StudentEnrollment | null> = row.enrollments.length ? row.enrollments : [null];
-                return enrollments.map((item, index) => (
-                  <tr key={`${row.id}-${item?.id || index}`}>
-                    {index === 0 ? <td rowSpan={enrollments.length}><Link to={studentRecordHref(row.id, path, applied)}>{recordedName(row.display_name)}</Link></td> : null}
-                    {index === 0 ? <td className="nowrap" rowSpan={enrollments.length}>{row.student_code}</td> : null}
-                    <td>{recordedName(item?.branch_name)}</td>
-                    <td>{recordedName(item?.course_name)}</td>
-                    <td>{recordedName(item?.batch_name)}</td>
-                    <td>{recordedDate(item?.started_on)}</td>
-                    <td>{recordedDate(item?.ended_on)}</td>
-                    <td>{recordedStatus(item?.status)}</td>
-                    {index === 0 ? (
-                      <td rowSpan={enrollments.length}>
-                        <div className="icon-actions">
-                          {row.actions?.edit ? <Link to={studentRecordHref(row.id, path, applied, true)} aria-label={`Edit ${row.display_name}`} title="Edit"><Icon name="edit" /></Link> : null}
-                          {row.actions?.card ? <Link to={cardHref(row.id)} aria-label={`View progress card for ${row.display_name}`} title="View progress card"><Icon name="card" /></Link> : null}
-                        </div>
-                      </td>
-                    ) : null}
-                  </tr>
-                ));
-              })}
+              {students.map((row) => (
+                <tr key={row.id}>
+                  <td><Link to={studentRecordHref(row.id, path, applied)}>{recordedName(row.display_name)}</Link></td>
+                  <td className="nowrap">{row.student_code}</td>
+                  <td>{enrollmentSummary(row.enrollments)}</td>
+                  <td>{personStatus(row.enrollments)}</td>
+                  <td>
+                    <div className="actions">
+                      {row.actions?.edit ? <Link to={studentRecordHref(row.id, path, applied, true)}>Edit</Link> : null}
+                      {row.actions?.card ? <Link to={cardHref(row.id)}>Progress card</Link> : null}
+                    </div>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>

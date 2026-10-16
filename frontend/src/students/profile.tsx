@@ -12,7 +12,7 @@ import { confirmDiscard, moveTab, StudentDialog as Dialog } from "../ui";
 import { StudentEnrollment, recordedDate, recordedName, recordedStatus, safeBatchWorkspace, safeStudentList } from "./links";
 type CourseProfile = { course_id: string; course_name: string; answers: { question_id: string; label?: string; value: string; answer_type?: string; choices?: string[] }[] };
 type BusinessAnswer = { question_id: string; label?: string; value: string };
-type FormQuestion = { id: string; label: string; answer_type: string; choices: string[]; required: boolean };
+type FormQuestion = { id: string; label: string; answer_type: string; choices: string[]; required: boolean; on_profile?: boolean };
 type Alias = { id: string; display_name: string };
 type StudentActions = { edit: boolean; card: boolean; enroll: boolean; contact?: boolean };
 type SourceAdmission = { id: string; enquiry_id: string | null; course_name: string; status: string };
@@ -72,7 +72,7 @@ type ProfileValues = {
   board: string;
   passing_year: string;
 };
-type StudentTab = "personal" | "academics" | "history";
+type StudentTab = "personal" | "education" | "enrollments" | "progress" | "admissions" | "history";
 type Conflict = { proposed: ProfileValues; current: ProfileValues; version: number };
 type Performance = { percentage: number | null; band: string | null; band_name?: string | null; band_place?: string | null };
 type ProgressCard = { empty_reason: string | null; performance: Performance };
@@ -219,31 +219,6 @@ function Portrait({ name, studentId, photoId }: { name: string; studentId: strin
     <div className="student-photo" role="img" aria-label={shown ? `Photo of ${name}` : `Photo space for ${name}`}>
       {shown && photoId ? <img src={`/api/v1/students/${studentId}/photo?v=${photoId}`} alt="" onError={() => setFailed(true)} /> : initials(name)}
     </div>
-  );
-}
-
-function Icon({ name }: { name: "edit" | "card" | "add" }) {
-  const common = { viewBox: "0 0 24 24", width: 16, height: 16, fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
-  if (name === "edit") {
-    return (
-      <svg {...common}>
-        <path d="M4 20h4l10-10-4-4L4 16v4z" />
-        <path d="M13 7l4 4" />
-      </svg>
-    );
-  }
-  if (name === "add") {
-    return (
-      <svg {...common}>
-        <path d="M12 5v14M5 12h14" />
-      </svg>
-    );
-  }
-  return (
-    <svg {...common}>
-      <rect x="5" y="3" width="14" height="18" rx="2" />
-      <path d="M8 8h8M8 12h8M8 16h5" />
-    </svg>
   );
 }
 
@@ -526,10 +501,10 @@ export function StudentPage() {
     savingRef.current = true;
     setSaveState("saving");
     setError("");
-    const fields = tab === "academics" ? [] : [...CONTACT_ORDER, ...ADDRESS_ORDER];
+    const fields = tab === "personal" ? [...CONTACT_ORDER, ...ADDRESS_ORDER] : [];
     const body: Record<string, unknown> = { display_name: displayName, edit_version: record.edit_version };
     for (const key of fields) body[key] = draft[key];
-    if (tab === "academics") {
+    if (tab === "education" || tab === "admissions") {
       body.academic_records = records;
       body.course_profiles = profiles.map((item) => ({
         course_id: item.course_id,
@@ -768,6 +743,9 @@ export function StudentPage() {
   }
 
   const shown = record && record.id === studentId ? record : null;
+  const storedBusiness = shown ? businessRows(shown.business_answers || [], businessQuestions) : [];
+  const profileBusiness = storedBusiness.filter((answer) => businessQuestions.some((item) => item.id === answer.question_id && item.on_profile));
+  const admissionBusiness = storedBusiness.filter((answer) => !profileBusiness.some((item) => item.question_id === answer.question_id));
   const chips = shown ? [
     branch ? shown.enrollments.find((item) => item.branch_id === branch)?.branch_name || "" : "",
     course ? shown.enrollments.find((item) => item.course_id === course)?.course_name || "" : "",
@@ -778,7 +756,10 @@ export function StudentPage() {
   const enrolledBatches = new Set(shown?.enrollments.map((item) => item.batch_id) || []);
   const addBatches = options.batches.filter((item) => optionFits(item, addFilters) && !enrolledBatches.has(item.id));
   const visibleTab = tab === "history" && historyPermitted === false ? "personal" : tab;
-  const editedFields = visibleTab === "academics" ? ACADEMIC_ORDER : [...CONTACT_ORDER, ...ADDRESS_ORDER];
+  const editedFields = visibleTab === "personal" ? [...CONTACT_ORDER, ...ADDRESS_ORDER] : ACADEMIC_ORDER;
+  const recordTabs: StudentTab[] = historyPermitted
+    ? ["personal", "education", "enrollments", "progress", "admissions", "history"]
+    : ["personal", "education", "enrollments", "progress", "admissions"];
 
   return (
     <section className="panel wide student-record" aria-busy={phase === "loading"}>
@@ -812,14 +793,17 @@ export function StudentPage() {
               </div>
             </div>
             <div className="icon-actions">
-              {shown.actions.edit && visibleTab !== "history" ? <button type="button" onClick={startEdit} aria-label="Edit student" title="Edit student"><Icon name="edit" /></button> : null}
-              {shown.actions.card ? <Link to={cardHref()} aria-label="View progress card" title="View progress card"><Icon name="card" /></Link> : null}
+              {shown.actions.edit && (visibleTab === "personal" || visibleTab === "education" || visibleTab === "admissions") ? <button type="button" onClick={startEdit}>Edit</button> : null}
+              {shown.actions.card ? <Link to={cardHref()}>Progress card</Link> : null}
             </div>
           </div>
-          <div className="page-tabs" role="tablist" aria-label="Student" onKeyDown={(event) => moveTab(event, historyPermitted ? ["personal", "academics", "history"] as const : ["personal", "academics"] as const, visibleTab, chooseTab)}>
+          <div className="page-tabs" role="tablist" aria-label="Student" onKeyDown={(event) => moveTab(event, recordTabs, visibleTab, chooseTab)}>
             <button type="button" role="tab" aria-selected={visibleTab === "personal"} onClick={() => chooseTab("personal")}>Personal</button>
-            <button type="button" role="tab" aria-selected={visibleTab === "academics"} onClick={() => chooseTab("academics")}>Academics</button>
-            {historyPermitted ? <button type="button" role="tab" aria-selected={visibleTab === "history"} onClick={() => chooseTab("history")}>History</button> : null}
+            <button type="button" role="tab" aria-selected={visibleTab === "education"} onClick={() => chooseTab("education")}>Previous education</button>
+            <button type="button" role="tab" aria-selected={visibleTab === "enrollments"} onClick={() => chooseTab("enrollments")}>Enrollments</button>
+            <button type="button" role="tab" aria-selected={visibleTab === "progress"} onClick={() => chooseTab("progress")}>Progress</button>
+            <button type="button" role="tab" aria-selected={visibleTab === "admissions"} onClick={() => chooseTab("admissions")}>Admissions</button>
+            {historyPermitted ? <button type="button" role="tab" aria-selected={visibleTab === "history"} onClick={() => chooseTab("history")}>Activity</button> : null}
           </div>
           {visibleTab === "personal" ? (
             <>
@@ -830,36 +814,11 @@ export function StudentPage() {
                   <FactGrid order={ADDRESS_ORDER} values={shown} />
                 </>
               )}
-            </>
-          ) : null}
-          {visibleTab === "academics" ? (
-            <>
-              <h2>Academic records</h2>
-              {(shown.academic_records || []).length === 0 ? <p>No academic records yet.</p> : (
-                <div className="table-wrap">
-                  <table className="people-table">
-                    <caption className="sr-only">Academic records</caption>
-                    <thead><tr><th>Qualification</th><th>Stream</th><th>Institution</th><th>Mark</th><th>Year</th><th>Board</th></tr></thead>
-                    <tbody>
-                      {shown.academic_records.map((item, index) => (
-                        <tr key={`${item.qualification}-${index}`}>
-                          <td>{item.qualification || "Not recorded"}</td>
-                          <td>{item.stream || "Not recorded"}</td>
-                          <td>{item.institution || "Not recorded"}</td>
-                          <td>{item.mark || "Not recorded"}</td>
-                          <td>{item.year_of_passing || "Not recorded"}</td>
-                          <td>{item.board || "Not recorded"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              {businessRows(shown.business_answers || [], businessQuestions).length ? (
+              {profileBusiness.length ? (
                 <>
-                  <h2>Questions</h2>
+                  <h2>Profile answers</h2>
                   <dl className="facts">
-                    {businessRows(shown.business_answers || [], businessQuestions).map((answer) => (
+                    {profileBusiness.map((answer) => (
                       <div key={answer.question_id} className="span-2">
                         <dt>{answer.label || "Question"}</dt>
                         <dd className={answer.value ? undefined : "is-empty"}>{answer.value || "Not recorded"}</dd>
@@ -868,7 +827,49 @@ export function StudentPage() {
                   </dl>
                 </>
               ) : null}
-              {(shown.course_profiles || []).map((profile) => (
+            </>
+          ) : null}
+          {visibleTab === "education" || visibleTab === "admissions" || visibleTab === "enrollments" || visibleTab === "progress" ? (
+            <>
+              {visibleTab === "education" ? (
+                <>
+                  <h2>Previous education</h2>
+                  {(shown.academic_records || []).length === 0 ? <p>No academic records yet.</p> : (
+                    <div className="table-wrap">
+                      <table className="people-table">
+                        <caption className="sr-only">Academic records</caption>
+                        <thead><tr><th>Qualification</th><th>Stream</th><th>Institution</th><th>Mark</th><th>Year</th><th>Board</th></tr></thead>
+                        <tbody>
+                          {shown.academic_records.map((item, index) => (
+                            <tr key={`${item.qualification}-${index}`}>
+                              <td>{item.qualification || "Not recorded"}</td>
+                              <td>{item.stream || "Not recorded"}</td>
+                              <td>{item.institution || "Not recorded"}</td>
+                              <td>{item.mark || "Not recorded"}</td>
+                              <td>{item.year_of_passing || "Not recorded"}</td>
+                              <td>{item.board || "Not recorded"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              ) : null}
+              {visibleTab === "admissions" && admissionBusiness.length ? (
+                <>
+                  <h2>Admission answers</h2>
+                  <dl className="facts">
+                    {admissionBusiness.map((answer) => (
+                      <div key={answer.question_id} className="span-2">
+                        <dt>{answer.label || "Question"}</dt>
+                        <dd className={answer.value ? undefined : "is-empty"}>{answer.value || "Not recorded"}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </>
+              ) : null}
+              {visibleTab === "admissions" ? (shown.course_profiles || []).map((profile) => (
                 <div key={profile.course_id}>
                   <h2>{profile.course_name || "Course"} details</h2>
                   <dl className="facts">
@@ -880,8 +881,8 @@ export function StudentPage() {
                     ))}
                   </dl>
                 </div>
-              ))}
-              {(shown.admissions || []).length ? (
+              )) : null}
+              {visibleTab === "admissions" && (shown.admissions || []).length ? (
                 <>
                   <h2>Admission</h2>
                   <ul className="people">
@@ -894,6 +895,8 @@ export function StudentPage() {
                   </ul>
                 </>
               ) : null}
+              {visibleTab === "enrollments" ? (
+              <>
               <div className="title-row">
                 <h2>Enrollments</h2>
                 {shown.actions.enroll ? (
@@ -925,10 +928,10 @@ export function StudentPage() {
                           <td>{recordedDate(item.ended_on)}</td>
                           <td>{recordedStatus(item.status)}</td>
                           <td>
-                            <div className="icon-actions">
-                              {item.manage ? <button type="button" onClick={() => openDates(item)} aria-label={`Edit dates for ${recordedName(item.batch_name)}`} title="Edit dates"><Icon name="edit" /></button> : null}
-                              {item.manage && item.status !== "historical" ? <button type="button" onClick={() => openTransfer(item)}>Transfer</button> : null}
-                              {shown.actions.card ? <Link to={cardHref(item)} aria-label={`View progress card for ${recordedName(item.batch_name)}`} title="View progress card">Card</Link> : null}
+                            <div className="actions">
+                              {item.manage ? <button type="button" className="quiet" onClick={() => openDates(item)}>Edit dates</button> : null}
+                              {item.manage && item.status !== "historical" ? <button type="button" className="quiet" onClick={() => openTransfer(item)}>Transfer</button> : null}
+                              {shown.actions.card ? <Link to={cardHref(item)}>Progress card</Link> : null}
                               <Link to={contextHref("/marksheets", item)}>Marksheets</Link>
                               <Link to={contextHref("/views", item)}>Views</Link>
                             </div>
@@ -939,7 +942,9 @@ export function StudentPage() {
                   </table>
                 </div>
               )}
-              {shown.actions.card ? (
+              </>
+              ) : null}
+              {visibleTab === "progress" && shown.actions.card ? (
                 <>
                   <h2>Progress</h2>
                   {progressState === "loading" ? <p role="status">Loading progress…</p> : null}
@@ -959,18 +964,22 @@ export function StudentPage() {
                   ) : null}
                 </>
               ) : null}
-              <h2>Published results</h2>
-              {(shown.assessments || []).length === 0 ? <p>No published results for this student.</p> : (
-                <ul className="people">
-                  {shown.assessments?.map((item) => (
-                    <li key={`${item.id}-${item.batch_id}`}>
-                      <Link to={contextHref(`/marksheets/${item.id}`, shown.enrollments.find((enrollment) => enrollment.batch_id === item.batch_id))}>{item.title}</Link>
-                      {" · "}{item.status}
-                      {item.score == null ? "" : ` · ${item.score}${item.maximum == null ? "" : ` / ${item.maximum}`}`}
-                    </li>
-                  ))}
-                </ul>
-              )}
+              {visibleTab === "progress" ? (
+                <>
+                  <h2>Published results</h2>
+                  {(shown.assessments || []).length === 0 ? <p>No published results for this student.</p> : (
+                    <ul className="people">
+                      {shown.assessments?.map((item) => (
+                        <li key={`${item.id}-${item.batch_id}`}>
+                          <Link to={contextHref(`/marksheets/${item.id}`, shown.enrollments.find((enrollment) => enrollment.batch_id === item.batch_id))}>{item.title}</Link>
+                          {" · "}{item.status}
+                          {item.score == null ? "" : ` · ${item.score}${item.maximum == null ? "" : ` / ${item.maximum}`}`}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              ) : null}
             </>
           ) : null}
           {visibleTab === "history" ? (
@@ -1087,7 +1096,7 @@ export function StudentPage() {
                       <input value={draft.pin} inputMode="numeric" maxLength={6} aria-label="PIN" onChange={change("pin")} />
                     </label>
                   </>
-                ) : (
+                ) : visibleTab === "education" ? (
                   <>
                     {records.map((item, index) => (
                       <div className="span-2 form-grid" key={index}>
@@ -1138,6 +1147,9 @@ export function StudentPage() {
                     <div className="span-2">
                       <button type="button" className="quiet" onClick={() => { setRecords((current) => [...current, { ...EMPTY_RECORD }]); setDirty(true); }}>Add academic record</button>
                     </div>
+                  </>
+                ) : visibleTab === "admissions" ? (
+                  <>
                     {businessRows(businessAnswers, businessQuestions).map((answer) => {
                       const question = businessQuestions.find((item) => item.id === answer.question_id);
                       return (
@@ -1193,7 +1205,7 @@ export function StudentPage() {
                       </div>
                     ))}
                   </>
-                )}
+                ) : null}
                 {conflict ? (
                   <div className="compare span-2">
                     {(["display_name", ...editedFields] as Array<keyof ProfileValues>).filter((key) => (conflict.proposed[key] || "") !== (conflict.current[key] || "")).map((key) => (

@@ -100,6 +100,10 @@ const RULES: [RegExp, Crumb[]][] = [
     { label: "Administration", to: "/settings" },
     { label: "Settings" },
   ]],
+  [/^\/forms$/, [
+    { label: "Administration", to: "/forms" },
+    { label: "Forms" },
+  ]],
   [/^\/$/, [{ label: "Dashboard" }]],
 ];
 

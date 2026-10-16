@@ -5,6 +5,7 @@ import { AccessPage, UserAccessPage } from "./administration/access";
 import { AuditPage } from "./administration/audit";
 import { SettingsPage } from "./administration/settings";
 import { AdmissionCreatePage, AdmissionPage, AdmissionsPage, EnquiriesPage, EnquiryPage } from "./admissions/pages";
+import { FormsPage } from "./admissions/questions";
 import { BatchPage } from "./academics/batch";
 import { BranchPage } from "./academics/branch";
 import { BatchesPage, CoursePage, CoursesPage, InstitutePage } from "./academics/catalog";
@@ -89,6 +90,7 @@ export function App() {
         <Route path="/access/:userId" element={can("user.manage") ? <UserAccessPage /> : <Navigate to="/" replace />} />
         <Route path="/audit" element={can("audit.view") ? <AuditPage /> : <Navigate to="/" replace />} />
         <Route path="/settings" element={can("dashboard.view") ? <SettingsPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/forms" element={can("catalog.correct") || can("catalog.manage") ? <FormsPage /> : <Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Shell>

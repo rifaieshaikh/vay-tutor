@@ -58,7 +58,7 @@ Primary form controls are at least 2.75rem tall. Icon utilities, section tabs, a
 
 A dialog footer is `.dialog-actions`, aligned to the end. Order is Cancel or Close, then the primary or destructive button. Both are at least 2.75rem. Pending labels use the gerund: Saving…, Signing in…. The button is disabled while the request is in flight.
 
-Visible text is required for Add enquiry, Add admission, Save, Enroll, Admit, and Import. Icon-only is limited to Filter, Sort, Clear, and a repeated row Edit or card link, each with an accessible name. A creation action does not rely on a tooltip. Factory reset, Wipe all data, Confirm merge, and Withdraw use `.destructive`. Typed confirmation for factory reset stays: the operator types RESET.
+Visible text is required for Add enquiry, Add admission, Save, Enroll, Create admission, Complete details, and Import. Icon-only is limited to Filter, Sort, and Clear, each with an accessible name. A creation action does not rely on a tooltip. Factory reset, Wipe all data, Confirm merge, and Withdraw use `.destructive`. Typed confirmation for factory reset stays: the operator types RESET.
 
 Where a screen has a primary action, it is the one from the [screen map](ui-journeys.md#screen-map). Registers that are read-only for the current grant have no primary button. Their action is opening a row.
 
@@ -66,7 +66,7 @@ Where a screen has a primary action, it is the one from the [screen map](ui-jour
 
 Dates shown to staff use `15 Oct 2026`. Date inputs keep ISO values. An empty value reads “Not recorded”. Do not invent a cancelled or lost stage.
 
-Use these names: Enquiry, Enquiries, Admission, Admissions, Student, Enrollment, Batch, Branch, Course, Follow-up, Admit, Enroll. An enquiry stores a WhatsApp number. An admission stores a Contact number. Conversion copies one into the other.
+Use these names: Enquiry, Enquiries, Admission, Admissions, Student, Enrollment, Batch, Branch, Course, Follow-up, Create admission, Enroll. Forms is the administration page for questions. An enquiry stores a WhatsApp number. An admission stores a Contact number. Conversion copies one into the other.
 
 A description stays only when it changes what the person does next, warns about a consequence, states a prerequisite, or explains missing data. Errors name the field and the correction.
 
@@ -121,4 +121,4 @@ Dependent clearing stays in the context bar: a new branch clears course and batc
 
 ## Reference workflow
 
-Enquiry through enrollment uses this type scale, these buttons, `StudentDialog`, `confirmDiscard`, and `formatDisplayDate`. Add enquiry stays a dialog. The admission form becomes a page in DES-12. Admit and Enroll are the labeled primary actions. Missing requirements show at Enroll, and the entered branch and batch remain after a failure.
+Enquiry through enrollment uses this type scale, these buttons, `StudentDialog`, `confirmDiscard`, and `formatDisplayDate`. Add enquiry stays a dialog. The admission form is a page. Create admission and Enroll are the labeled primary actions. Missing requirements show before Enroll, and the entered branch and batch remain after a failure. Yes/No is a separate answer from a consent checkbox.

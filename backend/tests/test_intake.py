@@ -545,3 +545,114 @@ def test_checkbox_dropdown_and_text_area_questions(client):
     assert profile["value"] == "Morning"
     assert profile["answer_type"] == "choice"
     assert profile["choices"] == ["Morning", "Evening"]
+
+
+def test_yes_no_consent_options_and_retired_questions(client):
+    bootstrap(client)
+    branch_id, course_id, batch_id = _context(client)
+    opened = client.post(
+        "/api/v1/admissions",
+        json={"name": "MEERA", "phone": "9000000101", "course_id": course_id},
+    )
+    assert opened.status_code == 200, opened.text
+    listed = client.get("/api/v1/admissions").json()["items"]
+    assert listed[0]["next_action"] == "Choose a batch"
+    assert "Enroll in a batch" not in listed[0]["next_action"]
+
+    preference = client.post(
+        "/api/v1/form-questions",
+        json={
+            "label": "Hostel preference",
+            "answer_type": "yes_no",
+            "required": True,
+            "required_stage": "enroll",
+            "place": "admission",
+            "choices": ["Yes, with meals"],
+        },
+    )
+    assert preference.status_code == 200, preference.text
+    place = client.post(
+        "/api/v1/form-questions",
+        json={
+            "label": "Home city",
+            "answer_type": "choice",
+            "place": "admission",
+            "choices": ["Kochi, Kerala", "Mumbai"],
+        },
+    )
+    assert place.status_code == 200, place.text
+    stored = client.get("/api/v1/form-questions?form=admission").json()["items"]
+    city = next(item for item in stored if item["label"] == "Home city")
+    assert city["choices"] == ["Kochi, Kerala", "Mumbai"]
+
+    blocked = client.post(
+        f"/api/v1/admissions/{opened.json()['id']}/convert",
+        json={"branch_id": branch_id, "batch_id": batch_id},
+    )
+    assert blocked.status_code == 422
+    assert "Answer Hostel preference." in blocked.text
+    declined = client.patch(
+        f"/api/v1/admissions/{opened.json()['id']}",
+        json={
+            "course_id": course_id,
+            "name": "MEERA",
+            "phone": "9000000101",
+            "business_answers": [
+                {"question_id": preference.json()["id"], "value": "no"},
+                {"question_id": place.json()["id"], "value": "Kochi, Kerala"},
+            ],
+        },
+    )
+    assert declined.status_code == 200, declined.text
+    saved = client.get(f"/api/v1/admissions/{opened.json()['id']}").json()
+    answers = {item["label"]: item["value"] for item in saved["business_answers"]}
+    assert answers["Hostel preference"] == "No"
+    assert answers["Home city"] == "Kochi, Kerala"
+    enrolled = client.post(
+        f"/api/v1/admissions/{opened.json()['id']}/convert",
+        json={"branch_id": branch_id, "batch_id": batch_id},
+    )
+    assert enrolled.status_code == 200, enrolled.text
+
+    added = client.post(
+        "/api/v1/form-questions",
+        json={"label": "Transport", "answer_type": "yes_no", "required": True, "place": "admission"},
+    )
+    assert added.status_code == 200, added.text
+    finished = client.get(f"/api/v1/admissions/{opened.json()['id']}").json()
+    assert finished["status"] == "converted"
+    assert finished["next_action"] == "Open the student"
+    assert finished["blockers"] == []
+
+    heard = client.post(
+        "/api/v1/form-questions",
+        json={"label": "Heard from", "answer_type": "text", "place": "enquiry"},
+    )
+    enquiry = client.post(
+        "/api/v1/enquiries",
+        json={
+            "name": "ANU",
+            "whatsapp": "9000000102",
+            "course_id": course_id,
+            "answers": [{"question_id": heard.json()["id"], "value": "A friend"}],
+        },
+    )
+    assert enquiry.status_code == 200, enquiry.text
+    removed = client.delete(f"/api/v1/form-questions/{heard.json()['id']}")
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["retired"] is True
+    active = {item["label"] for item in client.get("/api/v1/form-questions?form=enquiry").json()["items"]}
+    assert "Heard from" not in active
+    retired = client.get("/api/v1/form-questions?include_retired=true").json()["items"]
+    assert next(item for item in retired if item["label"] == "Heard from")["retired"] is True
+    detail = client.get(f"/api/v1/enquiries/{enquiry.json()['id']}").json()
+    assert detail["answers"][0]["label"] == "Heard from"
+    assert detail["answers"][0]["value"] == "A friend"
+    assert detail["follow_up_state"] == "unscheduled"
+
+    unused = client.post("/api/v1/form-questions", json={"label": "Unused prompt", "place": "enquiry"})
+    deleted = client.delete(f"/api/v1/form-questions/{unused.json()['id']}")
+    assert deleted.status_code == 200, deleted.text
+    assert "retired" not in deleted.json()
+    labels = {item["label"] for item in client.get("/api/v1/form-questions?include_retired=true").json()["items"]}
+    assert "Unused prompt" not in labels

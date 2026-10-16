@@ -23,7 +23,7 @@ router = APIRouter(prefix="/api/v1")
 INTERESTS = ("High", "Medium", "Low")
 GENDERS = ("Female", "Male", "Other")
 BLOOD_GROUPS = {"A+", "A-", "B+", "B-", "O+", "O-", "AB+", "AB-"}
-ANSWER_TYPES = {"boolean", "choice", "text", "textarea"}
+ANSWER_TYPES = {"boolean", "yes_no", "choice", "text", "textarea"}
 _MAX_BYTES = 5 * 1024 * 1024
 _RECORD_LIMITS = {
     "qualification": 120,
@@ -185,6 +185,9 @@ class QuestionBody(BaseModel):
     choices: list[str] = []
     required: bool = False
     place: str = ""
+    section: str = "general"
+    required_stage: str = ""
+    on_profile: bool = False
 
 
 class QuestionPatch(BaseModel):
@@ -195,6 +198,9 @@ class QuestionPatch(BaseModel):
     required: bool | None = None
     order: int | None = None
     place: str | None = None
+    section: str | None = None
+    required_stage: str | None = None
+    on_profile: bool | None = None
 
 
 class AnswerBody(BaseModel):
@@ -279,6 +285,10 @@ def _question_view(row: dict) -> dict:
         "required": bool(row.get("required")),
         "order": row.get("order") or 0,
         "place": _place_of(row.get("forms") or []),
+        "section": row.get("section") or "general",
+        "required_stage": row.get("required_stage") or "",
+        "on_profile": bool(row.get("on_profile")),
+        "retired": bool(row.get("retired")),
     }
 
 
@@ -288,7 +298,12 @@ def _clean_question(body: QuestionBody, existing: dict | None = None) -> dict:
         raise AppError(422, "intake.field", "Enter the question.", field="label")
     answer_type = body.answer_type or (existing or {}).get("answer_type") or "text"
     if answer_type not in ANSWER_TYPES:
-        raise AppError(422, "intake.field", "Choose a checkbox, dropdown, text box, or text area.", field="answer_type")
+        raise AppError(
+            422,
+            "intake.field",
+            "Choose yes/no, a consent checkbox, a dropdown, a text box, or a text area.",
+            field="answer_type",
+        )
     choices = []
     for item in body.choices:
         choice = _text(item, 80, "choices")
@@ -298,12 +313,21 @@ def _clean_question(body: QuestionBody, existing: dict | None = None) -> dict:
         raise AppError(422, "intake.field", "Add at least one choice.", field="choices")
     if answer_type != "choice":
         choices = []
+    section = (body.section or "general").strip() or "general"
+    if section not in {"general", "contact", "guardian", "education", "course"}:
+        raise AppError(422, "intake.field", "Choose a section.", field="section")
+    stage = (body.required_stage or "").strip()
+    if stage not in {"", "admit", "enroll"}:
+        raise AppError(422, "intake.field", "Choose when the answer is required.", field="required_stage")
     return {
         "label": label,
         "label_key": name_key(label),
         "answer_type": answer_type,
         "choices": choices,
-        "required": bool(body.required),
+        "required": bool(body.required) or bool(stage),
+        "section": section,
+        "required_stage": stage,
+        "on_profile": bool(body.on_profile),
     }
 
 
@@ -336,14 +360,19 @@ async def _course(request: Request, user: dict, course_id: str) -> dict:
     return course
 
 
-async def _questions_for(request: Request, course_id: str) -> list[dict]:
-    return await db(request).course_questions.find({"course_id": course_id}).sort("order", 1).to_list(length=50)
+async def _questions_for(request: Request, course_id: str, include_retired: bool = False) -> list[dict]:
+    if not course_id:
+        return []
+    query: dict = {"course_id": course_id}
+    if not include_retired:
+        query["retired"] = {"$ne": True}
+    return await db(request).course_questions.find(query).sort("order", 1).to_list(length=50)
 
 
 async def _form_questions(request: Request, institute_id: str, form: str) -> list[dict]:
     return (
         await db(request)
-        .form_questions.find({"institute_id": institute_id, "forms": form})
+        .form_questions.find({"institute_id": institute_id, "forms": form, "retired": {"$ne": True}})
         .sort("order", 1)
         .to_list(length=50)
     )
@@ -374,6 +403,12 @@ def _answer_value(question: dict, value: str) -> str:
     text = " ".join(str(value or "").split())
     if not text:
         return ""
+    if kind == "yes_no":
+        if text.casefold() in {"yes", "true", "1", "y"}:
+            return "Yes"
+        if text.casefold() in {"no", "false", "0", "n"}:
+            return "No"
+        raise AppError(422, "intake.field", f"Choose Yes or No for {label}.", field="answers")
     if kind == "boolean":
         if text.casefold() in {"yes", "true", "1", "y"}:
             return "Yes"
@@ -477,6 +512,40 @@ def _admission_contact(body: AdmissionBody) -> dict:
     }
 
 
+def _merged_question(body: QuestionPatch, row: dict) -> QuestionBody:
+    return QuestionBody(
+        label=body.label if body.label is not None else row.get("label") or "",
+        answer_type=body.answer_type if body.answer_type is not None else row.get("answer_type") or "text",
+        choices=body.choices if body.choices is not None else row.get("choices") or [],
+        required=body.required if body.required is not None else bool(row.get("required")),
+        place=body.place if body.place is not None else _place_of(row.get("forms") or []),
+        section=body.section if body.section is not None else row.get("section") or "general",
+        required_stage=body.required_stage if body.required_stage is not None else row.get("required_stage") or "",
+        on_profile=body.on_profile if body.on_profile is not None else bool(row.get("on_profile")),
+    )
+
+
+def enquiry_next_on(row: dict) -> str:
+    follow_ups = row.get("follow_ups") or []
+    if not follow_ups:
+        return ""
+    return str(follow_ups[-1].get("next_on") or "")
+
+
+def follow_up_state(row: dict, today: str) -> str:
+    """Overdue, today, and upcoming use the institute date, which is the UTC calendar date."""
+    if row.get("admission_id"):
+        return "admitted"
+    next_on = enquiry_next_on(row)
+    if not next_on:
+        return "unscheduled"
+    if next_on < today:
+        return "overdue"
+    if next_on == today:
+        return "today"
+    return "upcoming"
+
+
 def enquiry_progress(row: dict, today: str) -> tuple[str, str]:
     if row.get("admission_id"):
         return "Admitted", "Open the admission"
@@ -489,10 +558,55 @@ def enquiry_progress(row: dict, today: str) -> tuple[str, str]:
     return "Enquiry", f"Follow up on {next_on}"
 
 
-def admission_progress(row: dict) -> tuple[str, str]:
+def admission_blockers(row: dict, course_questions: list[dict], business_questions: list[dict]) -> list[str]:
+    if (row.get("status") or "open") == "converted":
+        return []
+    gaps = []
+    if not (row.get("phone") or "").strip():
+        gaps.append("Add the contact number")
+    if not row.get("course_id"):
+        gaps.append("Choose a course")
+    for question in business_questions:
+        if not question.get("required"):
+            continue
+        value = next(
+            (
+                item.get("value")
+                for item in row.get("business_answers") or []
+                if item.get("question_id") == question.get("_id")
+            ),
+            "",
+        )
+        if not value:
+            label = question.get("label") or "the question"
+            gaps.append(f"Tick {label}" if question.get("answer_type") == "boolean" else f"Answer {label}")
+    for question in course_questions:
+        if not question.get("required"):
+            continue
+        value = next(
+            (
+                item.get("value")
+                for item in row.get("course_answers") or []
+                if item.get("question_id") == question.get("_id")
+            ),
+            "",
+        )
+        if not value:
+            label = question.get("label") or "the question"
+            gaps.append(f"Tick {label}" if question.get("answer_type") == "boolean" else f"Answer {label}")
+    return gaps
+
+
+def admission_progress(
+    row: dict, blockers: list[str] | None = None, matches: list[dict] | None = None
+) -> tuple[str, str]:
     if (row.get("status") or "open") == "converted":
         return "Enrolled", "Open the student"
-    return "Open", "Enroll in a batch"
+    if blockers:
+        return "Open", blockers[0]
+    if matches and not row.get("match_decision") and not row.get("student_id"):
+        return "Open", "Resolve identity"
+    return "Open", "Choose a batch"
 
 
 def _enquiry_view(row: dict, course_name: str = "", today: str = "") -> dict:
@@ -509,6 +623,8 @@ def _enquiry_view(row: dict, course_name: str = "", today: str = "") -> dict:
         "details": row.get("details") or "",
         "stage": stage,
         "next_action": next_action,
+        "next_on": enquiry_next_on(row),
+        "follow_up_state": follow_up_state(row, today or _now().date().isoformat()),
         "follow_ups": [
             {
                 "id": item.get("id"),
@@ -525,9 +641,14 @@ def _enquiry_view(row: dict, course_name: str = "", today: str = "") -> dict:
 
 
 def _admission_view(
-    row: dict, course_name: str = "", matches: list[dict] | None = None, questions: list[dict] | None = None
+    row: dict,
+    course_name: str = "",
+    matches: list[dict] | None = None,
+    questions: list[dict] | None = None,
+    business_questions: list[dict] | None = None,
 ) -> dict:
-    stage, next_action = admission_progress(row)
+    blockers = admission_blockers(row, questions or [], business_questions or [])
+    stage, next_action = admission_progress(row, blockers, matches)
     return {
         "id": row["_id"],
         "course_id": row.get("course_id") or "",
@@ -553,6 +674,7 @@ def _admission_view(
         "status": row.get("status") or "open",
         "stage": stage,
         "next_action": next_action,
+        "blockers": blockers,
         "student_id": row.get("student_id") or None,
         "enrollment_id": row.get("enrollment_id") or None,
         "branch_id": row.get("branch_id") or None,
@@ -677,7 +799,7 @@ async def apply_course_profiles(request: Request, institute_id: str, profiles: l
 
 
 @router.get("/form-questions")
-async def list_form_questions(request: Request, form: str = "") -> dict:
+async def list_form_questions(request: Request, form: str = "", include_retired: bool = False) -> dict:
     user = await current_user(request)
     _reader(user)
     query: dict = {"institute_id": user["institute_id"]}
@@ -685,6 +807,8 @@ async def list_form_questions(request: Request, form: str = "") -> dict:
         if form not in {"enquiry", "admission"}:
             raise AppError(422, "intake.field", "Choose enquiry or admission.", field="form")
         query["forms"] = form
+    if not include_retired:
+        query["retired"] = {"$ne": True}
     rows = await db(request).form_questions.find(query).sort("order", 1).to_list(length=50)
     return {"items": [_question_view(row) for row in rows]}
 
@@ -724,13 +848,7 @@ async def update_form_question(request: Request, question_id: str, body: Questio
     row = await db(request).form_questions.find_one({"_id": question_id, "institute_id": user["institute_id"]})
     if row is None:
         raise AppError(404, "not_found", "That record was not found.")
-    merged = QuestionBody(
-        label=body.label if body.label is not None else row.get("label") or "",
-        answer_type=body.answer_type if body.answer_type is not None else row.get("answer_type") or "text",
-        choices=body.choices if body.choices is not None else row.get("choices") or [],
-        required=body.required if body.required is not None else bool(row.get("required")),
-        place=body.place if body.place is not None else _place_of(row.get("forms") or []),
-    )
+    merged = _merged_question(body, row)
     fields = _clean_question(merged)
     fields["forms"] = _forms_for(merged.place or "both")
     taken = await db(request).form_questions.find_one(
@@ -738,6 +856,10 @@ async def update_form_question(request: Request, question_id: str, body: Questio
     )
     if taken:
         raise AppError(409, "question.exists", "That question already exists.")
+    if body.order is not None:
+        if body.order < 1 or body.order > 50:
+            raise AppError(422, "intake.field", "Use an order from 1 to 50.", field="order")
+        fields["order"] = body.order
     await db(request).form_questions.update_one({"_id": question_id}, {"$set": fields})
     return {"id": question_id}
 
@@ -749,8 +871,38 @@ async def delete_form_question(request: Request, question_id: str) -> dict:
     row = await db(request).form_questions.find_one({"_id": question_id, "institute_id": user["institute_id"]})
     if row is None:
         raise AppError(404, "not_found", "That record was not found.")
-    await db(request).form_questions.delete_one({"_id": question_id})
-    await write_audit(request, user, "form_question.delete", {"label": row.get("label") or ""}, None, {})
+    return await _retire_or_delete(request, user, "form_questions", question_id, row, "form_question.delete")
+
+
+async def _question_is_used(request: Request, institute_id: str, collection: str, question_id: str) -> bool:
+    database = db(request)
+    if collection == "form_questions":
+        checks = (
+            ("enquiries", "answers.question_id"),
+            ("admissions", "business_answers.question_id"),
+            ("students", "business_answers.question_id"),
+        )
+    else:
+        checks = (
+            ("admissions", "course_answers.question_id"),
+            ("students", "course_profiles.answers.question_id"),
+        )
+    for name, field in checks:
+        found = await database[name].find_one({"institute_id": institute_id, field: question_id}, {"_id": 1})
+        if found is not None:
+            return True
+    return False
+
+
+async def _retire_or_delete(
+    request: Request, user: dict, collection: str, question_id: str, row: dict, action: str, scope: dict | None = None
+) -> dict:
+    if await _question_is_used(request, user["institute_id"], collection, question_id):
+        await db(request)[collection].update_one({"_id": question_id}, {"$set": {"retired": True}})
+        await write_audit(request, user, action, {"label": row.get("label") or "", "retired": True}, None, scope or {})
+        return {"id": question_id, "retired": True}
+    await db(request)[collection].delete_one({"_id": question_id})
+    await write_audit(request, user, action, {"label": row.get("label") or ""}, None, scope or {})
     return {"id": question_id}
 
 
@@ -788,12 +940,18 @@ def enquiry_awaiting_follow_up(row: dict, today: str) -> bool:
 
 @router.get("/enquiries")
 async def list_enquiries(
-    request: Request, q: str = "", page: int = 1, page_size: int = 20, follow_up: str = "", course_id: str = ""
+    request: Request,
+    q: str = "",
+    page: int = 1,
+    page_size: int = 20,
+    follow_up: str = "",
+    course_id: str = "",
+    sort: str = "",
 ) -> dict:
     user = await current_user(request)
     _reader(user)
     return await _list_people(
-        request, user, "enquiries", q, page, page_size, follow_up=follow_up, course_id=course_id
+        request, user, "enquiries", q, page, page_size, follow_up=follow_up, course_id=course_id, sort=sort
     )
 
 
@@ -1074,7 +1232,10 @@ async def get_admission(request: Request, admission_id: str) -> dict:
     row = await _admission(request, user, admission_id)
     matches = await find_matches(request, user["institute_id"], row.get("name") or "", row.get("phone") or "")
     questions = await _questions_for(request, row.get("course_id") or "")
-    return _admission_view(row, await _course_name(request, row.get("course_id") or ""), matches, questions)
+    business = await _form_questions(request, user["institute_id"], "admission")
+    return _admission_view(
+        row, await _course_name(request, row.get("course_id") or ""), matches, questions, business
+    )
 
 
 @router.patch("/admissions/{admission_id}")
@@ -1212,7 +1373,14 @@ async def _save_admission(
     await _course(request, user, body.course_id)
     fields = _admission_contact(body)
     questions = await _questions_for(request, body.course_id)
-    fields["course_answers"] = _clean_answers(questions, body.course_answers, require=False)
+    cleaned_course = _clean_answers(questions, body.course_answers, require=False)
+    current_course = {item["_id"] for item in questions}
+    kept_course = [
+        item
+        for item in (existing or {}).get("course_answers") or []
+        if item.get("question_id") not in current_course
+    ]
+    fields["course_answers"] = kept_course + cleaned_course
     fields["business_answers"] = await remember_answers(
         request,
         user["institute_id"],
@@ -1443,6 +1611,7 @@ async def _list_people(
     follow_up: str = "",
     status: str = "",
     course_id: str = "",
+    sort: str = "",
 ) -> dict:
     size = min(max(page_size, 1), 100)
     number = max(page, 1)
@@ -1452,9 +1621,16 @@ async def _list_people(
     selected_course, _dropped = applied_intake_course(user["grants"], course_id)
     if selected_course:
         rows = [row for row in rows if (row.get("course_id") or "") == selected_course]
-    if collection == "enquiries" and follow_up == "due":
+    if collection == "enquiries" and follow_up:
         today = _now().date().isoformat()
-        rows = [row for row in rows if enquiry_awaiting_follow_up(row, today)]
+        if follow_up == "due":
+            rows = [row for row in rows if enquiry_awaiting_follow_up(row, today)]
+        elif follow_up in {"overdue", "today", "upcoming", "unscheduled", "admitted"}:
+            rows = [row for row in rows if follow_up_state(row, today) == follow_up]
+        else:
+            raise AppError(422, "intake.field", "Choose a follow-up filter.", field="follow_up")
+    if collection == "enquiries" and sort == "next_on":
+        rows.sort(key=lambda row: (enquiry_next_on(row) or "9999-99-99", row.get("name") or ""))
     if collection == "admissions" and status:
         rows = [row for row in rows if (row.get("status") or "open") == status]
     needle = q.casefold().strip()
@@ -1468,6 +1644,12 @@ async def _list_people(
     if course_ids:
         for course in await db(request).courses.find({"_id": {"$in": course_ids}}).to_list(length=len(course_ids)):
             names[course["_id"]] = course.get("name") or ""
+    business_questions = []
+    course_questions: dict[str, list] = {}
+    if collection == "admissions":
+        business_questions = await _form_questions(request, user["institute_id"], "admission")
+        for course_id in course_ids:
+            course_questions[course_id] = await _questions_for(request, course_id)
     items = []
     for row in chosen:
         if collection == "enquiries":
@@ -1475,7 +1657,22 @@ async def _list_people(
             view["follow_up_count"] = len(row.get("follow_ups") or [])
             items.append(view)
         else:
-            items.append(_admission_view(row, names.get(row.get("course_id"), "")))
+            course_id = row.get("course_id") or ""
+            blockers = admission_blockers(row, course_questions.get(course_id, []), business_questions)
+            matches = []
+            if (row.get("status") or "open") != "converted" and not blockers and not row.get("match_decision"):
+                matches = await find_matches(
+                    request, user["institute_id"], row.get("name") or "", row.get("phone") or ""
+                )
+            items.append(
+                _admission_view(
+                    row,
+                    names.get(course_id, ""),
+                    matches,
+                    course_questions.get(course_id, []),
+                    business_questions,
+                )
+            )
     return {"items": items, "total": total, "page": number, "pages": max(1, (total + size - 1) // size)}
 
 

@@ -45,6 +45,7 @@ const GROUPS: { label: string; items: Item[] }[] = [
       { to: "/access", label: "Users and Access", action: "user.manage" },
       { to: "/audit", label: "Audit", action: "audit.view", end: true },
       { to: "/settings", label: "Settings", action: "dashboard.view", end: true },
+      { to: "/forms", label: "Forms", action: "catalog.edit", end: true },
     ],
   },
 ];
@@ -75,7 +76,11 @@ export function Shell({
   const search = contextSearch(params).toString();
   const groups = GROUPS.map((group) => ({
     ...group,
-    items: group.items.filter((item) => session.actions.includes(item.action)),
+    items: group.items.filter((item) => (
+      item.action === "catalog.edit"
+        ? session.actions.includes("catalog.correct") || session.actions.includes("catalog.manage")
+        : session.actions.includes(item.action)
+    )),
   })).filter((group) => group.items.length > 0);
 
   useEffect(() => {

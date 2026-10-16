@@ -474,119 +474,6 @@ export function CoursesPage({ session }: { session: Session }) {
   );
 }
 
-type CourseQuestion = { id: string; label: string; answer_type: string; choices: string[]; required: boolean };
-
-function answerKind(kind: string) {
-  if (kind === "boolean") return "Checkbox";
-  if (kind === "choice") return "Dropdown";
-  if (kind === "textarea") return "Text area";
-  if (kind === "text") return "Text box";
-  return kind;
-}
-
-function CourseQuestions({ courseId, canEdit }: { courseId: string; canEdit: boolean }) {
-  const [items, setItems] = useState<CourseQuestion[]>([]);
-  const [adding, setAdding] = useState(false);
-  const [label, setLabel] = useState("");
-  const [answerType, setAnswerType] = useState("text");
-  const [choices, setChoices] = useState("");
-  const [required, setRequired] = useState(false);
-  const [error, setError] = useState("");
-
-  function load() {
-    api<{ items: CourseQuestion[] }>(`/api/v1/courses/${courseId}/questions`).then((result) => setItems(result.items)).catch((reason: Error) => setError(reason.message));
-  }
-
-  useEffect(() => { load(); }, [courseId]);
-
-  async function add(event: FormEvent) {
-    event.preventDefault();
-    setError("");
-    try {
-      await api(`/api/v1/courses/${courseId}/questions`, {
-        method: "POST",
-        body: JSON.stringify({
-          label,
-          answer_type: answerType,
-          choices: choices.split(",").map((item) => item.trim()).filter(Boolean),
-          required,
-        }),
-      });
-      setLabel("");
-      setChoices("");
-      setRequired(false);
-      setAdding(false);
-      notify("Saved the question.");
-      load();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The question was not saved.");
-    }
-  }
-
-  async function remove(item: CourseQuestion) {
-    setError("");
-    try {
-      await api(`/api/v1/courses/${courseId}/questions/${item.id}`, { method: "DELETE" });
-      notify(`Removed ${item.label}.`);
-      load();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The question was not removed.");
-    }
-  }
-
-  return (
-    <>
-      <div className="title-row">
-        <h2>Admission questions</h2>
-        {canEdit ? <button type="button" onClick={() => setAdding(true)}>Add question</button> : null}
-      </div>
-      {error ? <p className="error" role="alert">{error}</p> : null}
-      {items.length === 0 ? <p>No extra questions for this course.</p> : (
-        <ul className="people">
-          {items.map((item) => (
-            <li key={item.id}>
-              <span>{item.label}{item.required ? " · required to admit" : ""} · {answerKind(item.answer_type)}{item.choices.length ? ` · ${item.choices.join(", ")}` : ""}</span>
-              {canEdit ? <button type="button" className="quiet" onClick={() => void remove(item)}>Remove</button> : null}
-            </li>
-          ))}
-        </ul>
-      )}
-      {adding ? (
-        <StudentDialog title="Admission question" onClose={() => setAdding(false)}>
-          <form className="form-grid" onSubmit={add}>
-            <label className="span-2">Question
-              <input value={label} required onChange={(event) => setLabel(event.target.value)} />
-            </label>
-            <label>Answer
-              <select value={answerType} onChange={(event) => setAnswerType(event.target.value)}>
-                <option value="boolean">Checkbox</option>
-                <option value="choice">Dropdown</option>
-                <option value="text">Text box</option>
-                <option value="textarea">Text area</option>
-              </select>
-            </label>
-            <label>Required to admit
-              <select value={required ? "yes" : "no"} onChange={(event) => setRequired(event.target.value === "yes")}>
-                <option value="no">No</option>
-                <option value="yes">Yes</option>
-              </select>
-            </label>
-            {answerType === "choice" ? (
-              <label className="span-2">Options, separated by commas
-                <input value={choices} onChange={(event) => setChoices(event.target.value)} />
-              </label>
-            ) : null}
-            <div className="dialog-actions span-2">
-              <button type="button" className="quiet" onClick={() => setAdding(false)}>Cancel</button>
-              <button type="submit" disabled={!label.trim()}>Save</button>
-            </div>
-          </form>
-        </StudentDialog>
-      ) : null}
-    </>
-  );
-}
-
 export function CoursePage({ session }: { session: Session }) {
   const { courseId = "" } = useParams();
   const { catalog, error, correct, reload, setError } = useCatalog();
@@ -636,7 +523,7 @@ export function CoursePage({ session }: { session: Session }) {
           <Link to={`/views?level=course&course_id=${course.id}`} aria-label={`View ${course.name}`} title="View course"><Icon name="view" /></Link>
         </div>
       </div>
-      <CourseQuestions courseId={course.id} canEdit={canCorrect} />
+      <p>{canCorrect ? <Link to={`/forms?course_id=${course.id}`}>Edit this course’s questions in Forms</Link> : "Course questions are managed in Forms."}</p>
       <div className="title-row">
         <h2>Subjects</h2>
         {canCorrect ? (
