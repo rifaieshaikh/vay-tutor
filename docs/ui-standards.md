@@ -106,7 +106,8 @@ One value has one meaning. `branch_id`, `course_id`, `batch_id`, and `period` ar
 | Admissions | None. Course is a page filter | Search, status, course | None | `q`, `status`, `course_id`, `page` |
 | Batches | Branch, course, period, batch | None beyond the context bar | None | Context keys only |
 | Marksheets | Branch, course, period, batch | Search, status, subject | Paper, exam type, exam dates | Page keys plus context keys |
-| Academic views | Branch, course, period, batch | Level tabs | The report filters, applied together | Context keys and the view’s own keys |
+| Progress cards | Branch, course, period, batch | Name or student id, about 300ms and Enter | Subject, paper, exam type, attempt, and exam dates, applied together | `q` plus context keys and those report keys |
+| Academic views | Branch, course, period, batch | Level tabs | Subject, paper, exam type, attempt, and exam dates, applied together | Context keys and the view’s own keys |
 
 Dependent clearing stays in the context bar: a new branch clears course and batch; a new course clears batch; a period that does not contain the batch clears the batch. Enquiry and admission course filters do not write the context keys used by the bar, because those pages do not show the bar. A failed context or filter-option request shows the error and Try again. It does not present an empty choice list as if the institute had no branches.
 

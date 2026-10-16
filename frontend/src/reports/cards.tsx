@@ -4,8 +4,7 @@ import { api, Session } from "../api";
 import { notify } from "../notify";
 import { studentRecordHref } from "../students";
 import { Band, BandMark, bandFor, bandTone } from "../bands";
-import { Icon } from "../ui";
-import { CONTEXT_FIELDS, Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
+import { Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
 
 type Performance = {
   percentage: number | null;
@@ -77,7 +76,12 @@ type Card = {
 };
 type ExportJob = { format: "pdf" | "xlsx"; state: "queued" | "running" | "ready" | "failed"; fileId?: string | null; filename?: string | null; error?: string };
 
-const REPORT_FILTERS = ["branch_id", "course_id", "batch_id", "period", "subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"] as const;
+const REPORT_FILTERS = ["branch_id", "course_id", "batch_id", "subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"] as const;
+const PAGE_FILTERS = ["q", "subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"] as const;
+const ACADEMIC_FIELDS = [
+  ["subject_id", "Subject", "subject"],
+  ["paper_id", "Paper", "paper"],
+] as const;
 const FILTER_LABELS: Record<string, string> = {
   q: "Student",
   branch_id: "Branch",
@@ -271,7 +275,6 @@ function ReportFilters({
   options,
   rangeError,
   dirty,
-  showSearch,
   onChange,
   onApply,
   onReset,
@@ -280,7 +283,6 @@ function ReportFilters({
   options: Record<string, Option[]>;
   rangeError: string;
   dirty: boolean;
-  showSearch: boolean;
   onChange: (key: string, value: string) => void;
   onApply: () => void;
   onReset: () => void;
@@ -288,13 +290,7 @@ function ReportFilters({
   return (
     <form className="report-filters" onSubmit={(event: FormEvent) => { event.preventDefault(); onApply(); }}>
       <div className="form-grid">
-        {showSearch ? (
-          <label className="span-2">
-            Student
-            <input value={draft.q || ""} onChange={(event) => onChange("q", event.target.value)} placeholder="Name or student id" />
-          </label>
-        ) : null}
-        {CONTEXT_FIELDS.map(([key, label, dimension]) => (
+        {ACADEMIC_FIELDS.map(([key, label, dimension]) => (
           <label key={key}>
             {label}
             <select value={draft[key] || ""} onChange={(event) => onChange(key, event.target.value)}>
@@ -351,6 +347,9 @@ export function CardsPage({ session }: { session: Session }) {
   const [exportJob, setExportJob] = useState<ExportJob | null>(null);
   const [exporting, setExporting] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [query, setQuery] = useState(applied.q);
+  const [optionsError, setOptionsError] = useState("");
+  const [optionsAttempt, setOptionsAttempt] = useState(0);
   const [panel, setPanel] = useState("subjects");
   const [subjectSort, setSubjectSort] = useState("name");
   const [examSort, setExamSort] = useState("exam_date");
@@ -361,17 +360,39 @@ export function CardsPage({ session }: { session: Session }) {
   const sort = reportSort(params.get("sort") || "");
   const page = Number(applied.page) || 1;
   const listReturn = studentsReturn(params.get("returnTo"));
-  const cardBranch = listReturn ? params.get("branch_id") || "" : "";
-  const cardCourse = listReturn ? params.get("course_id") || "" : "";
-  const cardBatch = listReturn ? params.get("batch_id") || "" : "";
-  const requestKey = [studentId, cardBranch, cardCourse, cardBatch].join("|");
-  const listKey = ["list", applied.q, page, sort, ...REPORT_FILTERS.map((key) => applied[key])].join("|");
+  const reportScope = new URLSearchParams();
+  for (const key of REPORT_FILTERS) {
+    const value = params.get(key);
+    if (value) reportScope.set(key, value);
+  }
+  if (params.get("period")) reportScope.set("period", params.get("period") || "");
+  const requestKey = `${studentId}?${reportScope.toString()}`;
+  const listKey = ["list", applied.q, page, sort, params.get("period") || "", ...REPORT_FILTERS.map((key) => applied[key])].join("|");
   const shown = card && loadedKey === requestKey ? card : null;
+  const cardPending = Boolean(studentId) && loadedKey !== requestKey;
 
   useEffect(() => {
     setDraft(readApplied(params));
     setRangeError("");
   }, [appliedKey]);
+
+  useEffect(() => {
+    setQuery(applied.q);
+  }, [applied.q]);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      const trimmed = query.trim();
+      if (trimmed === applied.q) return;
+      const next = new URLSearchParams(params);
+      next.delete("page");
+      next.delete("student");
+      if (trimmed) next.set("q", trimmed);
+      else next.delete("q");
+      setParams(next);
+    }, 300);
+    return () => window.clearTimeout(handle);
+  }, [query, applied.q, params, setParams]);
 
   useEffect(() => {
     setPanel("subjects");
@@ -390,8 +411,13 @@ export function CardsPage({ session }: { session: Session }) {
         const pageOptions = await api<{ items: Option[] }>(`/api/v1/context/options?dimension=${dimension}`);
         return [dimension, pageOptions.items] as const;
       }),
-    ).then((pairs) => setOptions(Object.fromEntries(pairs))).catch(() => undefined);
-  }, []);
+    ).then((pairs) => {
+      setOptions(Object.fromEntries(pairs));
+      setOptionsError("");
+    }).catch((reason: Error) => {
+      setOptionsError(reason.message || "The filter choices could not be loaded.");
+    });
+  }, [optionsAttempt]);
 
   useEffect(() => {
     if (studentId) return;
@@ -406,6 +432,7 @@ export function CardsPage({ session }: { session: Session }) {
     REPORT_FILTERS.forEach((key) => {
       if (applied[key]) search.set(key, applied[key]);
     });
+    if (params.get("period")) search.set("period", params.get("period") || "");
     if (sort !== "name") search.set("sort", sort);
     search.set("page", String(page));
     search.set("page_size", "8");
@@ -441,11 +468,7 @@ export function CardsPage({ session }: { session: Session }) {
     let cancelled = false;
     setLoading(true);
     setError("");
-    const scope = new URLSearchParams();
-    if (cardBranch) scope.set("branch_id", cardBranch);
-    if (cardCourse) scope.set("course_id", cardCourse);
-    if (cardBatch) scope.set("batch_id", cardBatch);
-    const suffix = scope.toString();
+    const suffix = reportScope.toString();
     api<Card>(`/api/v1/students/${studentId}/card${suffix ? `?${suffix}` : ""}`)
       .then((data) => {
         if (cancelled) return;
@@ -506,26 +529,38 @@ export function CardsPage({ session }: { session: Session }) {
     setFiltersOpen(false);
   }
 
+  function commitSearch() {
+    const trimmed = query.trim();
+    if (trimmed === applied.q) return;
+    const next = new URLSearchParams(params);
+    next.delete("page");
+    next.delete("student");
+    if (trimmed) next.set("q", trimmed);
+    else next.delete("q");
+    write(next);
+  }
+
   function applyDraft() {
     const problem = periodError(draft.exam_date_from || "", draft.exam_date_to || "");
     if (problem) {
       setRangeError(problem);
       return;
     }
-    const next = new URLSearchParams();
-    if (studentId) next.set("student", studentId);
-    if (draft.q) next.set("q", draft.q);
-    REPORT_FILTERS.forEach((key) => {
+    const next = new URLSearchParams(params);
+    next.delete("page");
+    for (const key of ["subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"]) {
+      next.delete(key);
       if (draft[key]) next.set(key, draft[key]);
-    });
-    if (sort !== "name") next.set("sort", sort);
+    }
     setFiltersOpen(false);
     write(next);
   }
 
   function resetFilters() {
-    const next = new URLSearchParams();
-    if (studentId) next.set("student", studentId);
+    const next = new URLSearchParams(params);
+    next.delete("page");
+    for (const key of PAGE_FILTERS) next.delete(key);
+    setQuery("");
     setFiltersOpen(false);
     write(next);
   }
@@ -546,13 +581,12 @@ export function CardsPage({ session }: { session: Session }) {
 
   function removeFilter(key: string) {
     const opened = clearDescendants({ ...applied, [key]: "" }, key);
-    const next = new URLSearchParams();
-    if (studentId) next.set("student", studentId);
-    if (key !== "q" && applied.q) next.set("q", applied.q);
-    REPORT_FILTERS.forEach((field) => {
+    const next = new URLSearchParams(params);
+    next.delete("page");
+    for (const field of PAGE_FILTERS) {
       if (opened.filters[field]) next.set(field, opened.filters[field]);
-    });
-    if (sort !== "name") next.set("sort", sort);
+      else next.delete(field);
+    }
     write(next);
   }
 
@@ -578,7 +612,10 @@ export function CardsPage({ session }: { session: Session }) {
     setExportJob({ format, state: "queued" });
     try {
       const scope: Record<string, string> = { student_id: studentId };
-      if (card) {
+      reportScope.forEach((value, key) => {
+        scope[key] = value;
+      });
+      if (!scope.batch_id && card) {
         const memberships = (card.enrollments || []).filter((item) => item.batch_id);
         const ordered = [...memberships].sort((left, right) => (optionLabel("batch", left.batch_id) || "").localeCompare(optionLabel("batch", right.batch_id) || ""));
         if (ordered.length > 1) {
@@ -604,7 +641,7 @@ export function CardsPage({ session }: { session: Session }) {
     }
   }
 
-  const active = ["q", ...REPORT_FILTERS].filter((key) => applied[key] && key !== "page");
+  const active = PAGE_FILTERS.filter((key) => applied[key]);
   const draftComparable = Object.fromEntries(["q", ...REPORT_FILTERS].map((key) => [key, draft[key] || ""]));
   const appliedComparable = Object.fromEntries(["q", ...REPORT_FILTERS].map((key) => [key, applied[key] || ""]));
   const dirty = JSON.stringify(draftComparable) !== JSON.stringify(appliedComparable);
@@ -615,8 +652,8 @@ export function CardsPage({ session }: { session: Session }) {
 
   const filterButton = (
     <div className="icon-actions">
-      {active.length ? <button type="button" onClick={resetFilters} aria-label="Clear filters" title="Clear filters"><Icon name="clear" /></button> : null}
-      <button type="button" onClick={openFilters} aria-label={active.length ? `Filters, ${active.length} applied` : "Filters"} title="Filters"><Icon name="filter" /></button>
+      {active.length ? <button type="button" className="secondary" onClick={resetFilters}>Clear</button> : null}
+      <button type="button" className="secondary" onClick={openFilters}>More filters{active.filter((key) => key !== "q").length ? ` (${active.filter((key) => key !== "q").length})` : ""}</button>
     </div>
   );
   const filters = filtersOpen ? (
@@ -626,7 +663,6 @@ export function CardsPage({ session }: { session: Session }) {
         options={options}
         rangeError={rangeError}
         dirty={dirty}
-        showSearch={!studentId}
         onChange={editDraft}
         onApply={applyDraft}
         onReset={resetFilters}
@@ -684,6 +720,9 @@ export function CardsPage({ session }: { session: Session }) {
     return (
       <section className="panel wide print-card" aria-busy={loading}>
         {listReturn ? <Link className="quiet back-link" to={listReturn}>← Students</Link> : <button type="button" className="quiet back-link" onClick={closeCard}>← Progress cards</button>}
+        {filters}
+        <p className="filter-row">{appliedFilters}</p>
+        {optionsError ? <p className="error" role="alert">{optionsError} <button type="button" className="quiet" onClick={() => setOptionsAttempt((value) => value + 1)}>Try again</button></p> : null}
         <div className="card-head">
           <div className="student-photo" role="img" aria-label={photoId && !photoFailed ? `Photo of ${studentName}` : (studentName ? `Photo space for ${studentName}` : "Student photo")}>
             {photoId && !photoFailed ? <img src={`/api/v1/students/${studentId}/photo?v=${photoId}`} alt="" onError={() => setPhotoFailed(true)} /> : photoInitials}
@@ -740,7 +779,7 @@ export function CardsPage({ session }: { session: Session }) {
           </Dialog>
         ) : null}
         {error ? <p className="error" role="alert">{error}</p> : null}
-        {loading && !shown ? <p role="status">Loading this card…</p> : null}
+        {cardPending ? <p role="status">Loading this card…</p> : null}
         {shown && empty ? <p role="status">{empty}</p> : null}
         {shown && !empty ? (
           <>
@@ -900,11 +939,22 @@ export function CardsPage({ session }: { session: Session }) {
           <p className="eyebrow">Students</p>
           <h1>Progress cards</h1>
         </div>
-        <div className="actions">{appliedFilters}</div>
       </div>
+      <div className="toolbar common">
+        <label>Search
+          <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitSearch(); } }} placeholder="Name or student id" />
+        </label>
+        {filterButton}
+      </div>
+      <p className="filter-row">
+        {active.map((key) => (
+          <button key={key} type="button" className="chip-button" onClick={() => removeFilter(key)}>{FILTER_LABELS[key]}: {labelFor(key, applied[key])}</button>
+        ))}
+        <span role="status">{loading ? "Loading students…" : `${total} student${total === 1 ? "" : "s"}`}</span>
+      </p>
       {filters}
+      {optionsError ? <p className="error" role="alert">{optionsError} <button type="button" className="quiet" onClick={() => setOptionsAttempt((value) => value + 1)}>Try again</button></p> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
-      {loading ? <p role="status">Loading students…</p> : null}
       {!loading && summary ? (
         <div className="academic-stats">
           <div><span>Weighted performance</span><strong>{summary.percentage == null ? "—" : `${formatPercent(summary.percentage)}%`}</strong>{summary.band ? <BandMark band={summary.band} name={summary.band_name} place={summary.band_place} /> : <small>Scored marks ÷ corresponding maxima</small>}</div>
@@ -913,7 +963,7 @@ export function CardsPage({ session }: { session: Session }) {
           <div><span>Incomplete results</span><strong>{summary.missing + summary.absent}</strong><small>{summary.missing} missing · {summary.absent} absent</small></div>
         </div>
       ) : null}
-      {!loading && total === 0 ? <p>No students match this report.</p> : null}
+      {!loading && total === 0 ? <p>{active.length ? "No students match these filters. Clear them to see the full list." : (params.get("branch_id") || params.get("course_id") || params.get("batch_id") || params.get("period") ? "No students match this context." : "No students yet.")}</p> : null}
       {students.length > 0 ? (
         <div className="table-wrap">
           <table className="people-table">

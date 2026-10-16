@@ -510,6 +510,11 @@ def test_report_filters_reach_the_list_card_and_export(client):
     retests = client.get(f"/api/v1/students/{first}/card", params={"attempt": "retest"})
     assert retests.json()["results"] == []
     assert retests.json()["empty_reason"] == "filters"
+    in_period = client.get(f"/api/v1/students/{first}/card", params={"period": "2026-09"})
+    assert in_period.json()["result_count"] == 1
+    other_period = client.get(f"/api/v1/students/{first}/card", params={"period": "2027-01"})
+    assert other_period.json()["empty_reason"] == "enrollment"
+    assert other_period.json()["results"] == []
 
     queued = client.post(
         "/api/v1/reports/cards",

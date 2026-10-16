@@ -253,8 +253,15 @@ async def student_card(
     exam_date_from: str = "",
     exam_date_to: str = "",
     attempt: str = "",
+    period: str = "",
 ) -> dict:
     user = await current_user(request)
+    academic, _dropped, period_ids = await resolve_academic(
+        request, user, "progress_card.view", branch_id, course_id, batch_id, period,
+    )
+    branch_id = academic.get("branch_id", "")
+    course_id = academic.get("course_id", "")
+    batch_id = academic.get("batch_id", "")
     student = await db(request).students.find_one(
         {"_id": student_id, "institute_id": user["institute_id"]}
     )
@@ -315,19 +322,23 @@ async def student_card(
     card_filters = start_filters
     start = card_filters.get("exam_date_from") or ""
     end = card_filters.get("exam_date_to") or ""
+    allowed_batches = set(period_ids) if period_ids is not None else None
     enrolled = [
         item for item in enrollments
-        if all(
+        if (allowed_batches is None or item.get("batch_id") in allowed_batches)
+        and all(
             not card_filters.get(field) or item.get(field) == card_filters[field]
             for field in ("branch_id", "course_id", "batch_id")
         )
     ]
-    context_selected = any(card_filters.get(field) for field in ("branch_id", "course_id", "batch_id"))
+    context_selected = bool(period) or any(card_filters.get(field) for field in ("branch_id", "course_id", "batch_id"))
     if context_selected and not enrolled:
         selected = []
         empty_reason = "enrollment"
     else:
         selected = [row for row in shown_rows if matches(row, card_filters)]
+        if allowed_batches is not None:
+            selected = [row for row in selected if row.get("batch_id") in allowed_batches]
         if not shown_rows and hidden:
             empty_reason = "restricted"
         elif not shown_rows:
@@ -397,6 +408,18 @@ async def queue_cards(request: Request, body: ReportBody) -> dict:
     action = "export.pdf" if body.format == "pdf" else "export.xlsx"
     scope = clean_scope(body.scope, user["institute_id"])
     card = _card_context(body.scope)
+    period = str(body.scope.get("period") or "").strip()
+    if period:
+        _applied, _dropped, period_ids = await resolve_academic(
+            request,
+            user,
+            "progress_card.view",
+            str(body.scope.get("branch_id") or ""),
+            str(body.scope.get("course_id") or ""),
+            str(body.scope.get("batch_id") or ""),
+            period,
+        )
+        card["period_batch_ids"] = period_ids or []
     if card.get("student_id"):
         student = await db(request).students.find_one(
             {"_id": card["student_id"], "institute_id": user["institute_id"]}

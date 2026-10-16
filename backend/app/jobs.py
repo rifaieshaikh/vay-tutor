@@ -69,6 +69,9 @@ def _matches_card(row: dict, card: dict) -> bool:
     attempt = card.get("attempt")
     if attempt in {"original", "retest"} and (row.get("attempt_kind") or "original") != attempt:
         return False
+    allowed = card.get("period_batch_ids")
+    if isinstance(allowed, list) and row.get("batch_id") not in set(allowed):
+        return False
     return True
 
 

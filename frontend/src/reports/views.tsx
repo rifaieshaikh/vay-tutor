@@ -2,9 +2,9 @@ import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { notify } from "../notify";
-import { CONTEXT_FIELDS, Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
+import { Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
 import { Band, BandMark, bandTone } from "../bands";
-import { Icon, moveTab } from "../ui";
+import { moveTab } from "../ui";
 
 type Section = { id: string; label: string; students: number; results: number; percentage: number | null; band: string | null; band_name?: string | null; band_place?: string | null; coverage: string; missing?: number; absent?: number; marksheet_ids?: string[] };
 type Standing = {
@@ -103,6 +103,7 @@ const FILTERS = [
   ["exam_type", "Exam type", "exam_type"],
 ] as const;
 const FILTER_KEYS = ["branch_id", "course_id", "batch_id", "period", "subject_id", "paper_id", "exam_type", "attempt", "exam_date_from", "exam_date_to"] as const;
+const REPORT_KEYS = ["subject_id", "paper_id", "exam_type", "attempt", "exam_date_from", "exam_date_to"] as const;
 const CRUMBS: { level: (typeof LEVELS)[number]; field: string; dimension: string }[] = [
   { level: "branch", field: "branch_id", dimension: "branch" },
   { level: "course", field: "course_id", dimension: "course" },
@@ -476,12 +477,13 @@ export function ViewsPage() {
   }
 
   function resetFilters() {
-    const empty = Object.fromEntries(FILTER_KEYS.map((key) => [key, ""]));
-    setDraft(empty);
+    const kept = { ...filters };
+    for (const key of REPORT_KEYS) kept[key] = "";
+    setDraft(kept);
     setRangeError("");
     setSectionSearch("");
     setFiltersOpen(false);
-    write(level, empty, 1, panel);
+    write(level, kept, 1, panel);
   }
 
   function removeFilter(key: string) {
@@ -520,7 +522,7 @@ export function ViewsPage() {
     }
   }
 
-  const active = FILTER_KEYS.filter((key) => filters[key]);
+  const active = REPORT_KEYS.filter((key) => filters[key]);
   const levelIndex = LEVELS.indexOf(level as (typeof LEVELS)[number]);
   const crumbs = [
     { label: "Institute", level: "institute" },
@@ -567,10 +569,10 @@ export function ViewsPage() {
           {active.map((key) => (
             <button key={key} type="button" className="chip-button" onClick={() => removeFilter(key)}>{FILTERS.find(([name]) => name === key)?.[1] || (key === "exam_date_from" ? "From" : key === "exam_date_to" ? "To" : "Attempt")}: {labelFor(key, filters[key])}</button>
           ))}
-          <div className="icon-actions">
-            {active.length ? <button type="button" onClick={resetFilters} aria-label="Clear filters" title="Clear filters"><Icon name="clear" /></button> : null}
-            <button type="button" onClick={openFilters} aria-label={active.length ? `Filters, ${active.length} applied` : "Filters"} title="Filters"><Icon name="filter" /></button>
-            <Link to={`/cards${cardSuffix ? `?${cardSuffix}` : ""}`} aria-label="Open progress cards" title="Progress cards"><Icon name="card" /></Link>
+          <div className="actions">
+            {active.length ? <button type="button" className="secondary" onClick={resetFilters}>Clear</button> : null}
+            <button type="button" className="secondary" onClick={openFilters}>More filters{active.length ? ` (${active.length})` : ""}</button>
+            <Link className="button secondary" to={`/cards${cardSuffix ? `?${cardSuffix}` : ""}`}>Progress cards</Link>
           </div>
         </div>
       </div>
@@ -583,7 +585,7 @@ export function ViewsPage() {
         <Dialog title="Report filters" onClose={closeFilters}>
           <form className="report-filters" onSubmit={(event: FormEvent) => { event.preventDefault(); applyDraft(); }}>
             <div className="form-grid">
-              {CONTEXT_FIELDS.map(([key, label, dimension]) => (
+              {FILTERS.filter(([key]) => key === "subject_id" || key === "paper_id").map(([key, label, dimension]) => (
                 <label key={key}>
                   {label}
                   <select value={draft[key] || ""} onChange={(event) => editDraft(key, event.target.value)}>
