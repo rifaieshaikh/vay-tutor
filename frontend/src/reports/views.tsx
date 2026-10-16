@@ -617,7 +617,7 @@ export function ViewsPage() {
             {rangeError || periodError(draft.exam_date_from || "", draft.exam_date_to || "") ? <p className="error" role="alert">{rangeError || periodError(draft.exam_date_from || "", draft.exam_date_to || "")}</p> : null}
             {dirty ? <p className="meta">Choices change when you apply them.</p> : null}
             <div className="dialog-actions">
-              <button type="button" className="text-button" onClick={resetFilters}>Reset</button>
+              <button type="button" className="text-button" onClick={() => { const kept = { ...draft }; for (const key of REPORT_KEYS) kept[key] = ""; setDraft(kept); setRangeError(""); }}>Reset</button>
               <button type="submit" disabled={Boolean(periodError(draft.exam_date_from || "", draft.exam_date_to || ""))}>Apply filters</button>
             </div>
           </form>

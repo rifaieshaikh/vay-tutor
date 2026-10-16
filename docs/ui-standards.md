@@ -119,6 +119,18 @@ Dependent clearing stays in the context bar: a new branch clears course and batc
 
 **Loading, empty, error.** Loading names the thing loading. Empty names the zero result. Error is an alert with retry when the load can be repeated. A notice confirms a completed save. These three are not interchangeable.
 
+## Navigation
+
+The sidebar remembers its width and which groups are open in `vay.sidebar`. Several groups may stay open. Dashboard, Students, and any group with a single permitted page are direct links. Admissions, Academics, Assessments, Reports, and Administration disclose their pages. Collapsing the sidebar keeps the same page, filters, and unsaved values, and shows an icon rail. A group icon opens one labeled flyout; Escape or a click outside closes it and returns focus to that icon. Direct links do not open a flyout.
+
+Below 900px the same destinations open in a drawer. Escape, Close, and the backdrop close it. A successful move to another page closes it. A cancelled unsaved-change prompt leaves the drawer open on the current page.
+
+Jump to, and Command or Ctrl K, open the same list of permitted pages and actions. It does not search student records. Arrow keys move, Enter opens the highlighted result, and Escape restores focus. New admission is included for someone who can manage students.
+
+Presets are ordinary filters. Needs follow-up sets `follow_up=due` on Enquiries. Needs completion sets `status=open` on Admissions. Currently enrolled sets `enrollment=current` on Students and keeps people who still have an enrollment that has not ended. An unknown `enrollment` value is rejected. Clearing the view removes that filter and leaves the context bar alone.
+
+Notices name Success, Error, Warning, or Information in text. Success, warning, and information dismiss after 6 seconds and pause while the pointer or focus is on them. Errors stay until dismissed. At most four notices show at once; further successes wait in a queue and are not dropped. Errors are still shown when that cap is full.
+
 ## Reference workflow
 
 Enquiry through enrollment uses this type scale, these buttons, `StudentDialog`, `confirmDiscard`, and `formatDisplayDate`. Add enquiry stays a dialog. The admission form is a page. Create admission and Enroll are the labeled primary actions. Missing requirements show before Enroll, and the entered branch and batch remain after a failure. Yes/No is a separate answer from a consent checkbox.

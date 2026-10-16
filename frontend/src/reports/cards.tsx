@@ -556,6 +556,15 @@ export function CardsPage({ session }: { session: Session }) {
     write(next);
   }
 
+  function resetDraft() {
+    setDraft((current) => {
+      const next = { ...current };
+      for (const key of ["subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"]) next[key] = "";
+      return next;
+    });
+    setRangeError("");
+  }
+
   function resetFilters() {
     const next = new URLSearchParams(params);
     next.delete("page");
@@ -665,7 +674,7 @@ export function CardsPage({ session }: { session: Session }) {
         dirty={dirty}
         onChange={editDraft}
         onApply={applyDraft}
-        onReset={resetFilters}
+        onReset={resetDraft}
       />
     </Dialog>
   ) : null;

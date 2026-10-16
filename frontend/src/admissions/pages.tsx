@@ -194,6 +194,9 @@ export function EnquiriesPage({ session }: { session: Session }) {
       {canEditQuestions ? <p className="meta"><Link to="/forms">Edit questions in Forms</Link></p> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
       {error ? <button type="button" className="secondary" onClick={() => setRevision((value) => value + 1)}>Try again</button> : null}
+      <div className="preset-row" role="group" aria-label="Views">
+        <button type="button" className="secondary" aria-pressed={followUp === "due"} onClick={() => setParams(withParam(params, "follow_up", followUp === "due" ? "" : "due"))}>Needs follow-up</button>
+      </div>
       <form className="filter-row" onSubmit={(event) => { event.preventDefault(); setParams(withParam(params, "q", draft.trim())); }}>
         <label>Search
           <input value={draft} aria-label="Search enquiries" onChange={(event) => setDraft(event.target.value)} />
@@ -441,12 +444,10 @@ function EnquiryForm({ courses, initial, onClose, onSaved }: { courses: CourseOp
       answers: questions.map((item) => ({ question_id: item.id, value: answers[item.id] || "" })),
     };
     try {
-      if (initial) {
-        await api(`/api/v1/enquiries/${initial.id}`, { method: "PATCH", body: JSON.stringify(body) });
-      } else {
-        await api("/api/v1/enquiries", { method: "POST", body: JSON.stringify(body) });
-      }
-      notify(initial ? `Saved ${name}.` : `Added ${name}.`);
+      const saved = initial
+        ? await api<{ id: string }>(`/api/v1/enquiries/${initial.id}`, { method: "PATCH", body: JSON.stringify(body) })
+        : await api<{ id: string }>("/api/v1/enquiries", { method: "POST", body: JSON.stringify(body) });
+      notify(initial ? `Saved ${name}.` : `Added ${name}.`, "success", { label: "Open enquiry", to: `/students/enquiries/${saved.id}` });
       onSaved();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The enquiry was not saved.");
@@ -564,6 +565,9 @@ export function AdmissionsPage({ session }: { session: Session }) {
       {canEditQuestions ? <p className="meta"><Link to="/forms">Edit questions in Forms</Link></p> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
       {error ? <button type="button" className="secondary" onClick={() => setRevision((value) => value + 1)}>Try again</button> : null}
+      <div className="preset-row" role="group" aria-label="Views">
+        <button type="button" className="secondary" aria-pressed={status === "open"} onClick={() => setParams(withParam(params, "status", status === "open" ? "" : "open"))}>Needs completion</button>
+      </div>
       <form className="filter-row" onSubmit={(event) => { event.preventDefault(); setParams(withParam(params, "q", draft.trim())); }}>
         <label>Search
           <input value={draft} aria-label="Search admissions" onChange={(event) => setDraft(event.target.value)} />

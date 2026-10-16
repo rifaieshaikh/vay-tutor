@@ -219,7 +219,7 @@ export function AuditPage() {
               <input type="date" value={draftOn} aria-label="Date" onChange={(event) => setDraftOn(event.target.value)} />
             </label>
             <div className="dialog-actions span-2">
-              <button type="button" className="quiet" onClick={() => { setDraftQuery(""); setDraftAction(""); setDraftOn(""); write({ q: "", action: "", on: "", page: 1 }); setFiltersOpen(false); }}>Reset</button>
+              <button type="button" className="quiet" onClick={() => { setDraftQuery(""); setDraftAction(""); setDraftOn(""); }}>Reset</button>
               <button type="submit">Apply</button>
             </div>
           </form>

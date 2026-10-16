@@ -216,7 +216,8 @@ export function StudentsPage({ session }: { session: Session }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const period = params.get("period") || "";
-  const listKey = [applied.q, applied.branch_id, applied.course_id, applied.batch_id, period, sort, direction, page, listNonce].join("|");
+  const currentOnly = params.get("enrollment") === "current";
+  const listKey = [applied.q, applied.branch_id, applied.course_id, applied.batch_id, period, currentOnly, sort, direction, page, listNonce].join("|");
 
   useEffect(() => {
     setQuery(applied.q);
@@ -251,6 +252,7 @@ export function StudentsPage({ session }: { session: Session }) {
     if (applied.course_id) search.set("course_id", applied.course_id);
     if (applied.batch_id) search.set("batch_id", applied.batch_id);
     if (period) search.set("period", period);
+    if (currentOnly) search.set("enrollment", "current");
     if (sort !== "name") search.set("sort", sort);
     if (direction === "desc") search.set("direction", "desc");
     search.set("page", String(page));
@@ -281,8 +283,18 @@ export function StudentsPage({ session }: { session: Session }) {
     setQuery("");
     const next = new URLSearchParams(params);
     next.delete("q");
+    next.delete("enrollment");
     next.delete("page");
     next.delete("student");
+    write(next);
+  }
+
+  function setCurrentOnly(enabled: boolean) {
+    const next = new URLSearchParams(params);
+    next.delete("page");
+    next.delete("student");
+    if (enabled) next.set("enrollment", "current");
+    else next.delete("enrollment");
     write(next);
   }
 
@@ -367,6 +379,9 @@ export function StudentsPage({ session }: { session: Session }) {
       </div>
       <Notes error={error} />
       {error ? <button type="button" className="secondary" onClick={() => setListNonce((value) => value + 1)}>Try again</button> : null}
+      <div className="preset-row" role="group" aria-label="Views">
+        <button type="button" className="secondary" aria-pressed={currentOnly} onClick={() => setCurrentOnly(!currentOnly)}>Currently enrolled</button>
+      </div>
       <div className="toolbar common">
         <label>Search
           <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitSearch(); } }} placeholder="Name or student id" />
@@ -374,7 +389,8 @@ export function StudentsPage({ session }: { session: Session }) {
       </div>
       <p className="filter-row">
         {applied.q ? <button type="button" className="chip-button" onClick={clearSearch}>Search: {applied.q}</button> : null}
-        {applied.q ? <button type="button" className="quiet" onClick={clearSearch}>Clear</button> : null}
+        {currentOnly ? <button type="button" className="chip-button" onClick={() => setCurrentOnly(false)}>Currently enrolled</button> : null}
+        {applied.q || currentOnly ? <button type="button" className="quiet" onClick={clearSearch}>Clear</button> : null}
         <span>{loading ? "Loading students…" : `${total} student${total === 1 ? "" : "s"}`}</span>
       </p>
       {sortOpen ? (
@@ -398,7 +414,7 @@ export function StudentsPage({ session }: { session: Session }) {
           </form>
         </StudentDialog>
       ) : null}
-      {!loading && !error && total === 0 ? <p>{applied.q ? "No students match this search. Clear it to see the full list." : "No students match this context."}</p> : null}
+      {!loading && !error && total === 0 ? <p>{applied.q || currentOnly ? "No students match this view. Clear it to see the full list." : "No students match this context."}</p> : null}
       {students.length > 0 ? (
         <div className="table-wrap">
           <table className="people-table directory">

@@ -584,7 +584,7 @@ export function ImportPage() {
       setStep(5);
       notify(result.summary
         ? `Import finished. ${result.summary.counts.results.insert} results inserted, ${result.summary.counts.results.update} updated.`
-        : "Import finished. Drafts stay unpublished until you review the marksheets.");
+        : "Import finished. Drafts stay unpublished until you review the marksheets.", "success", { label: "Open marksheets", to: "/marksheets" });
       await loadHistory();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Commit failed.");
@@ -649,6 +649,12 @@ export function ImportPage() {
         </div>
         <button type="button" onClick={() => { setPreview(null); setStep(0); setError(""); setOpen(true); }}>Import marklist</button>
       </div>
+      {stateFilter ? (
+        <p className="filter-row">
+          <button type="button" className="quiet" onClick={() => { const next = new URLSearchParams(params); next.delete("state"); setParams(next); }}>{stateFilter === "failed" ? "Failed" : stateFilter}</button>
+          <button type="button" className="quiet" onClick={() => { const next = new URLSearchParams(params); next.delete("state"); setParams(next); }}>Clear</button>
+        </p>
+      ) : null}
       <p>Each workbook stays in this list. Opening the import wizard does not remove earlier imports. Close the window and the history is still here.</p>
       {error && !open ? <p className="error" role="alert">{error}</p> : null}
       {history.length === 0 ? <p>{stateFilter === "failed" ? "No failed imports." : "No imports yet."}</p> : (

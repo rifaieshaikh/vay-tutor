@@ -86,6 +86,7 @@ async def list_students(
     exam_date_to: str = "",
     attempt: str = "",
     period: str = "",
+    enrollment: str = "",
     sort: str = "name",
     direction: str = "asc",
     page: int = 0,
@@ -203,6 +204,12 @@ async def list_students(
             item["name_key"] = student.get("name_key")
         items.append(item)
         included_rows.extend(rows)
+    if enrollment not in {"", "current"}:
+        raise AppError(422, "students.enrollment", "Enrollment must be current or omitted.")
+    if enrollment == "current":
+        items = [item for item in items if any(row.get("status") != "historical" for row in item["enrollments"])]
+        kept = {item["id"] for item in items}
+        included_rows = [row for row in included_rows if row.get("student_id") in kept]
     report = aggregate(included_rows, policy)
     summary = {
         "percentage": report["percentage"],

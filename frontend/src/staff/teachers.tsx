@@ -160,7 +160,7 @@ export function TeachersPage() {
               <input value={draftQuery} aria-label="Search" placeholder="Name or email" onChange={(event) => setDraftQuery(event.target.value)} />
             </label>
             <div className="dialog-actions span-2">
-              <button type="button" className="quiet" onClick={() => { setDraftQuery(""); setParams({}); setFiltersOpen(false); }}>Reset</button>
+              <button type="button" className="quiet" onClick={() => setDraftQuery("")}>Reset</button>
               <button type="submit">Apply</button>
             </div>
             </form>

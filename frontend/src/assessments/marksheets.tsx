@@ -177,6 +177,7 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
   const [optionsError, setOptionsError] = useState("");
   const [optionsAttempt, setOptionsAttempt] = useState(0);
   const [draftQuery, setDraftQuery] = useState(filters.q);
+  const [advancedDraft, setAdvancedDraft] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
 
   function write(next: Record<string, string>) {
@@ -236,6 +237,28 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
     }, 300);
     return () => window.clearTimeout(handle);
   }, [draftQuery]);
+
+  function openAdvanced() {
+    setAdvancedDraft(Object.fromEntries(ADVANCED_KEYS.map((key) => [key, filters[key] || ""])));
+    setPanel("filters");
+  }
+
+  function editAdvanced(key: string, value: string) {
+    setAdvancedDraft((current) => {
+      const merged = { ...filters, ...current, [key]: value };
+      const { filters: next } = clearIncompatible(merged, options, key);
+      return Object.fromEntries(ADVANCED_KEYS.map((field) => [field, next[field] || ""]));
+    });
+  }
+
+  function applyAdvanced() {
+    write({ ...filters, ...advancedDraft, page: "1" });
+    setPanel(null);
+  }
+
+  function resetAdvanced() {
+    setAdvancedDraft(Object.fromEntries(ADVANCED_KEYS.map((key) => [key, ""])));
+  }
 
   function choose(key: string, value: string) {
     const merged = { ...filters, [key]: value, page: "1" };
@@ -320,7 +343,7 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
             ))}
           </select>
         </label>
-        <button type="button" className="secondary" onClick={() => setPanel("filters")}>More filters{advancedCount ? ` (${advancedCount})` : ""}</button>
+        <button type="button" className="secondary" onClick={openAdvanced}>More filters{advancedCount ? ` (${advancedCount})` : ""}</button>
       </div>
       {optionsError ? <p className="error" role="alert">{optionsError} <button type="button" className="quiet" onClick={() => setOptionsAttempt((value) => value + 1)}>Try again</button></p> : null}
       <p className="filter-row">
@@ -339,26 +362,27 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
           <div className="form-grid">
             <label>
               Paper
-              <select value={filters.paper_id} onChange={(event) => choose("paper_id", event.target.value)}>
+              <select value={advancedDraft.paper_id || ""} onChange={(event) => editAdvanced("paper_id", event.target.value)}>
                 <option value="">All</option>
-                {(options.paper || []).filter((option) => optionFits(option, filters)).map((option) => (
+                {(options.paper || []).filter((option) => optionFits(option, { ...filters, ...advancedDraft })).map((option) => (
                   <option key={option.id} value={option.id}>{option.label}</option>
                 ))}
               </select>
             </label>
             <label>
               Exam type
-              <select value={filters.exam_type} onChange={(event) => choose("exam_type", event.target.value)}>
+              <select value={advancedDraft.exam_type || ""} onChange={(event) => editAdvanced("exam_type", event.target.value)}>
                 <option value="">All</option>
                 {(options.exam_type || []).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
               </select>
             </label>
-            <label>From<input type="date" value={filters.exam_date_from} onChange={(event) => choose("exam_date_from", event.target.value)} /></label>
-            <label>To<input type="date" value={filters.exam_date_to} onChange={(event) => choose("exam_date_to", event.target.value)} /></label>
+            <label>From<input type="date" value={advancedDraft.exam_date_from || ""} onChange={(event) => editAdvanced("exam_date_from", event.target.value)} /></label>
+            <label>To<input type="date" value={advancedDraft.exam_date_to || ""} onChange={(event) => editAdvanced("exam_date_to", event.target.value)} /></label>
           </div>
           <div className="dialog-actions">
-            {active.length ? <button type="button" className="text-button" onClick={clearPageFilters}>Clear</button> : null}
-            <button type="button" onClick={() => setPanel(null)}>Done</button>
+            <button type="button" className="quiet" onClick={() => setPanel(null)}>Cancel</button>
+            <button type="button" className="secondary" onClick={resetAdvanced}>Reset</button>
+            <button type="button" onClick={applyAdvanced}>Apply</button>
           </div>
         </Dialog>
       ) : null}

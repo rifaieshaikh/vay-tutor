@@ -294,7 +294,7 @@ export function AccessPage() {
               </select>
             </label>
             <div className="dialog-actions span-2">
-              <button type="button" className="quiet" onClick={() => { writeFilters("", ""); setDraftQuery(""); setDraftStatus(""); setFiltersOpen(false); }}>Reset</button>
+              <button type="button" className="quiet" onClick={() => { setDraftQuery(""); setDraftStatus(""); }}>Reset</button>
               <button type="submit">Apply</button>
             </div>
           </form>

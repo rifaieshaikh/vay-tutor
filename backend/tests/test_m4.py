@@ -499,6 +499,11 @@ def test_report_filters_reach_the_list_card_and_export(client):
     assert ranked.json()["items"][0]["performance"]["percentage"] == 90
     assert ranked.json()["summary"]["percentage"] == 90
     assert client.get("/api/v1/students", params={"exam_date_from": "2026-12-01", "exam_date_to": "2026-01-01"}).status_code == 422
+    assert client.get("/api/v1/students", params={"page": 1, "enrollment": "alumni"}).status_code == 422
+    database.enrollments.update_one({"student_id": second}, {"$set": {"status": "historical", "ended_on": "2026-01-01"}})
+    current_only = client.get("/api/v1/students", params={"page": 1, "enrollment": "current"})
+    assert current_only.status_code == 200, current_only.text
+    assert [item["id"] for item in current_only.json()["items"]] == [first]
 
     filtered = client.get(f"/api/v1/students/{first}/card", params={"exam_date_from": "2026-12-01"})
     assert filtered.json()["empty_reason"] == "filters"
