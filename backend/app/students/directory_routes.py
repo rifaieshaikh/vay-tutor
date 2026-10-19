@@ -64,6 +64,8 @@ async def student_options(request: Request, manage: bool = False) -> dict:
         visible_batches.append({
             "id": row["_id"],
             "label": row.get("name") or "",
+            "started_on": row.get("started_on") or "",
+            "ended_on": row.get("ended_on") or "",
             "parents": {"branch_id": row.get("branch_id"), "course_id": row.get("course_id")},
         })
     visible_branches.sort(key=lambda item: item["label"].casefold())

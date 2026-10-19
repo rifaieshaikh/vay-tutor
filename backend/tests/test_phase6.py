@@ -91,7 +91,7 @@ def test_connected_records_survive_retry_and_a_rejected_enrollment(client):
     assert repeated.json()["id"] == admitted.json()["id"]
     converted = client.post(
         f"/api/v1/admissions/{admitted.json()['id']}/convert",
-        json={"branch_id": branch_id, "batch_id": batch_id},
+        json={"branch_id": branch_id, "batch_id": batch_id, "decision": "create"},
     )
     assert converted.status_code == 200, converted.text
     student_id = converted.json()["id"]
@@ -191,7 +191,7 @@ def test_disjoint_scope_and_revocation_hide_connected_records(client):
     admission_id = client.post(f"/api/v1/enquiries/{enquiry.json()['id']}/convert").json()["id"]
     student_id = client.post(
         f"/api/v1/admissions/{admission_id}/convert",
-        json={"branch_id": tirur, "batch_id": batch_id},
+        json={"branch_id": tirur, "batch_id": batch_id, "decision": "create"},
     ).json()["id"]
     sheet = client.post(
         "/api/v1/marksheets",

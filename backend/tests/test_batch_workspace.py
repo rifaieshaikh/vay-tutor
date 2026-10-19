@@ -82,7 +82,7 @@ def test_batch_workspace_connects_the_academic_workflow(client):
     assert admission.status_code == 200, admission.text
     enrolled = client.post(
         f"/api/v1/admissions/{admission.json()['id']}/convert",
-        json={"branch_id": branch_id, "batch_id": batch_id},
+        json={"branch_id": branch_id, "batch_id": batch_id, "decision": "create"},
     )
     assert enrolled.status_code == 200, enrolled.text
     student_id = enrolled.json()["id"]

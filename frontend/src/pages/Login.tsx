@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import { api } from "../api";
+import { Icon } from "../ui";
 
 type LoginResult = { verification?: string; challenge?: string };
 
@@ -132,11 +133,13 @@ export function LoginPage({ onReady }: { onReady: () => Promise<void> }) {
           </label>
           <label>
             Password
-            <input name="password" type={showPassword ? "text" : "password"} autoComplete="current-password" required />
+            <span className="password-field">
+              <input name="password" type={showPassword ? "text" : "password"} autoComplete="current-password" required />
+              <button type="button" className="password-toggle" aria-pressed={showPassword} aria-label={showPassword ? "Hide password" : "Show password"} onClick={() => setShowPassword((value) => !value)}>
+                <Icon name={showPassword ? "view-off" : "view"} />
+              </button>
+            </span>
           </label>
-          <button type="button" className="quiet" onClick={() => setShowPassword((value) => !value)}>
-            {showPassword ? "Hide password" : "Show password"}
-          </button>
           {error ? <p className="error" role="alert">{error}</p> : null}
           <button type="submit" disabled={pending}>{pending ? "Signing in…" : "Sign in"}</button>
           <p><button type="button" className="quiet" onClick={() => { setRecovery(true); setError(""); }}>Use a recovery code</button></p>

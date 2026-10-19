@@ -1,7 +1,9 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { EnquiriesPage, EnquiryPage } from "./enquiries";
+import { EnquiryImportPage } from "./enquiryImport";
 import { ApiError, api, Session } from "../api";
-import { Option, optionFits } from "../filters";
+import { Option } from "../filters";
 import { formatDisplayDate } from "../format";
 import { useUnsaved } from "../guard";
 import { notify } from "../notify";
@@ -12,30 +14,16 @@ import { AnswerFields, Question } from "./questions";
 
 type CourseOption = { id: string; name: string };
 type Answer = { question_id: string; label?: string; value: string };
-type FollowUp = { id: string; at: string; note: string; interest: string; next_on: string };
-type Enquiry = {
-  id: string;
-  name: string;
-  whatsapp: string;
-  present_institution: string;
-  course_id: string;
-  course_name: string;
-  interest: string;
-  references: string;
-  details: string;
-  questions?: Question[];
-  answers?: Answer[];
-  follow_ups: FollowUp[];
-  follow_up_count?: number;
-  admission_id: string | null;
-  stage?: string;
-  next_action?: string;
-  next_on?: string;
-  follow_up_state?: string;
-};
-type Match = { id: string; display_name: string; student_code: string; phone: string };
+type Difference = { field: string; label: string; application: string; student: string };
+type Match = { id: string; display_name: string; student_code: string; phone: string; email?: string; differences?: Difference[] };
+type Repeat = { id: string; reference: string; name: string };
+type Prospect = { id: string; name: string; whatsapp: string };
+type BatchChoice = { id: string; branch_id: string; branch_name: string; name: string; started_on: string; ended_on: string; open: boolean };
+type Requirement = { key: string; state: string; section: string; field: string; label: string; message: string };
+type Activity = { id: string; kind: string; at: string; note: string; actor?: string };
 type Admission = {
   id: string;
+  reference?: string;
   course_id: string;
   course_name: string;
   name: string;
@@ -57,10 +45,15 @@ type Admission = {
   business_answers?: Answer[];
   questions: Question[];
   status: string;
+  lifecycle?: string;
+  readiness?: string;
+  requirements?: Requirement[];
   student_id: string | null;
   enrollment_id?: string | null;
   branch_id?: string | null;
+  branch_name?: string;
   batch_id?: string | null;
+  batch_name?: string;
   enquiry_id: string | null;
   stage?: string;
   next_action?: string;
@@ -68,42 +61,48 @@ type Admission = {
   match_decision: string;
   match_student_id: string;
   matches: Match[];
-};
-type PreviewRow = {
-  row: number;
-  errors: string[];
-  matches?: Match[];
-  values: Record<string, unknown>;
-  answers?: Answer[];
-  business_answers?: Answer[];
-  decision?: string;
-  student_id?: string;
+  closure_reason?: string;
+  activity?: Activity[];
+  created_at?: string;
+  updated_at?: string;
+  episode_note?: string;
+  prospect?: Prospect | null;
+  repeats?: Repeat[];
+  batches?: BatchChoice[];
 };
 
-const INTERESTS = ["High", "Medium", "Low"];
-const FOLLOW_FILTERS = [
-  { value: "due", label: "Due" },
-  { value: "overdue", label: "Overdue" },
-  { value: "today", label: "Today" },
-  { value: "upcoming", label: "Upcoming" },
-  { value: "unscheduled", label: "Unscheduled" },
-  { value: "admitted", label: "Admitted" },
+const BLOOD = BLOOD_GROUPS;
+const CLOSURE_REASONS = ["Not interested", "Joined elsewhere", "Unable to contact", "Duplicate entry", "Created by mistake", "Other"];
+const ADMISSION_SORTS = [
+  { value: "created:desc", label: "Newest" },
+  { value: "created:asc", label: "Oldest" },
+  { value: "name:asc", label: "Name A to Z" },
+  { value: "name:desc", label: "Name Z to A" },
+  { value: "updated:desc", label: "Recently updated" },
+  { value: "updated:asc", label: "Least recently updated" },
 ];
 
-function followUpLabel(value: string) {
-  return FOLLOW_FILTERS.find((item) => item.value === value)?.label || value;
+function readinessLabel(value = "") {
+  if (value === "needs_information") return "Needs information";
+  if (value === "needs_identity") return "Needs identity review";
+  if (value === "needs_batch") return "Choose a batch";
+  if (value === "ready") return "Ready for enrollment";
+  if (value === "enrolled") return "Enrolled";
+  if (value === "closed") return "Closed";
+  if (value === "unavailable") return "Unavailable";
+  return "Open";
 }
 
-function followUpWhen(item: Enquiry) {
-  if (item.follow_up_state === "admitted" || item.admission_id) return "Admitted";
-  if (!item.next_on) return "Unscheduled";
-  const timing = item.follow_up_state === "overdue" ? "Overdue" : item.follow_up_state === "today" ? "Today" : "Upcoming";
-  return `${formatDisplayDate(item.next_on)} · ${timing}`;
+function lifecycleLabel(item: Admission) {
+  if (item.lifecycle === "enrolled" || item.status === "converted") return "Enrolled";
+  if (item.lifecycle === "closed" || item.status === "closed") return "Closed";
+  return "Open";
 }
-const BLOOD = BLOOD_GROUPS;
 
-function readable(text: string) {
-  return text.replace(/\d{4}-\d{2}-\d{2}/g, (value) => formatDisplayDate(value));
+function sortToken(params: URLSearchParams) {
+  const sort = params.get("sort") || "created";
+  const direction = params.get("direction") || "desc";
+  return `${sort}:${direction}`;
 }
 
 function withParam(params: URLSearchParams, key: string, value: string) {
@@ -114,406 +113,47 @@ function withParam(params: URLSearchParams, key: string, value: string) {
   return next;
 }
 
-function missingAnswers(questions: Question[], answers: { question_id: string; value: string }[]) {
-  return questions.filter((question) => question.required && !answers.some((item) => item.question_id === question.id && item.value.trim()));
-}
-
 function coursesOf(catalog: { courses: CourseOption[] } | null) {
   return [...(catalog?.courses || [])].sort((left, right) => left.name.localeCompare(right.name));
-}
-
-export function EnquiriesPage({ session }: { session: Session }) {
-  const [params, setParams] = useSearchParams();
-  const followUp = params.get("follow_up") || "";
-  const courseId = params.get("course_id") || "";
-  const sort = params.get("sort") || "";
-  const query = params.get("q") || "";
-  const page = Math.max(1, Number(params.get("page")) || 1);
-  const canManage = session.actions.includes("student.manage");
-  const canEditQuestions = session.actions.includes("catalog.correct") || session.actions.includes("catalog.manage");
-  const [items, setItems] = useState<Enquiry[]>([]);
-  const [total, setTotal] = useState(0);
-  const [pages, setPages] = useState(1);
-  const [draft, setDraft] = useState(query);
-  const [courses, setCourses] = useState<CourseOption[]>([]);
-  const [adding, setAdding] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [revision, setRevision] = useState(0);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-  const filtered = Boolean(query || followUp || courseId || sort);
-
-  useEffect(() => { setDraft(query); }, [query]);
-
-  useEffect(() => {
-    const handle = window.setTimeout(() => {
-      if (draft === query) return;
-      setParams(withParam(params, "q", draft.trim()));
-    }, 300);
-    return () => window.clearTimeout(handle);
-  }, [draft, query, params, setParams]);
-
-  useEffect(() => {
-    const searchParams = new URLSearchParams();
-    if (query) searchParams.set("q", query);
-    if (followUp) searchParams.set("follow_up", followUp);
-    if (courseId) searchParams.set("course_id", courseId);
-    if (sort) searchParams.set("sort", sort);
-    searchParams.set("page", String(page));
-    let cancelled = false;
-    setLoading(true);
-    api<{ items: Enquiry[]; total: number; pages: number }>(`/api/v1/enquiries?${searchParams.toString()}`)
-      .then((result) => {
-        if (cancelled) return;
-        setItems(result.items);
-        setTotal(result.total);
-        setPages(result.pages);
-        setError("");
-      })
-      .catch((reason: Error) => { if (!cancelled) setError(reason.message); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    api<{ courses: CourseOption[] }>("/api/v1/catalog").then((catalog) => { if (!cancelled) setCourses(coursesOf(catalog)); }).catch(() => undefined);
-    return () => { cancelled = true; };
-  }, [followUp, courseId, sort, query, page, revision]);
-
-  return (
-    <section className="panel wide">
-      <div className="page-title">
-        <div>
-          <p className="eyebrow">Admissions</p>
-          <h1>Enquiries</h1>
-          {followUp === "due" ? <p className="page-lead">Enquiries awaiting follow-up.</p> : null}
-        </div>
-        {canManage ? (
-          <div className="actions">
-            <button type="button" className="secondary" onClick={() => setImporting(true)}>Import</button>
-            <button type="button" onClick={() => setAdding(true)}>Add enquiry</button>
-          </div>
-        ) : null}
-      </div>
-      {canEditQuestions ? <p className="meta"><Link to="/forms">Edit questions in Forms</Link></p> : null}
-      {error ? <p className="error" role="alert">{error}</p> : null}
-      {error ? <button type="button" className="secondary" onClick={() => setRevision((value) => value + 1)}>Try again</button> : null}
-      <div className="preset-row" role="group" aria-label="Views">
-        <button type="button" className="secondary" aria-pressed={followUp === "due"} onClick={() => setParams(withParam(params, "follow_up", followUp === "due" ? "" : "due"))}>Needs follow-up</button>
-      </div>
-      <form className="filter-row" onSubmit={(event) => { event.preventDefault(); setParams(withParam(params, "q", draft.trim())); }}>
-        <label>Search
-          <input value={draft} aria-label="Search enquiries" onChange={(event) => setDraft(event.target.value)} />
-        </label>
-        <label>Follow-up
-          <select aria-label="Follow-up" value={followUp} onChange={(event) => setParams(withParam(params, "follow_up", event.target.value))}>
-            <option value="">Any</option>
-            {FOLLOW_FILTERS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-          </select>
-        </label>
-        <label>Sort
-          <select aria-label="Sort" value={sort} onChange={(event) => setParams(withParam(params, "sort", event.target.value))}>
-            <option value="">Newest</option>
-            <option value="next_on">Next follow-up</option>
-          </select>
-        </label>
-        <label>Course
-          <select aria-label="Course" value={courseId} onChange={(event) => setParams(withParam(params, "course_id", event.target.value))}>
-            <option value="">Any course</option>
-            {courses.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </select>
-        </label>
-      </form>
-      <p className="filter-row">
-        <span>{loading ? "Loading enquiries…" : `${total} enquir${total === 1 ? "y" : "ies"}`}</span>
-        {followUp ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "follow_up", ""))}>{followUpLabel(followUp)}</button> : null}
-        {sort ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "sort", ""))}>Next follow-up</button> : null}
-        {courseId ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "course_id", ""))}>{courses.find((item) => item.id === courseId)?.name || "Course"}</button> : null}
-        {query ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "q", ""))}>{query}</button> : null}
-        {filtered ? <button type="button" className="quiet" onClick={() => setParams(new URLSearchParams())}>Clear</button> : null}
-      </p>
-      {items.length === 0 && !loading ? <p>{filtered ? "No enquiries match." : "No enquiries yet."}</p> : null}
-      {items.length > 0 ? (
-        <div className="table-wrap">
-          <table className="people-table">
-            <caption className="sr-only">Enquiries</caption>
-            <thead>
-              <tr><th>Name</th><th>Contact</th><th>Course</th><th>Interest</th><th>Next follow-up</th><th>Stage</th></tr>
-            </thead>
-            <tbody>
-              {items.map((item) => (
-                <tr key={item.id}>
-                  <td><Link to={`/students/enquiries/${item.id}`}>{item.name}</Link></td>
-                  <td>{item.whatsapp || "Not recorded"}</td>
-                  <td>{item.course_name || "Not recorded"}</td>
-                  <td>{item.interest || "Not recorded"}</td>
-                  <td>{followUpWhen(item)}</td>
-                  <td>{item.admission_id ? <Link to={`/students/admissions/${item.admission_id}`}>Admitted</Link> : (item.stage || "Enquiry")}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
-      {pages > 1 ? (
-        <p className="actions">
-          <button type="button" className="secondary" disabled={page <= 1} onClick={() => setParams(withParam(params, "page", String(page - 1)))}>Previous</button>
-          <span>Page {page} of {pages}</span>
-          <button type="button" className="secondary" disabled={page >= pages} onClick={() => setParams(withParam(params, "page", String(page + 1)))}>Next</button>
-        </p>
-      ) : null}
-      {adding ? <EnquiryForm courses={courses} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); setRevision((value) => value + 1); }} /> : null}
-      {importing ? <ImportDialog kind="enquiries" onClose={() => setImporting(false)} onSaved={() => { setImporting(false); setRevision((value) => value + 1); }} /> : null}
-    </section>
-  );
-}
-
-export function EnquiryPage({ session }: { session: Session }) {
-  const { enquiryId = "" } = useParams();
-  const navigate = useNavigate();
-  const canManage = session.actions.includes("student.manage");
-  const [enquiry, setEnquiry] = useState<Enquiry | null>(null);
-  const [courses, setCourses] = useState<CourseOption[]>([]);
-  const [editing, setEditing] = useState(false);
-  const [error, setError] = useState("");
-  const [admitting, setAdmitting] = useState(false);
-  const [savingFollow, setSavingFollow] = useState(false);
-  const [addingFollow, setAddingFollow] = useState(false);
-  const [follow, setFollow] = useState({ at: "", note: "", interest: "", next_on: "" });
-  const followDirty = Boolean(follow.at || follow.note || follow.interest || follow.next_on);
-  useRecordLabel(enquiry?.name || "");
-  useUnsaved(followDirty);
-
-  function load() {
-    api<Enquiry>(`/api/v1/enquiries/${enquiryId}`).then(setEnquiry).catch((reason: Error) => setError(reason.message));
-  }
-
-  useEffect(() => {
-    load();
-    api<{ courses: CourseOption[] }>("/api/v1/catalog").then((catalog) => setCourses(coursesOf(catalog))).catch(() => undefined);
-  }, [enquiryId]);
-
-  async function addFollow(event: FormEvent) {
-    event.preventDefault();
-    if (savingFollow) return;
-    setSavingFollow(true);
-    setError("");
-    try {
-      await api(`/api/v1/enquiries/${enquiryId}/follow-ups`, { method: "POST", body: JSON.stringify(follow) });
-      setFollow({ at: "", note: "", interest: "", next_on: "" });
-      setAddingFollow(false);
-      notify("Saved the follow-up.");
-      load();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The follow-up was not saved.");
-    } finally {
-      setSavingFollow(false);
-    }
-  }
-
-  async function convert() {
-    if (admitting) return;
-    setAdmitting(true);
-    setError("");
-    try {
-      const result = await api<{ id: string }>(`/api/v1/enquiries/${enquiryId}/convert`, { method: "POST" });
-      notify("Opened the admission.");
-      navigate(`/students/admissions/${result.id}`);
-    } catch (reason) {
-      setAdmitting(false);
-      setError(reason instanceof Error ? reason.message : "The enquiry was not admitted.");
-    }
-  }
-
-  if (!enquiry) {
-    return <section className="panel">{error ? <p className="error" role="alert">{error}</p> : <p>Loading enquiry…</p>}</section>;
-  }
-  return (
-    <section className="panel wide">
-      <div className="title-row">
-        <div>
-          <p className="eyebrow">Enquiry</p>
-          <h1>{enquiry.name}</h1>
-          <p className="meta">{enquiry.stage || (enquiry.admission_id ? "Admitted" : "Enquiry")} · {readable(enquiry.next_action || (enquiry.admission_id ? "Open the admission" : "Record a follow-up"))}</p>
-        </div>
-        <div className="actions">
-          {canManage ? <button type="button" onClick={() => setEditing(true)}>Edit</button> : null}
-          {enquiry.admission_id ? <Link className="button" to={`/students/admissions/${enquiry.admission_id}`}>Open admission</Link> : canManage ? <button type="button" disabled={admitting} onClick={() => void convert()}>{admitting ? "Creating…" : "Create admission"}</button> : null}
-        </div>
-      </div>
-      {error ? <p className="error" role="alert">{error}</p> : null}
-      <dl className="facts">
-        <div><dt>WhatsApp</dt><dd className={enquiry.whatsapp ? undefined : "is-empty"}>{enquiry.whatsapp || "Not recorded"}</dd></div>
-        <div><dt>Interest</dt><dd className={enquiry.interest ? undefined : "is-empty"}>{enquiry.interest || "Not recorded"}</dd></div>
-        <div className="span-2"><dt>Present institution</dt><dd className={enquiry.present_institution ? undefined : "is-empty"}>{enquiry.present_institution || "Not recorded"}</dd></div>
-        <div className="span-2"><dt>Interested course</dt><dd className={enquiry.course_name ? undefined : "is-empty"}>{enquiry.course_name || "Not recorded"}</dd></div>
-        <div className="span-2"><dt>References</dt><dd className={enquiry.references ? undefined : "is-empty"}>{enquiry.references || "Not recorded"}</dd></div>
-        <div className="span-2"><dt>Other details</dt><dd className={enquiry.details ? undefined : "is-empty"}>{enquiry.details || "Not recorded"}</dd></div>
-        {(enquiry.answers || []).map((item) => (
-          <div key={item.question_id} className="span-2"><dt>{item.label || "Question"}</dt><dd className={item.value ? undefined : "is-empty"}>{item.value || "Not recorded"}</dd></div>
-        ))}
-      </dl>
-      <h2>Follow-ups</h2>
-      {enquiry.follow_ups.length === 0 ? <p>No follow-ups yet.</p> : (
-        <div className="table-wrap">
-          <table className="people-table">
-            <caption className="sr-only">Follow-ups</caption>
-            <thead><tr><th>Date</th><th>Discussed</th><th>Interest</th><th>Next</th></tr></thead>
-            <tbody>
-              {enquiry.follow_ups.map((item) => (
-                <tr key={item.id}>
-                  <td>{formatDisplayDate(item.at)}</td>
-                  <td>{item.note}</td>
-                  <td>{item.interest || "Not recorded"}</td>
-                  <td>{formatDisplayDate(item.next_on)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      {canManage && !enquiry.admission_id && !addingFollow ? (
-        <p className="actions"><button type="button" onClick={() => { setAddingFollow(true); setFollow((current) => ({ ...current, at: current.at || new Date().toISOString().slice(0, 10) })); }}>Add follow-up</button></p>
-      ) : null}
-      {canManage && !enquiry.admission_id && addingFollow ? (
-        <form className="form-grid" onSubmit={addFollow}>
-          <label>Date
-            <input type="date" value={follow.at} required onChange={(event) => setFollow({ ...follow, at: event.target.value })} />
-          </label>
-          <label>Interest after this contact
-            <select value={follow.interest} onChange={(event) => setFollow({ ...follow, interest: event.target.value })}>
-              <option value="">Not recorded</option>
-              {INTERESTS.map((item) => <option key={item}>{item}</option>)}
-            </select>
-          </label>
-          <label className="span-2">What was discussed
-            <textarea rows={3} value={follow.note} required onChange={(event) => setFollow({ ...follow, note: event.target.value })} />
-          </label>
-          <label>Next follow-up
-            <input type="date" value={follow.next_on} onChange={(event) => setFollow({ ...follow, next_on: event.target.value })} />
-          </label>
-          <div className="dialog-actions span-2">
-            <button type="button" className="quiet" onClick={() => { if (confirmDiscard(followDirty)) { setAddingFollow(false); setFollow({ at: "", note: "", interest: "", next_on: "" }); } }}>Cancel</button>
-            <button type="submit" disabled={savingFollow}>{savingFollow ? "Saving…" : "Save follow-up"}</button>
-          </div>
-        </form>
-      ) : null}
-      {editing ? <EnquiryForm courses={courses} initial={enquiry} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); }} /> : null}
-    </section>
-  );
-}
-
-function EnquiryForm({ courses, initial, onClose, onSaved }: { courses: CourseOption[]; initial?: Enquiry; onClose: () => void; onSaved: () => void }) {
-  const [name, setName] = useState(initial?.name || "");
-  const [whatsapp, setWhatsapp] = useState(initial?.whatsapp || "");
-  const [institution, setInstitution] = useState(initial?.present_institution || "");
-  const [courseId, setCourseId] = useState(initial?.course_id || "");
-  const [interest, setInterest] = useState(initial?.interest || "");
-  const [references, setReferences] = useState(initial?.references || "");
-  const [details, setDetails] = useState(initial?.details || "");
-  const [questions, setQuestions] = useState<Question[]>(initial?.questions || []);
-  const [answers, setAnswers] = useState<Record<string, string>>(Object.fromEntries((initial?.answers || []).map((item) => [item.question_id, item.value])));
-  const [error, setError] = useState("");
-  const [saving, setSaving] = useState(false);
-  const answersDirty = questions.some((item) => (answers[item.id] || "") !== ((initial?.answers || []).find((answer) => answer.question_id === item.id)?.value || ""));
-  const dirty = !saving && (
-    name !== (initial?.name || "")
-    || whatsapp !== (initial?.whatsapp || "")
-    || institution !== (initial?.present_institution || "")
-    || courseId !== (initial?.course_id || "")
-    || interest !== (initial?.interest || "")
-    || references !== (initial?.references || "")
-    || details !== (initial?.details || "")
-    || answersDirty
-  );
-  useUnsaved(dirty);
-
-  useEffect(() => {
-    if (initial) return;
-    api<{ items: Question[] }>("/api/v1/form-questions?form=enquiry").then((result) => setQuestions(result.items)).catch((reason: Error) => setError(reason.message || "Questions could not be loaded."));
-  }, [initial]);
-
-  async function save(event: FormEvent) {
-    event.preventDefault();
-    setSaving(true);
-    setError("");
-    const body = {
-      name,
-      whatsapp,
-      present_institution: institution,
-      course_id: courseId,
-      interest,
-      references,
-      details,
-      answers: questions.map((item) => ({ question_id: item.id, value: answers[item.id] || "" })),
-    };
-    try {
-      const saved = initial
-        ? await api<{ id: string }>(`/api/v1/enquiries/${initial.id}`, { method: "PATCH", body: JSON.stringify(body) })
-        : await api<{ id: string }>("/api/v1/enquiries", { method: "POST", body: JSON.stringify(body) });
-      notify(initial ? `Saved ${name}.` : `Added ${name}.`, "success", { label: "Open enquiry", to: `/students/enquiries/${saved.id}` });
-      onSaved();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The enquiry was not saved.");
-      setSaving(false);
-    }
-  }
-
-  return (
-    <StudentDialog title={initial ? "Edit enquiry" : "Add enquiry"} dirty={dirty} onClose={onClose}>
-      <form className="form-grid" onSubmit={save}>
-        <label className="span-2">Name
-          <input value={name} required onChange={(event) => setName(event.target.value)} />
-        </label>
-        <label>WhatsApp number
-          <input value={whatsapp} onChange={(event) => setWhatsapp(event.target.value)} />
-        </label>
-        <label>Level of interest
-          <select value={interest} onChange={(event) => setInterest(event.target.value)}>
-            <option value="">Not recorded</option>
-            {INTERESTS.map((item) => <option key={item}>{item}</option>)}
-          </select>
-        </label>
-        <label className="span-2">Present institution
-          <input value={institution} onChange={(event) => setInstitution(event.target.value)} />
-        </label>
-        <label className="span-2">Interested course
-          <select value={courseId} onChange={(event) => setCourseId(event.target.value)}>
-            <option value="">Not recorded</option>
-            {courses.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </select>
-        </label>
-        <label className="span-2">References
-          <textarea rows={2} value={references} onChange={(event) => setReferences(event.target.value)} />
-        </label>
-        <label className="span-2">Other details
-          <textarea rows={3} value={details} onChange={(event) => setDetails(event.target.value)} />
-        </label>
-        <AnswerFields questions={questions} answers={answers} onChange={(id, value) => setAnswers({ ...answers, [id]: value })} requiredNote="required to admit" />
-        {error ? <p className="error span-2" role="alert">{error}</p> : null}
-        <div className="dialog-actions span-2">
-          <button type="button" className="quiet" onClick={() => { if (confirmDiscard(dirty)) onClose(); }}>Cancel</button>
-          <button type="submit" disabled={saving || !name.trim()}>{saving ? "Saving…" : "Save"}</button>
-        </div>
-      </form>
-    </StudentDialog>
-  );
 }
 
 export function AdmissionsPage({ session }: { session: Session }) {
   const [params, setParams] = useSearchParams();
   const status = params.get("status") || "";
   const courseId = params.get("course_id") || "";
+  const readiness = params.get("readiness") || "";
+  const createdFrom = params.get("created_from") || "";
+  const createdTo = params.get("created_to") || "";
+  const branchId = params.get("branch_id") || "";
+  const batchId = params.get("batch_id") || "";
   const query = params.get("q") || "";
+  const sort = params.get("sort") || "";
+  const direction = params.get("direction") || "";
   const page = Math.max(1, Number(params.get("page")) || 1);
   const canManage = session.actions.includes("student.manage");
-  const canEditQuestions = session.actions.includes("catalog.correct") || session.actions.includes("catalog.manage");
   const [items, setItems] = useState<Admission[]>([]);
   const [total, setTotal] = useState(0);
   const [pages, setPages] = useState(1);
   const [draft, setDraft] = useState(query);
-  const [importing, setImporting] = useState(false);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const filtered = Boolean(query || status || courseId);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filterDraft, setFilterDraft] = useState({ courseId: "", status: "", readiness: "", createdFrom: "", createdTo: "", branchId: "", batchId: "" });
+  const [places, setPlaces] = useState<{ branches: Option[]; batches: Option[] }>({ branches: [], batches: [] });
+  const filtered = Boolean(query || status || courseId || readiness || createdFrom || createdTo || branchId || batchId);
   const [courses, setCourses] = useState<CourseOption[]>([]);
+  const preset = !courseId && !createdFrom && !createdTo && !branchId && !batchId
+    ? (readiness === "needs_information" || readiness === "needs_identity" || readiness === "ready") && !status
+      ? readiness
+      : status === "converted" && !readiness
+        ? "enrolled"
+        : status === "closed" && !readiness
+          ? "closed"
+          : !status && !readiness
+            ? "all"
+            : ""
+    : "";
 
   useEffect(() => { setDraft(query); }, [query]);
 
@@ -530,6 +170,13 @@ export function AdmissionsPage({ session }: { session: Session }) {
     if (query) searchParams.set("q", query);
     if (status) searchParams.set("status", status);
     if (courseId) searchParams.set("course_id", courseId);
+    if (readiness) searchParams.set("readiness", readiness);
+    if (createdFrom) searchParams.set("created_from", createdFrom);
+    if (createdTo) searchParams.set("created_to", createdTo);
+    if (branchId) searchParams.set("branch_id", branchId);
+    if (batchId) searchParams.set("batch_id", batchId);
+    if (sort) searchParams.set("sort", sort);
+    if (direction) searchParams.set("direction", direction);
     searchParams.set("page", String(page));
     let cancelled = false;
     setLoading(true);
@@ -544,8 +191,59 @@ export function AdmissionsPage({ session }: { session: Session }) {
       .catch((reason: Error) => { if (!cancelled) setError(reason.message); })
       .finally(() => { if (!cancelled) setLoading(false); });
     api<{ courses: CourseOption[] }>("/api/v1/catalog").then((catalog) => { if (!cancelled) setCourses(coursesOf(catalog)); }).catch(() => undefined);
+    api<{ branches: Option[]; batches: Option[] }>("/api/v1/students/options").then((result) => { if (!cancelled) setPlaces(result); }).catch(() => undefined);
     return () => { cancelled = true; };
-  }, [status, courseId, query, page, revision]);
+  }, [status, courseId, readiness, createdFrom, createdTo, branchId, batchId, sort, direction, query, page, revision]);
+
+  function applyView(value: string) {
+    const next = new URLSearchParams();
+    if (query) next.set("q", query);
+    if (value === "needs_information" || value === "needs_identity" || value === "ready") next.set("readiness", value);
+    if (value === "enrolled") next.set("status", "converted");
+    if (value === "closed") next.set("status", "closed");
+    setParams(next);
+  }
+
+  function applySort(value: string) {
+    const next = new URLSearchParams(params);
+    next.delete("page");
+    const [field, way] = value.split(":");
+    if (field === "created" && way === "desc") {
+      next.delete("sort");
+      next.delete("direction");
+    } else {
+      next.set("sort", field);
+      next.set("direction", way);
+    }
+    setParams(next);
+  }
+
+  function applyFilters(event: FormEvent) {
+    event.preventDefault();
+    const next = new URLSearchParams(params);
+    next.delete("page");
+    const write = (key: string, value: string) => { if (value) next.set(key, value); else next.delete(key); };
+    write("course_id", filterDraft.courseId);
+    write("status", filterDraft.status);
+    write("readiness", filterDraft.readiness);
+    write("created_from", filterDraft.createdFrom);
+    write("created_to", filterDraft.createdTo);
+    write("branch_id", filterDraft.branchId);
+    write("batch_id", filterDraft.batchId);
+    setParams(next);
+    setFiltersOpen(false);
+  }
+
+  const chips: { key: string; label: string }[] = [];
+  if (branchId) chips.push({ key: "branch_id", label: places.branches.find((item) => item.id === branchId)?.label || "Branch" });
+  if (courseId) chips.push({ key: "course_id", label: courses.find((item) => item.id === courseId)?.name || "Course" });
+  if (batchId) chips.push({ key: "batch_id", label: places.batches.find((item) => item.id === batchId)?.label || "Batch" });
+  if (status) chips.push({ key: "status", label: status === "converted" ? "Enrolled" : status === "closed" ? "Closed" : "Open" });
+  if (readiness) chips.push({ key: "readiness", label: readinessLabel(readiness) });
+  if (createdFrom || createdTo) chips.push({ key: "created", label: `Created ${createdFrom || "…"} to ${createdTo || "…"}` });
+  if (query) chips.push({ key: "q", label: query });
+  const start = total === 0 ? 0 : (page - 1) * 20 + 1;
+  const end = Math.min(page * 20, total);
 
   return (
     <section className="panel wide">
@@ -553,74 +251,137 @@ export function AdmissionsPage({ session }: { session: Session }) {
         <div>
           <p className="eyebrow">Admissions</p>
           <h1>Admissions</h1>
-          {status === "open" ? <p className="page-lead">Admissions awaiting enrollment.</p> : null}
         </div>
         {canManage ? (
           <div className="actions">
-            <button type="button" className="secondary" onClick={() => setImporting(true)}>Import</button>
+            <Link className="button secondary" to="/students/admissions/import">Import</Link>
             <Link className="button" to="/students/admissions/new">Add admission</Link>
           </div>
         ) : null}
       </div>
-      {canEditQuestions ? <p className="meta"><Link to="/forms">Edit questions in Forms</Link></p> : null}
-      {error ? <p className="error" role="alert">{error}</p> : null}
-      {error ? <button type="button" className="secondary" onClick={() => setRevision((value) => value + 1)}>Try again</button> : null}
       <div className="preset-row" role="group" aria-label="Views">
-        <button type="button" className="secondary" aria-pressed={status === "open"} onClick={() => setParams(withParam(params, "status", status === "open" ? "" : "open"))}>Needs completion</button>
+        <button type="button" className="secondary" aria-pressed={preset === "all"} onClick={() => applyView("all")}>All</button>
+        <button type="button" className="secondary" aria-pressed={preset === "needs_information"} onClick={() => applyView("needs_information")}>Needs information</button>
+        <button type="button" className="secondary" aria-pressed={preset === "needs_identity"} onClick={() => applyView("needs_identity")}>Needs identity review</button>
+        <button type="button" className="secondary" aria-pressed={preset === "ready"} onClick={() => applyView("ready")}>Ready for enrollment</button>
+        <button type="button" className="secondary" aria-pressed={preset === "enrolled"} onClick={() => applyView("enrolled")}>Enrolled</button>
+        <button type="button" className="secondary" aria-pressed={preset === "closed"} onClick={() => applyView("closed")}>Closed</button>
+        {filtered && !preset ? <span className="chip-button">Custom</span> : null}
       </div>
-      <form className="filter-row" onSubmit={(event) => { event.preventDefault(); setParams(withParam(params, "q", draft.trim())); }}>
+      <form className="toolbar" onSubmit={(event) => { event.preventDefault(); setParams(withParam(params, "q", draft.trim())); }}>
         <label>Search
-          <input value={draft} aria-label="Search admissions" onChange={(event) => setDraft(event.target.value)} />
+          <input value={draft} aria-label="Search admissions" placeholder="Name, contact, email, or reference" onChange={(event) => setDraft(event.target.value)} />
         </label>
-        <label>Status
-          <select aria-label="Status" value={status} onChange={(event) => setParams(withParam(params, "status", event.target.value))}>
-            <option value="">Any</option>
-            <option value="open">Open</option>
-            <option value="converted">Enrolled</option>
+        <label>Sort
+          <select aria-label="Sort" value={sortToken(params)} onChange={(event) => applySort(event.target.value)}>
+            {ADMISSION_SORTS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
           </select>
         </label>
-        <label>Course
-          <select aria-label="Course" value={courseId} onChange={(event) => setParams(withParam(params, "course_id", event.target.value))}>
-            <option value="">Any course</option>
-            {courses.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </select>
-        </label>
+        <button type="button" className="secondary" onClick={() => { setFilterDraft({ courseId, status, readiness, createdFrom, createdTo, branchId, batchId }); setFiltersOpen(true); }}>Filters</button>
       </form>
       <p className="filter-row">
-        <span>{loading ? "Loading admissions…" : `${total} admission${total === 1 ? "" : "s"}`}</span>
-        {status ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "status", ""))}>{status === "converted" ? "Enrolled" : "Open"}</button> : null}
-        {courseId ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "course_id", ""))}>{courses.find((item) => item.id === courseId)?.name || "Course"}</button> : null}
-        {query ? <button type="button" className="quiet" onClick={() => setParams(withParam(params, "q", ""))}>{query}</button> : null}
-        {filtered ? <button type="button" className="quiet" onClick={() => setParams(new URLSearchParams())}>Clear</button> : null}
+        <span role="status">{loading ? "Loading admissions…" : error ? "Admissions could not be loaded." : `${start}–${end} of ${total}`}</span>
+        {chips.map((chip) => (
+          <button key={chip.key} type="button" className="chip-button" onClick={() => {
+            const next = new URLSearchParams(params);
+            next.delete("page");
+            if (chip.key === "created") { next.delete("created_from"); next.delete("created_to"); }
+            else next.delete(chip.key);
+            setParams(next);
+          }}>{chip.label}</button>
+        ))}
+        {filtered ? <button type="button" className="quiet" onClick={() => setParams(new URLSearchParams())}>Clear filters</button> : null}
       </p>
-      {items.length === 0 && !loading ? <p>{filtered ? "No admissions match." : "No admissions yet."}</p> : null}
+      {error ? <p className="error" role="alert">{error}</p> : null}
+      {error ? <button type="button" className="secondary" onClick={() => setRevision((value) => value + 1)}>Retry</button> : null}
+      {!error && items.length === 0 && !loading ? <p>{filtered ? "No admissions match." : "No admissions yet."}</p> : null}
       {items.length > 0 ? (
         <div className="table-wrap">
           <table className="people-table">
             <caption className="sr-only">Admissions</caption>
-            <thead><tr><th>Name</th><th>Contact</th><th>Course</th><th>Stage</th><th>Next</th></tr></thead>
+            <thead><tr><th>Applicant</th><th>Reference</th><th>Course</th><th>Status</th><th>Readiness</th><th>Created</th><th>Next</th></tr></thead>
             <tbody>
               {items.map((item) => (
                 <tr key={item.id}>
-                  <td><Link to={`/students/admissions/${item.id}`}>{item.name}</Link></td>
-                  <td>{item.phone}</td>
+                  <td>
+                    <div className="person-cell">
+                      <Link to={`/students/admissions/${item.id}`}>{item.name}</Link>
+                      <span className="meta">{item.phone || item.email || "No contact"}</span>
+                    </div>
+                  </td>
+                  <td>{item.reference || "Not recorded"}</td>
                   <td>{item.course_name || "Not recorded"}</td>
-                  <td>{item.stage || (item.status === "converted" ? "Enrolled" : "Open")}</td>
-                  <td>{item.student_id ? <Link to={`/students/${item.student_id}`}>Open student</Link> : (item.next_action || "Choose a batch")}</td>
+                  <td>{lifecycleLabel(item)}</td>
+                  <td>{readinessLabel(item.readiness)}</td>
+                  <td>{formatDisplayDate(item.created_at)}</td>
+                  <td>{item.student_id ? <Link to={`/students/${item.student_id}`}>Open student</Link> : (item.next_action || "Complete the application")}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       ) : null}
-      {pages > 1 ? (
+      {total > 0 ? (
         <p className="actions">
           <button type="button" className="secondary" disabled={page <= 1} onClick={() => setParams(withParam(params, "page", String(page - 1)))}>Previous</button>
           <span>Page {page} of {pages}</span>
           <button type="button" className="secondary" disabled={page >= pages} onClick={() => setParams(withParam(params, "page", String(page + 1)))}>Next</button>
         </p>
       ) : null}
-      {importing ? <ImportDialog kind="admissions" onClose={() => setImporting(false)} onSaved={() => { setImporting(false); setRevision((value) => value + 1); }} /> : null}
+      {filtersOpen ? (
+        <StudentDialog title="Filters" onClose={() => setFiltersOpen(false)}>
+          <form className="form-grid" onSubmit={applyFilters}>
+            <label>Branch
+              <select aria-label="Branch" value={filterDraft.branchId} onChange={(event) => setFilterDraft({ ...filterDraft, branchId: event.target.value })}>
+                <option value="">Any branch</option>
+                {places.branches.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+            </label>
+            <label>Course
+              <select aria-label="Course" value={filterDraft.courseId} onChange={(event) => setFilterDraft({ ...filterDraft, courseId: event.target.value })}>
+                <option value="">Any course</option>
+                {courses.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+            </label>
+            <label>Batch
+              <select aria-label="Batch" value={filterDraft.batchId} onChange={(event) => setFilterDraft({ ...filterDraft, batchId: event.target.value })}>
+                <option value="">Any batch</option>
+                {places.batches.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+            </label>
+            <label>Status
+              <select aria-label="Status" value={filterDraft.status} onChange={(event) => setFilterDraft({ ...filterDraft, status: event.target.value })}>
+                <option value="">Any</option>
+                <option value="open">Open</option>
+                <option value="converted">Enrolled</option>
+                <option value="closed">Closed</option>
+              </select>
+            </label>
+            <label className="span-2">Readiness
+              <select aria-label="Readiness" value={filterDraft.readiness} onChange={(event) => setFilterDraft({ ...filterDraft, readiness: event.target.value })}>
+                <option value="">Any</option>
+                <option value="needs_information">Needs information</option>
+                <option value="needs_identity">Needs identity review</option>
+                <option value="needs_batch">Choose a batch</option>
+                <option value="ready">Ready for enrollment</option>
+                <option value="enrolled">Enrolled</option>
+                <option value="closed">Closed</option>
+              </select>
+            </label>
+            <label>Created from
+              <input type="date" aria-label="Created from" value={filterDraft.createdFrom} onChange={(event) => setFilterDraft({ ...filterDraft, createdFrom: event.target.value })} />
+            </label>
+            <label>Created to
+              <input type="date" aria-label="Created to" value={filterDraft.createdTo} onChange={(event) => setFilterDraft({ ...filterDraft, createdTo: event.target.value })} />
+            </label>
+            <div className="dialog-actions span-2">
+              <button type="button" className="quiet" onClick={() => setFilterDraft({ courseId: "", status: "", readiness: "", createdFrom: "", createdTo: "", branchId: "", batchId: "" })}>Reset</button>
+              <button type="button" className="secondary" onClick={() => setFiltersOpen(false)}>Cancel</button>
+              <button type="submit">Apply</button>
+            </div>
+          </form>
+        </StudentDialog>
+      ) : null}
     </section>
   );
 }
@@ -638,13 +399,23 @@ export function AdmissionPage({ session }: { session: Session }) {
   const [error, setError] = useState("");
   const [matches, setMatches] = useState<Match[] | null>(null);
   const [saving, setSaving] = useState(false);
-  const [gaps, setGaps] = useState<string[]>([]);
-  const [businessQuestions, setBusinessQuestions] = useState<Question[]>([]);
+  const [closing, setClosing] = useState(false);
+  const [closeReason, setCloseReason] = useState("");
+  const [closeNote, setCloseNote] = useState("");
+  const [reopening, setReopening] = useState(false);
+  const [reopenReason, setReopenReason] = useState("");
+  const [focusField, setFocusField] = useState("");
+  const [correcting, setCorrecting] = useState(false);
+  const enrollKey = useRef("");
   useRecordLabel(admission?.name || "");
-  useUnsaved(!editing && !saving && Boolean(branchId || batchId));
+  useUnsaved(!editing && !saving && (branchId !== (admission?.branch_id || "") || batchId !== (admission?.batch_id || "")));
 
   function load() {
-    api<Admission>(`/api/v1/admissions/${admissionId}`).then(setAdmission).catch((reason: Error) => setError(reason.message));
+    api<Admission>(`/api/v1/admissions/${admissionId}`).then((result) => {
+      setAdmission(result);
+      setBranchId(result.branch_id || "");
+      setBatchId(result.batch_id || "");
+    }).catch((reason: Error) => setError(reason.message));
   }
 
   useEffect(() => {
@@ -653,59 +424,140 @@ export function AdmissionPage({ session }: { session: Session }) {
     if (canManage) {
       api<{ branches: Option[]; batches: Option[] }>("/api/v1/students/options?manage=true").then(setOptions).catch((reason: Error) => setError(reason.message || "Branches could not be loaded."));
     }
-    api<{ items: Question[] }>("/api/v1/form-questions?form=admission").then((result) => setBusinessQuestions(result.items)).catch((reason: Error) => setError(reason.message || "Questions could not be loaded."));
+    api<{ items: Question[] }>("/api/v1/form-questions?form=admission").then(() => undefined).catch((reason: Error) => setError(reason.message || "Questions could not be loaded."));
   }, [admissionId]);
 
-  function enrollmentGaps() {
-    if (!admission) return [];
-    const missing = missingAnswers(businessQuestions, admission.business_answers || []).map((item) => item.label);
-    missing.push(...missingAnswers(admission.questions || [], admission.course_answers).map((item) => item.label));
-    if (!branchId) missing.push("Branch");
-    if (!batchId) missing.push("Batch");
-    return missing;
-  }
-
-  async function convert(decision = "", studentId = "") {
+  async function confirmIdentity(decision: string, studentId = "") {
     if (saving) return;
-    const missing = enrollmentGaps();
-    setGaps(missing);
-    if (missing.length) return;
     setSaving(true);
     setError("");
     try {
+      await api(`/api/v1/admissions/${admissionId}/identity`, {
+        method: "POST",
+        body: JSON.stringify({ decision, student_id: studentId, expected_updated_at: admission?.updated_at || "" }),
+      });
+      setMatches(null);
+      notify(decision === "create" ? "Confirmed a new student." : "Confirmed the existing student.");
+      load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Identity was not confirmed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveSelection(event: FormEvent) {
+    event.preventDefault();
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api(`/api/v1/admissions/${admissionId}/selection`, {
+        method: "POST",
+        body: JSON.stringify({ branch_id: branchId, batch_id: batchId, expected_updated_at: admission?.updated_at || "" }),
+      });
+      const batch = options.batches.find((item) => item.id === batchId);
+      notify(batch ? `Selected ${batch.label}.` : "Saved the batch.");
+      load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The batch was not saved.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function convert() {
+    if (saving || !admission) return;
+    setSaving(true);
+    setError("");
+    try {
+      if (!enrollKey.current) enrollKey.current = crypto.randomUUID();
       const result = await api<{ id: string }>(`/api/v1/admissions/${admissionId}/convert`, {
         method: "POST",
-        body: JSON.stringify({ branch_id: branchId, batch_id: batchId, decision, student_id: studentId }),
+        headers: { "Idempotency-Key": enrollKey.current },
+        body: JSON.stringify({
+          branch_id: admission.branch_id,
+          batch_id: admission.batch_id,
+          decision: admission.match_decision,
+          student_id: admission.match_student_id,
+          expected_updated_at: admission.updated_at || "",
+        }),
       });
-      notify(`Enrolled ${admission?.name || "the student"}.`);
+      notify(`Enrolled ${admission.name} in ${admission.batch_name || "the batch"}.`);
       navigate(`/students/${result.id}`);
     } catch (reason) {
       setSaving(false);
-      if (reason instanceof ApiError && reason.code === "admission.match") {
-        const found = (reason.details as { matches?: Match[] }).matches || admission?.matches || [];
-        setMatches(found);
+      if (reason instanceof ApiError && (reason.code === "admission.match" || reason.code === "admission.identity")) {
+        setMatches(admission.matches || []);
         return;
       }
-      setError(reason instanceof Error ? reason.message : "The admission was not saved.");
+      setError(reason instanceof Error ? reason.message : "The student was not enrolled.");
+    }
+  }
+
+  async function closeApplication(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api(`/api/v1/admissions/${admissionId}/close`, {
+        method: "POST",
+        body: JSON.stringify({ reason: closeReason, note: closeNote, expected_updated_at: admission?.updated_at || "" }),
+      });
+      setClosing(false);
+      notify("Closed the application.");
+      load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The application was not closed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function reopenApplication(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api(`/api/v1/admissions/${admissionId}/reopen`, {
+        method: "POST",
+        body: JSON.stringify({ reason: reopenReason.trim(), expected_updated_at: admission?.updated_at || "" }),
+      });
+      setReopening(false);
+      notify("Reopened the application.");
+      load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The application was not reopened.");
+    } finally {
+      setSaving(false);
     }
   }
 
   if (!admission) {
     return <section className="panel">{error ? <p className="error" role="alert">{error}</p> : <p>Loading admission…</p>}</section>;
   }
-  const batches = options.batches.filter((item) => optionFits(item, { branch_id: branchId, course_id: admission.course_id }));
-  const open = admission.status !== "converted";
+  const batches = (admission.batches || []).filter((item) => !branchId || item.branch_id === branchId);
+  const open = admission.status !== "converted" && admission.status !== "closed";
+  const readiness = admission.readiness || "";
+  const selectionDirty = branchId !== (admission.branch_id || "") || batchId !== (admission.batch_id || "");
+  const selectedBatch = options.batches.find((item) => item.id === (admission.batch_id || ""));
   return (
     <section className="panel wide">
       <div className="title-row">
         <div>
-          <p className="eyebrow">Admission</p>
+          <p className="eyebrow">Admission {admission.reference || ""}</p>
           <h1>{admission.name}</h1>
-          <p className="meta">{admission.course_name} · {admission.stage || (open ? "Open" : "Enrolled")} · {admission.next_action || (open ? "Choose a batch" : "Open the student")}</p>
+          <p className="meta">{admission.course_name || "Course not recorded"} · {lifecycleLabel(admission)} · {readinessLabel(readiness)} · {admission.next_action || "Complete the application"}</p>
         </div>
         <div className="actions">
+          {readiness === "needs_information" && canManage ? <button type="button" onClick={() => setEditing(true)}>Complete details</button> : null}
+          {readiness === "needs_identity" && canManage ? <button type="button" onClick={() => setMatches(admission.matches || [])}>Confirm identity</button> : null}
+          {readiness === "ready" && canManage ? <button type="button" disabled={saving} onClick={() => void convert()}>{saving ? "Enrolling…" : `Enroll in ${admission.batch_name || selectedBatch?.label || "batch"}`}</button> : null}
           {admission.enquiry_id ? <Link to={`/students/enquiries/${admission.enquiry_id}`}>Open enquiry</Link> : null}
           {canManage && open && !editing ? <button type="button" className="secondary" onClick={() => setEditing(true)}>Edit</button> : null}
+          {canManage && open ? <button type="button" className="secondary" onClick={() => setClosing(true)}>Close</button> : null}
+          {canManage && admission.status === "closed" ? <button type="button" onClick={() => setReopening(true)}>Reopen</button> : null}
+          {canManage && admission.status === "converted" ? <button type="button" className="secondary" onClick={() => { setCorrecting(true); setEditing(true); }}>Correct source record</button> : null}
           {admission.student_id ? <Link to={`/students/${admission.student_id}`}>Open student</Link> : null}
           {admission.batch_id ? <Link to={`/batches/${admission.batch_id}?branch_id=${admission.branch_id || ""}&course_id=${admission.course_id}&batch_id=${admission.batch_id}`}>Open batch</Link> : null}
         </div>
@@ -713,27 +565,32 @@ export function AdmissionPage({ session }: { session: Session }) {
       {error ? <p className="error" role="alert">{error}</p> : null}
       {open ? (
         <div>
-          <h2>Readiness</h2>
-          {(admission.blockers || []).length ? (
-            <>
-              <ul>
-                {(admission.blockers || []).map((item) => <li key={item}>{item}</li>)}
-              </ul>
-              {canManage ? <button type="button" className="secondary" onClick={() => setEditing(true)}>Complete details</button> : null}
-            </>
-          ) : admission.next_action === "Resolve identity" ? (
-            <p>Resolve identity before enrollment. A student with this name and contact number is already on file.</p>
-          ) : (
-            <p>Ready to choose a batch.</p>
-          )}
+          <h2>Checklist</h2>
+          {readiness === "unavailable" ? <p>Requirements could not be loaded. <button type="button" onClick={() => load()}>Retry</button> before treating this application as ready.</p> : null}
+          {(admission.requirements || []).length ? (
+            <ul>
+              {(admission.requirements || []).map((item) => (
+                <li key={item.key}>
+                  {canManage ? <button type="button" className="quiet" onClick={() => { setFocusField(item.field); setEditing(true); }}>{item.message}</button> : item.message}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {(admission.repeats || []).length ? <p>Another open application exists for this person and course: {(admission.repeats || []).map((item) => <Link key={item.id} to={`/students/admissions/${item.id}`}>{item.reference || item.name}</Link>)}.</p> : null}
+          {admission.prospect ? <p>Confirmed prospect from enquiries: {admission.prospect.name}{admission.prospect.whatsapp ? ` · ${admission.prospect.whatsapp}` : ""}. This still needs an identity decision.</p> : null}
+          {readiness === "needs_identity" ? <p>Information is complete. Confirm whether this is an existing student or a new student. A shared name or phone number is not enough on its own.</p> : null}
+          {readiness === "needs_batch" ? <p>Identity is confirmed. Choose an open batch for this course.</p> : null}
+          {readiness === "ready" ? <p>Ready to enroll in {admission.batch_name || "the selected batch"}.</p> : null}
         </div>
-      ) : null}
+      ) : admission.status === "closed" ? <p>Closed: {admission.closure_reason || "Closed"}.</p> : <p>This application is the historical source for the enrollment. Correcting it does not change the student profile. Use the student record for later edits.</p>}
       {editing ? (
         <AdmissionForm
           courses={courses}
           initial={admission}
-          onCancel={() => setEditing(false)}
-          onSaved={() => { setEditing(false); load(); }}
+          focusField={focusField}
+          correction={correcting}
+          onCancel={() => { setEditing(false); setCorrecting(false); setFocusField(""); }}
+          onSaved={() => { setEditing(false); setCorrecting(false); setFocusField(""); load(); }}
         />
       ) : (
       <>
@@ -747,21 +604,11 @@ export function AdmissionPage({ session }: { session: Session }) {
         <div><dt>Parent or guardian</dt><dd className={admission.guardian_name ? undefined : "is-empty"}>{admission.guardian_name || "Not recorded"}</dd></div>
         <div><dt>Parent contact</dt><dd className={admission.guardian_phone ? undefined : "is-empty"}>{admission.guardian_phone || "Not recorded"}</dd></div>
       </dl>
-      <h2>Academic records</h2>
+      <h2>Previous education</h2>
       {admission.academic_records.length === 0 ? <p>No academic records yet.</p> : <RecordTable records={admission.academic_records} />}
-      {(admission.business_answers || []).length ? (
-        <>
-          <h2>Questions</h2>
-          <dl className="facts">
-            {(admission.business_answers || []).map((item) => (
-              <div key={item.question_id} className="span-2"><dt>{item.label || "Question"}</dt><dd className={item.value ? undefined : "is-empty"}>{item.value || "Not recorded"}</dd></div>
-            ))}
-          </dl>
-        </>
-      ) : null}
       {admission.course_answers.length ? (
         <>
-          <h2>Course details</h2>
+          <h2>Course requirements</h2>
           <dl className="facts">
             {admission.course_answers.map((item) => (
               <div key={item.question_id} className="span-2"><dt>{item.label || "Question"}</dt><dd className={item.value ? undefined : "is-empty"}>{item.value || "Not recorded"}</dd></div>
@@ -769,50 +616,99 @@ export function AdmissionPage({ session }: { session: Session }) {
           </dl>
         </>
       ) : null}
-      {canManage && open ? (
-        <form className="form-grid" onSubmit={(event) => { event.preventDefault(); void convert(admission.match_decision, admission.match_student_id); }}>
-          <h2 className="span-2">Enroll</h2>
-          {admission.match_decision === "attach" ? <p className="span-2">This import was confirmed for an existing student. Choose the branch and batch, or create a new student instead.</p> : null}
-          {admission.matches.length > 0 && !admission.match_decision ? <p className="span-2">A student with this name and contact number is already on file. You will be asked to confirm before anything is changed.</p> : null}
+      {(admission.business_answers || []).length ? (
+        <>
+          <h2>Additional information</h2>
+          <dl className="facts">
+            {(admission.business_answers || []).map((item) => (
+              <div key={item.question_id} className="span-2"><dt>{item.label || "Question"}</dt><dd className={item.value ? undefined : "is-empty"}>{item.value || "Not recorded"}</dd></div>
+            ))}
+          </dl>
+        </>
+      ) : null}
+      {canManage && (readiness === "needs_batch" || readiness === "ready") ? (
+        <form className="form-grid" id="batch" onSubmit={(event) => void saveSelection(event)}>
+          <h2 className="span-2">Batch</h2>
+          {admission.match_decision === "attach" ? <p className="span-2">This application will enroll the confirmed existing student. Their current profile is left unchanged.</p> : null}
+          {admission.match_decision === "create" ? <p className="span-2">This application will create a new student.</p> : null}
           <label>Branch
-            <select value={branchId} onChange={(event) => { setBranchId(event.target.value); setBatchId(""); setGaps([]); setError(""); }}>
+            <select value={branchId} onChange={(event) => { setBranchId(event.target.value); setBatchId(""); setError(""); }}>
               <option value="">Choose</option>
               {options.branches.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
             </select>
           </label>
           <label>Batch
-            <select value={batchId} onChange={(event) => { setBatchId(event.target.value); setGaps([]); setError(""); }}>
+            <select value={batchId} onChange={(event) => { setBatchId(event.target.value); setError(""); }}>
               <option value="">Choose</option>
-              {batches.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              {batches.map((item) => <option key={item.id} value={item.id} disabled={!item.open}>{[item.name, [item.started_on, item.ended_on].filter(Boolean).join(" – "), item.open ? "" : "Closed"].filter(Boolean).join(" · ")}</option>)}
             </select>
           </label>
-          {gaps.length ? (
-            <div className="span-2" role="alert">
-              <p className="error">Enroll needs:</p>
-              <ul>{gaps.map((item) => <li key={item}>{item}</li>)}</ul>
-            </div>
-          ) : null}
           <div className="dialog-actions span-2">
-            <button type="submit" disabled={saving}>{saving ? "Enrolling…" : "Enroll"}</button>
-            {admission.match_decision === "attach" ? <button type="button" className="quiet" disabled={saving} onClick={() => void convert("create")}>Create a new student</button> : null}
+            <button type="submit" className="secondary" disabled={saving || !branchId || !batchId || !selectionDirty}>{saving ? "Saving…" : "Save batch"}</button>
           </div>
         </form>
+      ) : null}
+      {(admission.activity || []).length ? (
+        <>
+          <h2>Activity</h2>
+          <ul>
+            {(admission.activity || []).map((item) => (
+              <li key={item.id}>{item.note || item.kind}{item.actor ? ` · ${item.actor}` : ""}{item.at ? ` · ${formatDisplayDate(item.at)}` : ""}</li>
+            ))}
+          </ul>
+        </>
       ) : null}
       </>
       )}
       {matches ? (
-        <StudentDialog title="This student may already exist" onClose={() => setMatches(null)}>
-          <p>Add this course to the existing student, or create a new student.</p>
+        <StudentDialog title="Confirm identity" onClose={() => setMatches(null)}>
+          <p>Choose an existing student when the details identify the same person, or create a separate student. A shared name or phone number is not proof.</p>
+          {matches.length === 0 ? <p>No existing student matches this name and contact number.</p> : null}
           {matches.map((item) => (
             <div className="title-row" key={item.id}>
-              <p>{item.display_name} · {item.student_code} · {item.phone}</p>
-              <button type="button" onClick={() => void convert("attach", item.id)}>Add to this student</button>
+              <div>
+                <p>{item.display_name} · {item.student_code} · {item.phone}</p>
+                {(item.differences || []).length ? <ul>{item.differences?.map((difference) => <li key={difference.field}>{difference.label}: application {difference.application}, student {difference.student}. The student profile stays as it is.</li>)}</ul> : <p>No differing profile fields are recorded.</p>}
+              </div>
+              <button type="button" disabled={saving} onClick={() => void confirmIdentity("attach", item.id)}>Use this student</button>
             </div>
           ))}
           <div className="dialog-actions">
             <button type="button" className="quiet" onClick={() => setMatches(null)}>Cancel</button>
-            <button type="button" onClick={() => void convert("create")}>Create a new student</button>
+            <button type="button" disabled={saving} onClick={() => void confirmIdentity("create")}>Create a separate student</button>
           </div>
+        </StudentDialog>
+      ) : null}
+      {closing ? (
+        <StudentDialog title="Close application" dirty={Boolean(closeReason || closeNote)} onClose={() => setClosing(false)}>
+          <form className="form-grid" onSubmit={(event) => void closeApplication(event)}>
+            <label className="span-2">Reason
+              <select aria-label="Closure reason" value={closeReason} required onChange={(event) => setCloseReason(event.target.value)}>
+                <option value="">Choose</option>
+                {CLOSURE_REASONS.map((item) => <option key={item}>{item}</option>)}
+              </select>
+            </label>
+            <label className="span-2">Note
+              <textarea aria-label="Closure note" value={closeNote} onChange={(event) => setCloseNote(event.target.value)} />
+            </label>
+            <div className="dialog-actions span-2">
+              <button type="button" className="secondary" onClick={() => setClosing(false)}>Cancel</button>
+              <button type="submit" disabled={saving || !closeReason}>{saving ? "Closing…" : "Close application"}</button>
+            </div>
+          </form>
+        </StudentDialog>
+      ) : null}
+      {reopening ? (
+        <StudentDialog title="Reopen application" dirty={Boolean(reopenReason)} onClose={() => setReopening(false)}>
+          <form className="form-grid" onSubmit={(event) => void reopenApplication(event)}>
+            <label className="span-2">Reason
+              <textarea aria-label="Reopen reason" required value={reopenReason} onChange={(event) => setReopenReason(event.target.value)} />
+            </label>
+            <div className="dialog-actions span-2">
+              <button type="button" className="secondary" onClick={() => setReopening(false)}>Cancel</button>
+              <button type="submit" disabled={saving || !reopenReason.trim()}>{saving ? "Reopening…" : "Reopen"}</button>
+            </div>
+          </form>
         </StudentDialog>
       ) : null}
     </section>
@@ -861,9 +757,15 @@ function RecordTable({ records }: { records: AcademicRecord[] }) {
   );
 }
 
-function AdmissionForm({ courses, initial, onSaved, onCancel }: { courses: CourseOption[]; initial?: Admission; onSaved: (id: string) => void; onCancel?: () => void }) {
+function AdmissionForm({ courses, initial, onSaved, onCancel, focusField = "", correction = false }: { courses: CourseOption[]; initial?: Admission; onSaved: (id: string) => void; onCancel?: () => void; focusField?: string; correction?: boolean }) {
   const [courseId, setCourseId] = useState(initial?.course_id || "");
   const [questions, setQuestions] = useState<Question[]>(initial?.questions || []);
+  const [questionsFailed, setQuestionsFailed] = useState(false);
+  const [businessFailed, setBusinessFailed] = useState(false);
+  const [questionAttempt, setQuestionAttempt] = useState(0);
+  const [courseNote, setCourseNote] = useState("");
+  const [episodeNote, setEpisodeNote] = useState("");
+  const [correctionNote, setCorrectionNote] = useState("");
   const [name, setName] = useState(initial?.name || "");
   const [phone, setPhone] = useState(initial?.phone || "");
   const [dob, setDob] = useState(initial?.date_of_birth || "");
@@ -908,16 +810,36 @@ function AdmissionForm({ courses, initial, onSaved, onCancel }: { courses: Cours
   useUnsaved(dirty);
 
   useEffect(() => {
-    if (!courseId) {
-      setQuestions([]);
-      return;
-    }
-    api<{ items: Question[] }>(`/api/v1/courses/${courseId}/questions`).then((result) => setQuestions(result.items)).catch(() => setQuestions([]));
-  }, [courseId]);
+    if (!focusField) return;
+    document.getElementById(`field-${focusField}`)?.focus();
+  }, [focusField, questions, businessQuestions]);
 
   useEffect(() => {
-    api<{ items: Question[] }>("/api/v1/form-questions?form=admission").then((result) => setBusinessQuestions(result.items)).catch((reason: Error) => setError(reason.message || "Questions could not be loaded."));
-  }, []);
+    if (!courseId) {
+      setQuestions([]);
+      setQuestionsFailed(false);
+      return;
+    }
+    api<{ items: Question[] }>(`/api/v1/courses/${courseId}/questions`)
+      .then((result) => { setQuestions(result.items); setQuestionsFailed(false); })
+      .catch(() => { setQuestions([]); setQuestionsFailed(true); });
+  }, [courseId, questionAttempt]);
+
+  useEffect(() => {
+    if (!initial?.id || !courseId || courseId === initial.course_id) {
+      setCourseNote("");
+      return;
+    }
+    api<{ message: string }>(`/api/v1/admissions/${initial.id}/course-change?course_id=${courseId}`)
+      .then((result) => setCourseNote(result.message))
+      .catch((reason: Error) => setCourseNote(reason.message || "The course change could not be reviewed."));
+  }, [courseId, initial]);
+
+  useEffect(() => {
+    api<{ items: Question[] }>("/api/v1/form-questions?form=admission")
+      .then((result) => { setBusinessQuestions(result.items); setBusinessFailed(false); })
+      .catch(() => { setBusinessQuestions([]); setBusinessFailed(true); setError("Questions could not be loaded."); });
+  }, [questionAttempt]);
 
   function updateRecord(index: number, key: keyof AcademicRecord, value: string) {
     setRecords((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, [key]: value } : item));
@@ -946,9 +868,14 @@ function AdmissionForm({ courses, initial, onSaved, onCancel }: { courses: Cours
       academic_records: records,
       course_answers: questions.map((item) => ({ question_id: item.id, value: answers[item.id] || "" })),
       business_answers: businessQuestions.map((item) => ({ question_id: item.id, value: business[item.id] || "" })),
+      episode_note: episodeNote,
+      confirm_course_change: Boolean(initial && courseId !== initial.course_id),
+      expected_updated_at: initial?.updated_at || "",
     };
     try {
-      const saved = initial
+      const saved = correction && initial
+        ? await api<{ id: string }>(`/api/v1/admissions/${initial.id}/correction`, { method: "POST", body: JSON.stringify({ ...body, note: correctionNote }) })
+        : initial
         ? await api<{ id: string }>(`/api/v1/admissions/${initial.id}`, { method: "PATCH", body: JSON.stringify(body) })
         : await api<{ id: string }>("/api/v1/admissions", { method: "POST", body: JSON.stringify(body) });
       notify(`Saved ${name}.`);
@@ -961,24 +888,27 @@ function AdmissionForm({ courses, initial, onSaved, onCancel }: { courses: Cours
 
   return (
       <form className="form-grid" onSubmit={save}>
-        <h2 className="span-2">Person</h2>
+        <h2 className="span-2">Contact</h2>
         <label>Name
           <input value={name} required onChange={(event) => setName(event.target.value)} />
         </label>
         <label>Contact number
-          <input value={phone} required onChange={(event) => setPhone(event.target.value)} />
+          <input id="field-phone" value={phone} onChange={(event) => setPhone(event.target.value)} />
         </label>
         <h2 className="span-2">Course</h2>
         <label className="span-2">Course
-          <select value={courseId} required onChange={(event) => setCourseId(event.target.value)}>
+          <select id="field-course_id" value={courseId} required onChange={(event) => setCourseId(event.target.value)}>
             <option value="">Choose</option>
             {courses.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
         </label>
-        <h2 className="span-2">Required to enroll</h2>
-        <p className="span-2">Save is allowed without these. Enroll asks for any that are still empty.</p>
-        <AnswerFields questions={businessQuestions} answers={business} onChange={(id, value) => setBusiness({ ...business, [id]: value })} requiredNote="required to enroll" />
+        {courseNote ? <p className="span-2" role="status">{courseNote}</p> : null}
+        {questionsFailed ? <p className="span-2 error" role="alert">Course questions could not be loaded. <button type="button" onClick={() => setQuestionAttempt((value) => value + 1)}>Retry</button></p> : null}
+        {businessFailed ? <p className="span-2 error" role="alert">Additional questions could not be loaded. <button type="button" onClick={() => setQuestionAttempt((value) => value + 1)}>Retry</button></p> : null}
+        <h2 className="span-2">Course requirements</h2>
         <AnswerFields questions={questions} answers={answers} onChange={(id, value) => setAnswers({ ...answers, [id]: value })} requiredNote="required to enroll" />
+        <h2 className="span-2">Additional information</h2>
+        <AnswerFields questions={businessQuestions} answers={business} onChange={(id, value) => setBusiness({ ...business, [id]: value })} requiredNote="required to enroll" />
         <h2 className="span-2">Optional details</h2>
         <label>Date of birth
           <input type="date" value={dob} onChange={(event) => setDob(event.target.value)} />
@@ -1022,7 +952,7 @@ function AdmissionForm({ courses, initial, onSaved, onCancel }: { courses: Cours
         <label>Parent contact
           <input value={guardianPhone} onChange={(event) => setGuardianPhone(event.target.value)} />
         </label>
-        <h2 className="span-2">Academic records</h2>
+        <h2 className="span-2">Previous education</h2>
         {records.map((record, index) => (
           <div className="span-2 form-grid" key={index}>
             <label>Qualification
@@ -1045,135 +975,19 @@ function AdmissionForm({ courses, initial, onSaved, onCancel }: { courses: Cours
         <div className="span-2">
           <button type="button" className="quiet" onClick={() => setRecords((current) => [...current, { ...EMPTY_RECORD }])}>Add academic record</button>
         </div>
+        {correction ? <label className="span-2">What this correction changes
+          <textarea id="field-note" required value={correctionNote} onChange={(event) => setCorrectionNote(event.target.value)} />
+        </label> : null}
+        <label className="span-2">Why this is another application
+          <input id="field-episode_note" value={episodeNote} onChange={(event) => setEpisodeNote(event.target.value)} />
+        </label>
         {error ? <p className="error span-2" role="alert">{error}</p> : null}
         <div className="dialog-actions span-2">
           {onCancel ? <button type="button" className="secondary" onClick={() => { if (confirmDiscard(dirty)) onCancel(); }}>Cancel</button> : <Link className="secondary" to="/students/admissions">Cancel</Link>}
-          <button type="submit" disabled={saving || !name.trim() || !phone.trim() || !courseId}>{saving ? "Saving…" : "Save"}</button>
+          <button type="submit" disabled={saving || !name.trim() || !courseId || questionsFailed || businessFailed || (correction && !correctionNote.trim())}>{saving ? "Saving…" : correction ? "Save correction" : "Save"}</button>
         </div>
       </form>
   );
 }
 
-function ImportDialog({ kind, onClose, onSaved }: { kind: "enquiries" | "admissions"; onClose: () => void; onSaved: () => void }) {
-  const [rows, setRows] = useState<PreviewRow[]>([]);
-  const [error, setError] = useState("");
-  const [saving, setSaving] = useState(false);
-  const blocked = rows.length === 0 || rows.some((row) => row.errors.length > 0 || ((row.matches || []).length > 0 && row.decision !== "attach" && row.decision !== "create"));
-  const dirty = rows.length > 0 && !saving;
-  useUnsaved(dirty);
-
-  async function preview(file: File) {
-    setError("");
-    const body = new FormData();
-    body.set("file", file);
-    try {
-      const result = await api<{ rows: PreviewRow[] }>(`/api/v1/${kind}/import`, { method: "POST", body });
-      setRows(result.rows.map((row) => ({ ...row, decision: (row.matches || []).length ? "" : "create", student_id: "" })));
-    } catch (reason) {
-      setRows([]);
-      setError(reason instanceof Error ? reason.message : "The workbook was not read.");
-    }
-  }
-
-  async function commit() {
-    setSaving(true);
-    setError("");
-    const payload = rows.map((row) => {
-      const values = row.values || {};
-      if (kind === "enquiries") {
-        return {
-          name: values.name || "",
-          whatsapp: values.whatsapp || "",
-          present_institution: values.present_institution || "",
-          course_id: values.course_id || "",
-          interest: values.interest || "",
-          references: values.references || "",
-          details: values.details || "",
-          answers: row.answers || [],
-        };
-      }
-      return {
-        course_id: values.course_id || "",
-        name: values.name || "",
-        phone: values.phone || "",
-        date_of_birth: values.date_of_birth || "",
-        gender: values.gender || "",
-        blood_group: values.blood_group || "",
-        email: values.email || "",
-        street: values.street || "",
-        address_line_2: values.address_line_2 || "",
-        place: values.place || "",
-        district: values.district || "",
-        state: values.state || "",
-        pin: values.pin || "",
-        guardian_name: values.guardian_name || "",
-        guardian_phone: values.guardian_phone || "",
-        academic_records: values.academic_records || [],
-        course_answers: row.answers || [],
-        business_answers: row.business_answers || [],
-        decision: row.decision || "create",
-        student_id: row.decision === "attach" ? row.student_id || "" : "",
-      };
-    });
-    try {
-      await api(`/api/v1/${kind}/import/commit`, { method: "POST", body: JSON.stringify({ rows: payload }) });
-      notify(kind === "enquiries" ? "Imported the enquiries." : "Imported the admissions.");
-      onSaved();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The workbook was not saved.");
-      setSaving(false);
-    }
-  }
-
-  return (
-    <StudentDialog title={kind === "enquiries" ? "Import enquiries" : "Import admissions"} dirty={dirty} onClose={onClose}>
-      <p>Only name is required for an enquiry. An admission needs a name and a contact number. Other columns can be filled in later.</p>
-      <label>Workbook
-        <input type="file" accept=".xlsx" aria-label="Workbook" onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) void preview(file);
-        }} />
-      </label>
-      {rows.length > 0 ? (
-        <div className="table-wrap">
-          <table className="people-table">
-            <caption className="sr-only">Import preview</caption>
-            <thead><tr><th>Row</th><th>Name</th><th>Result</th>{kind === "admissions" ? <th>Match</th> : null}</tr></thead>
-            <tbody>
-              {rows.map((row, index) => (
-                <tr key={row.row} className={row.errors.length ? "row-error" : undefined}>
-                  <td>{row.row}</td>
-                  <td>{String(row.values.name || "Not recorded")}</td>
-                  <td>{row.errors.join(" ") || "Ready"}</td>
-                  {kind === "admissions" ? (
-                    <td>
-                      {(row.matches || []).length === 0 ? "New student" : (
-                        <select aria-label={`Match for row ${row.row}`} value={row.decision === "attach" ? row.student_id || "" : row.decision || ""} onChange={(event) => {
-                          const value = event.target.value;
-                          setRows((current) => current.map((item, itemIndex) => itemIndex === index ? {
-                            ...item,
-                            decision: value === "create" ? "create" : "attach",
-                            student_id: value === "create" ? "" : value,
-                          } : item));
-                        }}>
-                          <option value="">Confirm</option>
-                          {(row.matches || []).map((match) => <option key={match.id} value={match.id}>Add to {match.display_name} ({match.student_code})</option>)}
-                          <option value="create">Create a new student</option>
-                        </select>
-                      )}
-                    </td>
-                  ) : null}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
-      {error ? <p className="error" role="alert">{error}</p> : null}
-      <div className="dialog-actions">
-        <button type="button" className="quiet" onClick={() => { if (confirmDiscard(dirty)) onClose(); }}>Cancel</button>
-        <button type="button" disabled={blocked || saving} onClick={() => void commit()}>{saving ? "Saving…" : "Save import"}</button>
-      </div>
-    </StudentDialog>
-  );
-}
+export { EnquiriesPage, EnquiryPage, EnquiryImportPage };

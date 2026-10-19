@@ -66,11 +66,11 @@ export function answerKindLabel(kind = "") {
   return ANSWER_KINDS.find((item) => item.value === kind)?.label || kind;
 }
 
-export function QuestionControl({ type, choices, value, label, onChange }: { type: string; choices: string[]; value: string; label: string; onChange: (value: string) => void }) {
+export function QuestionControl({ type, choices, value, label, onChange, controlId }: { type: string; choices: string[]; value: string; label: string; onChange: (value: string) => void; controlId?: string }) {
   if (type === "yes_no") {
     const selected = value === "Yes" || value === "No" ? value : "";
     return (
-      <select aria-label={label} value={selected} onChange={(event) => onChange(event.target.value)}>
+      <select id={controlId} aria-label={label} value={selected} onChange={(event) => onChange(event.target.value)}>
         <option value="">Not answered</option>
         <option value="Yes">Yes</option>
         <option value="No">No</option>
@@ -79,21 +79,21 @@ export function QuestionControl({ type, choices, value, label, onChange }: { typ
   }
   if (type === "boolean") {
     return (
-      <input type="checkbox" aria-label={label} checked={["yes", "true", "1"].includes(value.trim().toLowerCase())} onChange={(event) => onChange(event.target.checked ? "Yes" : "")} />
+      <input id={controlId} type="checkbox" aria-label={label} checked={["yes", "true", "1"].includes(value.trim().toLowerCase())} onChange={(event) => onChange(event.target.checked ? "Yes" : "")} />
     );
   }
   if (type === "choice") {
     return (
-      <select aria-label={label} value={value} onChange={(event) => onChange(event.target.value)}>
+      <select id={controlId} aria-label={label} value={value} onChange={(event) => onChange(event.target.value)}>
         <option value="">Not recorded</option>
         {choices.map((choice) => <option key={choice}>{choice}</option>)}
       </select>
     );
   }
   if (type === "textarea") {
-    return <textarea rows={4} aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} />;
+    return <textarea id={controlId} rows={4} aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} />;
   }
-  return <input aria-label={label} type={type === "date" ? "date" : type === "number" ? "number" : "text"} value={value} onChange={(event) => onChange(event.target.value)} />;
+  return <input id={controlId} aria-label={label} type={type === "date" ? "date" : type === "number" ? "number" : "text"} value={value} onChange={(event) => onChange(event.target.value)} />;
 }
 
 export function AnswerFields({ questions, answers, onChange, requiredNote }: { questions: Question[]; answers: Record<string, string>; onChange: (id: string, value: string) => void; requiredNote: string }) {
@@ -103,14 +103,14 @@ export function AnswerFields({ questions, answers, onChange, requiredNote }: { q
     if (item.answer_type === "boolean") {
       return (
         <label key={item.id} className="checkbox-row span-2">
-          <QuestionControl type={item.answer_type} choices={item.choices} value={answers[item.id] || ""} label={caption} onChange={(value) => onChange(item.id, value)} />
+          <QuestionControl controlId={`field-${item.id}`} type={item.answer_type} choices={item.choices} value={answers[item.id] || ""} label={caption} onChange={(value) => onChange(item.id, value)} />
           <span>{caption}</span>
         </label>
       );
     }
     return (
       <label key={item.id} className="span-2">{caption}
-        <QuestionControl type={item.answer_type} choices={item.choices} value={answers[item.id] || ""} label={caption} onChange={(value) => onChange(item.id, value)} />
+        <QuestionControl controlId={`field-${item.id}`} type={item.answer_type} choices={item.choices} value={answers[item.id] || ""} label={caption} onChange={(value) => onChange(item.id, value)} />
       </label>
     );
   });

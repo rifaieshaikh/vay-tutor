@@ -5,6 +5,10 @@ import { contextSearch } from "./context";
 type Crumb = { label: string; to?: string };
 
 const RULES: [RegExp, Crumb[]][] = [
+  [/^\/students\/enquiries\/import$/, [
+    { label: "Enquiries", to: "/students/enquiries" },
+    { label: "Import" },
+  ]],
   [/^\/students\/enquiries\/[^/]+$/, [
     { label: "Enquiries", to: "/students/enquiries" },
     { label: "Enquiry" },

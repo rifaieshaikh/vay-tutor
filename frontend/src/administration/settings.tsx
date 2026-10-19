@@ -98,6 +98,10 @@ export function SettingsPage({ session }: { session: Session }) {
             <dt>Timezone</dt>
             <dd><TimezoneField initial={session.institute.timezone || "Asia/Kolkata"} canEdit={canEdit} /></dd>
           </div>
+          <div className="span-2">
+            <dt>Enquiry import files</dt>
+            <dd>Source files and error reports are kept for 30 days, then they expire. The enquiries created from them stay.</dd>
+          </div>
         </dl>
       ) : null}
       {tab === "policy" && policy ? (

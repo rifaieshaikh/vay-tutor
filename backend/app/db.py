@@ -19,6 +19,20 @@ async def ensure_schema(db: AsyncIOMotorDatabase) -> None:
         partialFilterExpression={"user_id": {"$type": "string"}},
     )
     await db.enquiries.create_index([("institute_id", 1), ("created_at", -1)])
+    await db.enquiries.create_index([("institute_id", 1), ("prospect_id", 1)])
+    await db.prospects.create_index([("institute_id", 1), ("name_key", 1)])
+    await db.prospects.create_index([("institute_id", 1), ("whatsapp_key", 1)])
+    await db.enquiry_imports.create_index([("institute_id", 1), ("expires_at", 1)])
+    await db.enquiry_imports.create_index(
+        [("institute_id", 1), ("idempotency_key", 1)], unique=True, sparse=True
+    )
+    await db.enquiry_mappings.create_index([("institute_id", 1), ("owner_id", 1), ("name_key", 1)])
+    await db.admission_imports.create_index([("institute_id", 1), ("expires_at", 1)])
+    await db.admission_imports.create_index(
+        [("institute_id", 1), ("idempotency_key", 1)], unique=True, sparse=True
+    )
+    await db.admission_mappings.create_index([("institute_id", 1), ("owner_id", 1), ("name_key", 1)])
+    await db.intake_operations.create_index("created_at")
     await db.admissions.create_index([("institute_id", 1), ("status", 1), ("created_at", -1)])
     await db.course_questions.create_index([("course_id", 1), ("order", 1)])
     await db.form_questions.create_index([("institute_id", 1), ("order", 1)])

@@ -4,7 +4,8 @@ import { api, Health, Session } from "./api";
 import { AccessPage, UserAccessPage } from "./administration/access";
 import { AuditPage } from "./administration/audit";
 import { SettingsPage } from "./administration/settings";
-import { AdmissionCreatePage, AdmissionPage, AdmissionsPage, EnquiriesPage, EnquiryPage } from "./admissions/pages";
+import { AdmissionCreatePage, AdmissionPage, AdmissionsPage, EnquiriesPage, EnquiryImportPage, EnquiryPage } from "./admissions/pages";
+import { AdmissionImportPage } from "./admissions/enquiryImport";
 import { FormsPage } from "./admissions/questions";
 import { BatchPage } from "./academics/batch";
 import { BranchPage } from "./academics/branch";
@@ -73,8 +74,10 @@ export function App() {
         <Route path="/views" element={can("dashboard.view") ? <ViewsPage /> : <Navigate to="/" replace />} />
         <Route path="/students" element={can("student.lookup") ? <StudentsPage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/students/enquiries" element={can("student.lookup") ? <EnquiriesPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/students/enquiries/import" element={can("student.manage") ? <EnquiryImportPage session={session} /> : <Navigate to="/students/enquiries" replace />} />
         <Route path="/students/enquiries/:enquiryId" element={can("student.lookup") ? <EnquiryPage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/students/admissions" element={can("student.lookup") ? <AdmissionsPage session={session} /> : <Navigate to="/" replace />} />
+        <Route path="/students/admissions/import" element={can("student.manage") ? <AdmissionImportPage session={session} /> : <Navigate to="/students/admissions" replace />} />
         <Route path="/students/admissions/new" element={can("student.manage") ? <AdmissionCreatePage /> : <Navigate to="/students/admissions" replace />} />
         <Route path="/students/admissions/:admissionId" element={can("student.lookup") ? <AdmissionPage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/teachers" element={can("user.manage") ? <TeachersPage /> : <Navigate to="/" replace />} />

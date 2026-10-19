@@ -83,13 +83,22 @@ export function StudentDialog({ title, onClose, dirty = false, children }: { tit
   );
 }
 
-export function Icon({ name }: { name: "view" | "edit" | "card" | "filter" | "clear" | "sort" | "add" }) {
+export function Icon({ name }: { name: "view" | "view-off" | "edit" | "card" | "filter" | "clear" | "sort" | "add" }) {
   const common = { viewBox: "0 0 24 24", width: 16, height: 16, fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
   if (name === "view") {
     return (
       <svg {...common}>
         <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z" />
         <circle cx="12" cy="12" r="2.5" />
+      </svg>
+    );
+  }
+  if (name === "view-off") {
+    return (
+      <svg {...common}>
+        <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z" />
+        <circle cx="12" cy="12" r="2.5" />
+        <path d="M4 4l16 16" />
       </svg>
     );
   }

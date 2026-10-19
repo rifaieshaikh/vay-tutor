@@ -69,19 +69,19 @@ def test_a_prospect_stays_one_student_through_transfer_and_published_results(cli
     )
     assert enquiry.status_code == 200, enquiry.text
     listed = client.get("/api/v1/enquiries").json()["items"][0]
-    assert listed["stage"] == "Enquiry"
+    assert listed["stage"] == "Open"
     assert listed["next_action"] == "Record a follow-up"
     admitted = client.post(f"/api/v1/enquiries/{enquiry.json()['id']}/convert")
     assert admitted.status_code == 200, admitted.text
     again = client.post(f"/api/v1/enquiries/{enquiry.json()['id']}/convert")
     assert again.json()["id"] == admitted.json()["id"]
     followed = client.get(f"/api/v1/enquiries/{enquiry.json()['id']}").json()
-    assert followed["stage"] == "Admitted"
+    assert followed["stage"] == "Converted"
     assert followed["admission_id"] == admitted.json()["id"]
 
     converted = client.post(
         f"/api/v1/admissions/{admitted.json()['id']}/convert",
-        json={"branch_id": branch_id, "batch_id": batch_id},
+        json={"branch_id": branch_id, "batch_id": batch_id, "decision": "create"},
     )
     assert converted.status_code == 200, converted.text
     student_id = converted.json()["id"]
@@ -105,7 +105,7 @@ def test_a_prospect_stays_one_student_through_transfer_and_published_results(cli
     )
     other = client.post(
         f"/api/v1/admissions/{same_name.json()['id']}/convert",
-        json={"branch_id": branch_id, "batch_id": later_id},
+        json={"branch_id": branch_id, "batch_id": later_id, "decision": "create"},
     )
     assert other.status_code == 200, other.text
     assert other.json()["id"] != student_id

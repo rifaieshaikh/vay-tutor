@@ -147,7 +147,7 @@ def test_enquiry_becomes_an_admission_and_then_a_student(client):
     )
     assert saved.status_code == 200, saved.text
     blocked = client.post(
-        f"/api/v1/admissions/{admission_id}/convert", json={"branch_id": branch_id, "batch_id": batch_id}
+        f"/api/v1/admissions/{admission_id}/convert", json={"branch_id": branch_id, "batch_id": batch_id, "decision": "create"}
     )
     assert blocked.status_code == 200, blocked.text
     student_id = blocked.json()["id"]
@@ -443,7 +443,7 @@ def test_business_questions_follow_the_person_from_enquiry_to_student(client):
     assert updated.status_code == 200, updated.text
     enrolled = client.post(
         f"/api/v1/admissions/{converted.json()['id']}/convert",
-        json={"branch_id": branch_id, "batch_id": batch_id},
+        json={"branch_id": branch_id, "batch_id": batch_id, "decision": "create"},
     )
     assert enrolled.status_code == 200, enrolled.text
     student = client.get(f"/api/v1/students/{enrolled.json()['id']}/enrollments").json()
@@ -536,7 +536,7 @@ def test_checkbox_dropdown_and_text_area_questions(client):
     assert updated.status_code == 200, updated.text
     enrolled = client.post(
         f"/api/v1/admissions/{converted.json()['id']}/convert",
-        json={"branch_id": branch_id, "batch_id": batch_id},
+        json={"branch_id": branch_id, "batch_id": batch_id, "decision": "create"},
     )
     assert enrolled.status_code == 200, enrolled.text
     student = client.get(f"/api/v1/students/{enrolled.json()['id']}/enrollments").json()
@@ -556,7 +556,7 @@ def test_yes_no_consent_options_and_retired_questions(client):
     )
     assert opened.status_code == 200, opened.text
     listed = client.get("/api/v1/admissions").json()["items"]
-    assert listed[0]["next_action"] == "Choose a batch"
+    assert listed[0]["next_action"] == "Confirm identity"
     assert "Enroll in a batch" not in listed[0]["next_action"]
 
     preference = client.post(
@@ -610,7 +610,7 @@ def test_yes_no_consent_options_and_retired_questions(client):
     assert answers["Home city"] == "Kochi, Kerala"
     enrolled = client.post(
         f"/api/v1/admissions/{opened.json()['id']}/convert",
-        json={"branch_id": branch_id, "batch_id": batch_id},
+        json={"branch_id": branch_id, "batch_id": batch_id, "decision": "create"},
     )
     assert enrolled.status_code == 200, enrolled.text
 
