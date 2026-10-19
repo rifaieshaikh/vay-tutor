@@ -121,6 +121,11 @@ def identity_editable(grants: list[dict], enrollments: list[dict]) -> bool:
     return all(allows(grants, "student.manage", enrollment_resource(row)) for row in enrollments)
 
 
+def contact_visible(grants: list[dict], enrollments: list[dict]) -> bool:
+    """Contact is visible when the caller can manage at least one of this student's enrollments."""
+    return any(allows(grants, "student.manage", enrollment_resource(row)) for row in enrollments)
+
+
 def card_visible(grants: list[dict], enrollments: list[dict]) -> bool:
     return any(
         allows(grants, "progress_card.view", enrollment_resource(row), resource_fields_only=True)
@@ -175,7 +180,7 @@ def history_item(event: dict, actor_name: str) -> dict:
             "display_name", "student_code", "started_on", "ended_on", "photo", "alias", "batch_name",
             "date_of_birth", "blood_group", "phone", "guardian_name", "guardian_phone", "notes",
             "street", "place", "district", "state", "pin",
-            "qualification", "institution", "board", "passing_year",
+            "qualification", "institution", "board", "passing_year", "reason",
         ):
             if value.get(key):
                 kept[key] = value[key]
@@ -195,9 +200,12 @@ def history_item(event: dict, actor_name: str) -> dict:
         "student.update": "Student details were saved. Enrollments were left as they were.",
         "student.photo": "The student photo was changed.",
         "student.alias": "A previous name was recorded for this student.",
-        "student.merge": "Student records were merged under the existing merge rules.",
+        "student.merge": "Student records were merged. This cannot be undone from the screen.",
+        "student.archive": "The student was archived. Enrollments and published results were left as they were.",
+        "student.reactivate": "The student was returned to the directory. Enrollments were left as they were.",
         "enrollment.update": "Enrollment dates were recorded. Branch, course, and batch stayed as they were.",
         "enrollment.create": "An enrollment was added. Existing results stayed on their enrollments.",
+        "enrollment.transfer": "The enrollment ended on the effective date and a new enrollment started the same day. Results stayed on the previous batch.",
         "catalog.correct": "A catalog correction was recorded for this student.",
     }
     moment = event.get("at")

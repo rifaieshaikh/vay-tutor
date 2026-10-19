@@ -248,3 +248,88 @@ def test_student_directory_pages_the_matching_count(client):
     assert descending.json()["items"][0]["student_code"] > first.json()["items"][0]["student_code"]
     by_branch = client.get("/api/v1/students", params={"batch_id": batch, "page": 1, "sort": "branch"})
     assert by_branch.status_code == 200
+
+
+def test_student_directory_archive_alias_and_contact_search(client):
+    bootstrap(client)
+    database = sync_db(client)
+    institute_id = database.institutes.find_one()["_id"]
+    branch, course, batch = (str(ObjectId()) for _ in range(3))
+    active_id, archived_id = str(ObjectId()), str(ObjectId())
+    database.branches.insert_one({"_id": branch, "institute_id": institute_id, "name": "Tirur", "name_key": "tirur"})
+    database.courses.insert_one({"_id": course, "institute_id": institute_id, "name": "Foundation", "name_key": "foundation"})
+    database.offerings.insert_one({"_id": str(ObjectId()), "institute_id": institute_id, "branch_id": branch, "course_id": course})
+    database.batches.insert_one({
+        "_id": batch,
+        "institute_id": institute_id,
+        "branch_id": branch,
+        "course_id": course,
+        "name": "January 2027",
+        "name_key": "january 2027",
+        "session_key": "2027-01",
+    })
+    database.students.insert_many([
+        {
+            "_id": active_id,
+            "institute_id": institute_id,
+            "display_name": "MEERA NAIR",
+            "student_code": "IAM-000410",
+            "name_key": "meera nair",
+            "phone": "9847000111",
+            "email": "meera@example.com",
+        },
+        {
+            "_id": archived_id,
+            "institute_id": institute_id,
+            "display_name": "OLD MEERA",
+            "student_code": "IAM-000411",
+            "name_key": "old meera",
+            "archived": True,
+        },
+    ])
+    database.aliases.insert_one({
+        "_id": str(ObjectId()),
+        "institute_id": institute_id,
+        "student_id": active_id,
+        "name_key": "meera k",
+        "display_name": "MEERA K",
+    })
+    for student_id in (active_id, archived_id):
+        database.enrollments.insert_one({
+            "_id": str(ObjectId()),
+            "institute_id": institute_id,
+            "student_id": student_id,
+            "branch_id": branch,
+            "course_id": course,
+            "batch_id": batch,
+        })
+    teacher = client.post(
+        "/api/v1/users",
+        json={
+            "name": "Foundation teacher",
+            "email": "directory-teacher@iam.test",
+            "password": "correct-horse",
+            "role": "teacher",
+            "scope": {"branch_id": branch, "course_id": course},
+            "acknowledge_scope": True,
+        },
+    )
+    assert teacher.status_code == 200, teacher.text
+
+    listed = client.get("/api/v1/students", params={"page": 1})
+    assert listed.status_code == 200, listed.text
+    assert [item["id"] for item in listed.json()["items"]] == [active_id]
+    assert listed.json()["items"][0]["archived"] is False
+    assert listed.json()["items"][0]["contact"] == "9847000111"
+    included = client.get("/api/v1/students", params={"page": 1, "include_archived": "1"})
+    assert {item["id"] for item in included.json()["items"]} == {active_id, archived_id}
+    assert client.get("/api/v1/students", params={"include_archived": "yes"}).status_code == 422
+    assert [item["id"] for item in client.get("/api/v1/students", params={"q": "MEERA K", "page": 1}).json()["items"]] == [active_id]
+    assert [item["id"] for item in client.get("/api/v1/students", params={"q": "9847000111", "page": 1}).json()["items"]] == [active_id]
+
+    _login(client, "directory-teacher@iam.test")
+    hidden = client.get("/api/v1/students", params={"q": "9847000111", "page": 1}).json()
+    assert hidden["items"] == []
+    visible = client.get("/api/v1/students", params={"q": "MEERA NAIR", "page": 1}).json()
+    assert [item["id"] for item in visible["items"]] == [active_id]
+    assert visible["items"][0]["contact"] is None

@@ -7,19 +7,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bson import ObjectId
-from fastapi import APIRouter, File, Request, UploadFile
+from fastapi import APIRouter, File, Header, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
 from pymongo.errors import DuplicateKeyError
 
 from app.acl import allows
-from app.admissions.routes import apply_course_profiles, apply_record_update, remember_answers, student_extras
+from app.admissions.routes import (
+    _claim_operation,
+    _finish_operation,
+    _release_operation,
+    apply_course_profiles,
+    apply_record_update,
+    remember_answers,
+    student_extras,
+)
 from app.deps import current_user, db, write_audit
 from app.enrollment import enrollment_document, name_conflicts, name_document, require_batch_match, require_open_batch
 from app.errors import AppError
 from app.security import name_key, phone_key
 from app.students.directory import (
     card_visible,
+    contact_visible,
     directory_facts,
     enrollment_context,
     enrollment_resource,
@@ -148,6 +157,13 @@ class TransferBody(BaseModel):
     course_id: str
     batch_id: str
     on: str = ""
+    reason: str = ""
+
+
+class ArchiveBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    archived: bool
+    reason: str
 
 
 _MAX_PHOTO = 2 * 1024 * 1024
@@ -175,6 +191,21 @@ async def merge_preview(request: Request, body: MergeBody) -> dict:
         "moves": enrollment_context(moving, facts),
         "kept": enrollment_context(kept, facts),
         "alias": source.get("name_key"),
+        "admissions": await db(request).admissions.count_documents(
+            {"institute_id": user["institute_id"], "student_id": source["_id"]}
+        ),
+        "results_moving": await db(request).results.count_documents(
+            {"institute_id": user["institute_id"], "student_id": source["_id"], "batch_id": {"$in": [item["batch_id"] for item in moving] or [""]}}
+        ),
+        "results_kept": await db(request).results.count_documents(
+            {"institute_id": user["institute_id"], "student_id": source["_id"], "batch_id": {"$in": [item["batch_id"] for item in kept] or [""]}}
+        ),
+        "recoverable": False,
+        "recovery": (
+            "This merge cannot be undone. The source student is archived and linked to the student you keep. "
+            "Enrollments that already exist on the student you keep stay on the archived source, with their results. "
+            "Application links and results on enrollments that move follow the student you keep."
+        ),
     }
 
 
@@ -185,22 +216,53 @@ async def merge_students(request: Request, body: MergeBody) -> dict:
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
     if not body.acknowledge:
         raise AppError(422, "catalog.acknowledge", "Review the merge impact and confirm it.")
+    source, target = await _merge_pair(request, user["institute_id"], body)
+    if source.get("merged_into") == target["_id"]:
+        return {"id": target["_id"], "moved": 0, "archived_id": source["_id"], "replayed": True}
     preview = await merge_preview(request, body)
     source, target = await _merge_pair(request, user["institute_id"], body)
-    for enrollment_id in preview["move"]:
-        await db(request).enrollments.update_one({"_id": enrollment_id}, {"$set": {"student_id": target["_id"]}})
-    await db(request).aliases.insert_one(
-        {
-            "_id": str(ObjectId()),
-            "institute_id": user["institute_id"],
-            "student_id": target["_id"],
-            "name_key": source.get("name_key"),
-            "display_name": source.get("display_name"),
-        }
+    moving_batches = [item["batch_id"] for item in preview["moves"] or []]
+    alias = {
+        "_id": str(ObjectId()),
+        "institute_id": user["institute_id"],
+        "student_id": target["_id"],
+        "name_key": source.get("name_key"),
+        "display_name": source.get("display_name"),
+    }
+    existing_alias = await db(request).aliases.find_one(
+        {"student_id": target["_id"], "name_key": source.get("name_key")}
     )
-    await db(request).students.update_one(
-        {"_id": source["_id"]}, {"$set": {"archived": True, "merged_into": target["_id"]}}
-    )
+    async with await request.app.state.client.start_session() as session:
+        async with session.start_transaction():
+            if preview["move"]:
+                await db(request).enrollments.update_many(
+                    {"_id": {"$in": preview["move"]}},
+                    {"$set": {"student_id": target["_id"]}},
+                    session=session,
+                )
+            if moving_batches:
+                await db(request).enrollment_names.update_many(
+                    {"student_id": source["_id"], "batch_id": {"$in": moving_batches}},
+                    {"$set": {"student_id": target["_id"]}},
+                    session=session,
+                )
+                await db(request).results.update_many(
+                    {"institute_id": user["institute_id"], "student_id": source["_id"], "batch_id": {"$in": moving_batches}},
+                    {"$set": {"student_id": target["_id"]}},
+                    session=session,
+                )
+            await db(request).admissions.update_many(
+                {"institute_id": user["institute_id"], "student_id": source["_id"]},
+                {"$set": {"student_id": target["_id"]}},
+                session=session,
+            )
+            if not existing_alias and source.get("display_name"):
+                await db(request).aliases.insert_one(alias, session=session)
+            await db(request).students.update_one(
+                {"_id": source["_id"]},
+                {"$set": {"archived": True, "merged_into": target["_id"]}},
+                session=session,
+            )
     await db(request).audit_events.insert_one(
         {
             "_id": str(ObjectId()),
@@ -221,11 +283,10 @@ async def enrollment_history(request: Request, student_id: str) -> dict:
     aliases = await db(request).aliases.find({"student_id": student_id}).to_list(length=20)
     contexts = enrollment_context(visible, facts)
     visible_by_id = {row["_id"]: row for row in visible}
-    contact = False
+    contact = contact_visible(user["grants"], visible)
     for item in contexts:
         source = visible_by_id.get(item["id"]) or {}
         item["manage"] = bool(source) and allows(user["grants"], "student.manage", enrollment_resource(source))
-        contact = contact or item["manage"]
     profile = _profile_view(student)
     extras = await student_extras(db(request), student)
     admissions = []
@@ -278,6 +339,7 @@ async def enrollment_history(request: Request, student_id: str) -> dict:
         "student_code": student.get("student_code"),
         "display_name": student.get("display_name"),
         "archived": bool(student.get("archived")),
+        "merged_into": student.get("merged_into") or None,
         "edit_version": student.get("edit_version", 0),
         "photo_id": student.get("photo_file_id") or None,
         **profile,
@@ -294,6 +356,7 @@ async def enrollment_history(request: Request, student_id: str) -> dict:
             "edit": identity_editable(user["grants"], owned),
             "card": card_visible(user["grants"], visible),
             "enroll": any("student.manage" in (grant.get("actions") or []) for grant in user["grants"]),
+            "archive": identity_editable(user["grants"], owned) and not student.get("merged_into"),
             "contact": contact,
         },
     }
@@ -799,9 +862,16 @@ async def add_student_enrollment(request: Request, student_id: str, body: Enroll
     return {"id": enrollment_id, "batch_id": body.batch_id, "started_on": started}
 
 
-@router.post("/students/{student_id}/transfers")
-async def transfer_student(request: Request, student_id: str, body: TransferBody) -> dict:
-    user = await current_user(request)
+def _transfer_reason(value: str) -> str:
+    reason = " ".join(value.split())
+    if not reason:
+        raise AppError(422, "enrollment.reason", "Enter a reason for the transfer.")
+    if len(reason) > 200:
+        raise AppError(422, "enrollment.reason", "Use a reason of 200 characters or fewer.")
+    return reason
+
+
+async def _prepare_transfer(request: Request, user: dict, student_id: str, body: TransferBody) -> dict:
     _student, visible, _owned, facts = await _student_directory(request, user, student_id)
     source = next((row for row in visible if row["_id"] == body.from_enrollment_id), None)
     if source is None:
@@ -823,6 +893,7 @@ async def transfer_student(request: Request, student_id: str, body: TransferBody
     }
     if not allows(user["grants"], "student.manage", destination):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    reason = _transfer_reason(body.reason)
     moved_on = _calendar_date(body.on, "on") or _now().date().isoformat()
     if source.get("started_on") and moved_on < source["started_on"]:
         raise AppError(422, "enrollment.date", "The transfer date is before the enrollment started.")
@@ -840,52 +911,151 @@ async def transfer_student(request: Request, student_id: str, body: TransferBody
             "student.identity",
             "Another student in that batch already uses this name. Merge them only from the merge action.",
         )
-    enrollment_id = str(ObjectId())
-    enrollment = enrollment_document(
-        enrollment_id=enrollment_id,
-        institute_id=user["institute_id"],
-        student_id=student_id,
-        branch_id=body.branch_id,
-        course_id=body.course_id,
-        batch_id=body.batch_id,
-        started_on=moved_on,
-        status="current",
+    source_name = facts["batch_name"].get(source.get("batch_id"), "")
+    target_name = batch.get("name") or ""
+    return {
+        "source": source,
+        "batch": batch,
+        "destination": destination,
+        "keys": keys,
+        "moved_on": moved_on,
+        "reason": reason,
+        "source_batch": source_name,
+        "target_batch": target_name,
+        "source_ends_on": moved_on,
+        "target_starts_on": moved_on,
+        "overlap": f"The effective date {moved_on} is on both the ending enrollment and the new one. There is no gap.",
+        "results": f"Published results stay on {source_name or 'the current batch'}. They are not copied to {target_name or 'the new batch'}.",
+    }
+
+
+@router.post("/students/{student_id}/archive")
+async def set_student_archive(request: Request, student_id: str, body: ArchiveBody) -> dict:
+    user = await current_user(request)
+    existing = await db(request).students.find_one({"_id": student_id, "institute_id": user["institute_id"]})
+    can_merge = any("catalog.manage" in grant["actions"] for grant in user["grants"])
+    if existing and existing.get("merged_into") and can_merge:
+        raise AppError(409, "student.merged", "A merged student stays archived. Open the student who was kept.")
+    student, _visible, owned, _facts = await _student_directory(request, user, student_id)
+    if not identity_editable(user["grants"], owned):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    if student.get("merged_into"):
+        raise AppError(409, "student.merged", "A merged student stays archived. Open the student who was kept.")
+    reason = " ".join(body.reason.split())
+    if not reason:
+        raise AppError(422, "student.reason", "Enter a reason.")
+    if len(reason) > 200:
+        raise AppError(422, "student.reason", "Use a reason of 200 characters or fewer.")
+    current = bool(student.get("archived"))
+    if current == body.archived:
+        message = "This student is already archived." if current else "This student is already active."
+        raise AppError(409, "student.archive", message)
+    await db(request).students.update_one(
+        {"_id": student_id},
+        {"$set": {"archived": body.archived, "archive_reason": reason}},
     )
-    names = [
-        name_document(
-            institute_id=user["institute_id"],
-            batch_id=body.batch_id,
-            student_id=student_id,
-            name_key=key,
-        )
-        for key in keys
-    ]
-    try:
-        async with await request.app.state.client.start_session() as session:
-            async with session.start_transaction():
-                await db(request).enrollments.update_one(
-                    {"_id": source["_id"], "student_id": student_id},
-                    {"$set": {"ended_on": moved_on, "status": "historical"}},
-                    session=session,
-                )
-                await db(request).enrollments.insert_one(enrollment, session=session)
-                if names:
-                    await db(request).enrollment_names.insert_many(names, session=session)
-    except DuplicateKeyError as exc:
-        raise AppError(
-            409,
-            "student.identity",
-            "Another student in that batch already uses this name. Merge them only from the merge action.",
-        ) from exc
+    action = "student.archive" if body.archived else "student.reactivate"
     await write_audit(
         request,
         user,
-        "enrollment.transfer",
-        {"batch_name": facts["batch_name"].get(source.get("batch_id"), ""), "ended_on": "Not recorded"},
-        {"batch_name": batch.get("name") or "", "started_on": moved_on},
-        destination | {"student_id": student_id},
+        action,
+        {"archived": current},
+        {"archived": body.archived, "reason": reason},
+        {"student_id": student_id},
     )
-    return {"id": enrollment_id, "from_enrollment_id": source["_id"], "started_on": moved_on}
+    return {"id": student_id, "archived": body.archived, "enrollments_unchanged": True}
+
+
+@router.post("/students/{student_id}/transfers/preview")
+async def preview_transfer(request: Request, student_id: str, body: TransferBody) -> dict:
+    user = await current_user(request)
+    plan = await _prepare_transfer(request, user, student_id, body)
+    return {
+        "source_batch": plan["source_batch"],
+        "target_batch": plan["target_batch"],
+        "source_ends_on": plan["source_ends_on"],
+        "target_starts_on": plan["target_starts_on"],
+        "overlap": plan["overlap"],
+        "results": plan["results"],
+        "reason": plan["reason"],
+    }
+
+
+@router.post("/students/{student_id}/transfers")
+async def transfer_student(
+    request: Request,
+    student_id: str,
+    body: TransferBody,
+    idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+) -> dict:
+    user = await current_user(request)
+    replay = await _claim_operation(request, user, f"transfer:{student_id}", idempotency_key, body.model_dump())
+    if replay is not None:
+        return replay
+    try:
+        plan = await _prepare_transfer(request, user, student_id, body)
+        enrollment_id = str(ObjectId())
+        enrollment = enrollment_document(
+            enrollment_id=enrollment_id,
+            institute_id=user["institute_id"],
+            student_id=student_id,
+            branch_id=body.branch_id,
+            course_id=body.course_id,
+            batch_id=body.batch_id,
+            started_on=plan["moved_on"],
+            status="current",
+        )
+        names = [
+            name_document(
+                institute_id=user["institute_id"],
+                batch_id=body.batch_id,
+                student_id=student_id,
+                name_key=key,
+            )
+            for key in plan["keys"]
+        ]
+        try:
+            async with await request.app.state.client.start_session() as session:
+                async with session.start_transaction():
+                    ended = await db(request).enrollments.update_one(
+                        {
+                            "_id": plan["source"]["_id"],
+                            "student_id": student_id,
+                            "$or": [{"ended_on": {"$exists": False}}, {"ended_on": None}],
+                        },
+                        {"$set": {"ended_on": plan["moved_on"], "status": "historical"}},
+                        session=session,
+                    )
+                    if ended.matched_count == 0:
+                        raise AppError(409, "enrollment.ended", "This enrollment has already ended.")
+                    await db(request).enrollments.insert_one(enrollment, session=session)
+                    if names:
+                        await db(request).enrollment_names.insert_many(names, session=session)
+        except DuplicateKeyError as exc:
+            raise AppError(
+                409,
+                "student.identity",
+                "Another student in that batch already uses this name. Merge them only from the merge action.",
+            ) from exc
+        result = {
+            "id": enrollment_id,
+            "from_enrollment_id": plan["source"]["_id"],
+            "started_on": plan["moved_on"],
+            "ended_on": plan["source_ends_on"],
+        }
+        await write_audit(
+            request,
+            user,
+            "enrollment.transfer",
+            {"batch_name": plan["source_batch"], "ended_on": "Not recorded"},
+            {"batch_name": plan["target_batch"], "started_on": plan["moved_on"], "reason": plan["reason"]},
+            plan["destination"] | {"student_id": student_id},
+        )
+    except Exception:
+        await _release_operation(request, user, f"transfer:{student_id}", idempotency_key)
+        raise
+    await _finish_operation(request, user, f"transfer:{student_id}", idempotency_key, result)
+    return result
 
 
 @router.get("/students/{student_id}/history")
@@ -911,6 +1081,7 @@ async def student_history(request: Request, student_id: str) -> dict:
         .sort("at", -1)
         .to_list(length=100)
     )
+    truncated = len(events) == 100
     chosen = [event for event in events if history_visible(user["grants"], event, student_id, visible)]
     actor_names: dict[str, str] = {}
     for event in chosen:
@@ -920,6 +1091,7 @@ async def student_history(request: Request, student_id: str) -> dict:
             actor_names[actor_id] = person["name"] if person else ""
     return {
         "permitted": True,
+        "truncated": truncated,
         "items": [history_item(event, actor_names.get(event.get("actor_id"), "")) for event in chosen],
     }
 

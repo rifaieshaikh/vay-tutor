@@ -9,12 +9,12 @@ import { QuestionControl } from "../admissions/questions";
 import { useUnsaved } from "../guard";
 import { useRecordLabel } from "../orientation";
 import { confirmDiscard, moveTab, StudentDialog as Dialog } from "../ui";
-import { StudentEnrollment, recordedDate, recordedName, recordedStatus, safeBatchWorkspace, safeStudentList } from "./links";
+import { StudentEnrollment, recordedDate, recordedName, safeBatchWorkspace, safeStudentList } from "./links";
 type CourseProfile = { course_id: string; course_name: string; answers: { question_id: string; label?: string; value: string; answer_type?: string; choices?: string[] }[] };
 type BusinessAnswer = { question_id: string; label?: string; value: string };
 type FormQuestion = { id: string; label: string; answer_type: string; choices: string[]; required: boolean; on_profile?: boolean };
 type Alias = { id: string; display_name: string };
-type StudentActions = { edit: boolean; card: boolean; enroll: boolean; contact?: boolean };
+type StudentActions = { edit: boolean; card: boolean; enroll: boolean; archive?: boolean; contact?: boolean };
 type SourceAdmission = { id: string; enquiry_id: string | null; course_name: string; status: string };
 type PublishedAssessment = { id: string; title: string; status: string; batch_id: string; score: number | null; maximum: number | null };
 type StudentDetail = {
@@ -22,6 +22,7 @@ type StudentDetail = {
   student_code: string;
   display_name: string;
   archived: boolean;
+  merged_into?: string | null;
   edit_version: number;
   photo_id: string | null;
   date_of_birth: string | null;
@@ -72,7 +73,9 @@ type ProfileValues = {
   board: string;
   passing_year: string;
 };
-type StudentTab = "personal" | "education" | "enrollments" | "progress" | "admissions" | "history";
+type StudentTab = "overview" | "personal" | "education" | "enrollments" | "progress" | "admissions" | "history";
+const RECORD_TABS: StudentTab[] = ["overview", "personal", "education", "enrollments", "progress", "admissions", "history"];
+const EDIT_TABS = new Set<StudentTab>(["personal", "education", "admissions"]);
 type Conflict = { proposed: ProfileValues; current: ProfileValues; version: number };
 type Performance = { percentage: number | null; band: string | null; band_name?: string | null; band_place?: string | null };
 type ProgressCard = { empty_reason: string | null; performance: Performance };
@@ -187,8 +190,46 @@ const CHANGES: Record<string, string> = {
   "student.merge": "Merge",
   "enrollment.update": "Enrollment dates",
   "enrollment.create": "Enrollment",
+  "enrollment.transfer": "Transfer",
+  "student.archive": "Archive",
+  "student.reactivate": "Reactivate",
   "catalog.correct": "Correction",
 };
+
+function readSection(value: string | null): StudentTab {
+  return RECORD_TABS.includes(value as StudentTab) ? value as StudentTab : "overview";
+}
+
+function isCurrentEnrollment(item: StudentEnrollment) {
+  return !item.ended_on && item.status !== "historical";
+}
+
+function matchingEnrollments(rows: StudentEnrollment[], branch: string, course: string, batch: string) {
+  return rows.filter((item) => {
+    if (branch && item.branch_id !== branch) return false;
+    if (course && item.course_id !== course) return false;
+    if (batch && item.batch_id !== batch) return false;
+    return true;
+  });
+}
+
+function progressEnrollment(rows: StudentEnrollment[], branch: string, course: string, batch: string, scope: string) {
+  const matching = matchingEnrollments(rows, branch, course, batch);
+  if (scope) return matching.find((item) => item.id === scope) || null;
+  if (batch) return matching.find((item) => item.batch_id === batch) || null;
+  if (matching.length === 1) return matching[0];
+  return null;
+}
+
+function enrollmentLine(item: StudentEnrollment) {
+  return [recordedName(item.branch_name), recordedName(item.course_name), recordedName(item.batch_name)].join(" · ");
+}
+
+function enrollmentStateLabel(item: StudentEnrollment) {
+  if (isCurrentEnrollment(item)) return "Current";
+  if (item.status === "historical" || item.ended_on) return "Historical";
+  return "Not recorded";
+}
 
 function initials(name: string) {
   return name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() || "").join("");
@@ -240,6 +281,8 @@ export function StudentPage() {
   const branch = params.get("branch_id") || "";
   const course = params.get("course_id") || "";
   const batch = params.get("batch_id") || "";
+  const scope = params.get("scope") || "";
+  const tab = readSection(params.get("section"));
   const batchBack = safeBatchWorkspace(params.get("returnTo"));
   const back = batchBack || safeStudentList(params.get("returnTo")) || "/students";
   const [record, setRecord] = useState<StudentDetail | null>(null);
@@ -248,7 +291,6 @@ export function StudentPage() {
   const [loadError, setLoadError] = useState("");
   const [attempt, setAttempt] = useState(0);
   const [editing, setEditing] = useState(false);
-  const [tab, setTab] = useState<StudentTab>("personal");
   const [draft, setDraft] = useState<ProfileValues>(EMPTY_PROFILE);
   const [records, setRecords] = useState<AcademicRecord[]>([]);
   const [profiles, setProfiles] = useState<CourseProfile[]>([]);
@@ -265,6 +307,7 @@ export function StudentPage() {
   const [progressError, setProgressError] = useState("");
   const [progressAttempt, setProgressAttempt] = useState(0);
   const [history, setHistory] = useState<HistoryEvent[]>([]);
+  const [historyTruncated, setHistoryTruncated] = useState(false);
   const [historyPermitted, setHistoryPermitted] = useState<boolean | null>(null);
   const [historyState, setHistoryState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [historyError, setHistoryError] = useState("");
@@ -276,6 +319,13 @@ export function StudentPage() {
   const [dateSaving, setDateSaving] = useState(false);
   const [adding, setAdding] = useState(false);
   const [transferFrom, setTransferFrom] = useState<StudentEnrollment | null>(null);
+  const [transferReason, setTransferReason] = useState("");
+  const [transferPreview, setTransferPreview] = useState<{ source_batch: string; target_batch: string; source_ends_on: string; target_starts_on: string; overlap: string; results: string } | null>(null);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveReason, setArchiveReason] = useState("");
+  const [archiveError, setArchiveError] = useState("");
+  const [archiveSaving, setArchiveSaving] = useState(false);
+  const transferKey = useRef("");
   const [options, setOptions] = useState<StudentOptions>({ branches: [], courses: [], batches: [] });
   const [addBranch, setAddBranch] = useState("");
   const [addCourse, setAddCourse] = useState("");
@@ -294,7 +344,6 @@ export function StudentPage() {
     setPhase("loading");
     setLoadError("");
     setEditing(false);
-    setTab("personal");
     setDraft(EMPTY_PROFILE);
     setDirty(false);
     setSaveState("idle");
@@ -313,6 +362,9 @@ export function StudentPage() {
     setHistoryAttempt(0);
     setDateTarget(null);
     setAdding(false);
+    setTransferFrom(null);
+    setTransferPreview(null);
+    setArchiveOpen(false);
     openedEdit.current = "";
   }
 
@@ -346,22 +398,38 @@ export function StudentPage() {
     if (params.get("edit") !== "1" || !record?.actions.edit || record.id !== studentId) return;
     if (openedEdit.current === studentId) return;
     openedEdit.current = studentId;
+    if (!EDIT_TABS.has(readSection(params.get("section")))) {
+      const query = new URLSearchParams(params);
+      query.set("section", "personal");
+      setParams(query, { replace: true });
+    }
     setEditing(true);
     setDraft(profileFrom(record));
     setDirty(false);
     setConflict(null);
-  }, [params, record, studentId]);
+  }, [params, record, studentId, setParams]);
 
   useEffect(() => {
     if (!record || record.id !== studentId || !record.actions.card) return;
+    const chosen = progressEnrollment(record.enrollments, branch, course, batch, scope);
+    const matching = matchingEnrollments(record.enrollments, branch, course, batch);
+    if (!chosen && matching.length > 1) {
+      setProgress(null);
+      setProgressState("ready");
+      setProgressError("");
+      return;
+    }
     let active = true;
     setProgress(null);
     setProgressState("loading");
     setProgressError("");
     const search = new URLSearchParams();
-    if (branch) search.set("branch_id", branch);
-    if (course) search.set("course_id", course);
-    if (batch) search.set("batch_id", batch);
+    const scopedBranch = chosen?.branch_id || branch;
+    const scopedCourse = chosen?.course_id || course;
+    const scopedBatch = chosen?.batch_id || batch;
+    if (scopedBranch) search.set("branch_id", scopedBranch);
+    if (scopedCourse) search.set("course_id", scopedCourse);
+    if (scopedBatch) search.set("batch_id", scopedBatch);
     const query = search.toString();
     api<ProgressCard>(`/api/v1/students/${studentId}/card${query ? `?${query}` : ""}`)
       .then((result) => {
@@ -378,7 +446,7 @@ export function StudentPage() {
     return () => {
       active = false;
     };
-  }, [studentId, record, branch, course, batch, progressAttempt]);
+  }, [studentId, record, branch, course, batch, scope, progressAttempt]);
 
   useEffect(() => {
     if (phase !== "ready" || !record || record.id !== studentId) return;
@@ -387,11 +455,12 @@ export function StudentPage() {
     setHistoryPermitted(null);
     setHistoryState("loading");
     setHistoryError("");
-    api<{ permitted: boolean; items: HistoryEvent[] }>(`/api/v1/students/${studentId}/history`)
+    api<{ permitted: boolean; truncated?: boolean; items: HistoryEvent[] }>(`/api/v1/students/${studentId}/history`)
       .then((result) => {
         if (!active) return;
         setHistoryPermitted(result.permitted);
         setHistory(result.permitted ? result.items : []);
+        setHistoryTruncated(Boolean(result.permitted && result.truncated));
         setHistoryState("ready");
       })
       .catch((reason: Error) => {
@@ -434,7 +503,17 @@ export function StudentPage() {
     if (next === tab) return;
     if (!discardPrompt()) return;
     if (editing) closeEditor();
-    setTab(next);
+    const query = new URLSearchParams(params);
+    if (next === "overview") query.delete("section");
+    else query.set("section", next);
+    setParams(query);
+  }
+
+  function chooseScope(id: string) {
+    const query = new URLSearchParams(params);
+    if (id) query.set("scope", id);
+    else query.delete("scope");
+    setParams(query);
   }
 
   function change(key: keyof ProfileValues) {
@@ -446,8 +525,13 @@ export function StudentPage() {
     };
   }
 
-  function startEdit() {
+  function startEdit(section: "personal" | "education" | "admissions" = "personal") {
     if (!record?.actions.edit) return;
+    if (section !== tab) {
+      const query = new URLSearchParams(params);
+      query.set("section", section);
+      setParams(query);
+    }
     openedEdit.current = studentId;
     setDraft(profileFrom(record));
     setRecords(record.academic_records?.length ? record.academic_records.map((item) => ({ ...item })) : [{ ...EMPTY_RECORD }]);
@@ -642,6 +726,7 @@ export function StudentPage() {
   }
 
   function chooseAdd(field: "branch_id" | "course_id" | "batch_id", value: string) {
+    setTransferPreview(null);
     if (field === "branch_id") {
       setAddBranch(value);
       setAddCourse("");
@@ -683,36 +768,93 @@ export function StudentPage() {
     setAddCourse("");
     setAddBatch("");
     setAddStarted("");
+    setTransferReason("");
+    setTransferPreview(null);
     setAddError("");
+    transferKey.current = crypto.randomUUID();
     api<StudentOptions>("/api/v1/students/options?manage=true").then(setOptions).catch((reason: Error) => setAddError(reason.message));
   }
 
-  async function saveTransfer(event: FormEvent<HTMLFormElement>) {
+  function transferBody() {
+    return {
+      from_enrollment_id: transferFrom?.id,
+      branch_id: addBranch,
+      course_id: addCourse,
+      batch_id: addBatch,
+      on: addStarted,
+      reason: transferReason.trim(),
+    };
+  }
+
+  async function previewTransfer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!record || !transferFrom?.id || addSaving) return;
     if (!addBranch || !addCourse || !addBatch) {
       setAddError("Choose a branch, course, and batch.");
       return;
     }
+    if (!transferReason.trim()) {
+      setAddError("Enter a reason for the transfer.");
+      return;
+    }
+    setAddSaving(true);
+    setAddError("");
+    try {
+      const result = await api<NonNullable<typeof transferPreview>>(`/api/v1/students/${record.id}/transfers/preview`, {
+        method: "POST",
+        body: JSON.stringify(transferBody()),
+      });
+      setTransferPreview(result);
+    } catch (reason) {
+      setTransferPreview(null);
+      setAddError(reason instanceof Error ? reason.message : "Could not preview this transfer.");
+    } finally {
+      setAddSaving(false);
+    }
+  }
+
+  async function saveTransfer() {
+    if (!record || !transferFrom?.id || !transferPreview || addSaving) return;
     setAddSaving(true);
     setAddError("");
     try {
       await api(`/api/v1/students/${record.id}/transfers`, {
         method: "POST",
-        body: JSON.stringify({
-          from_enrollment_id: transferFrom.id,
-          branch_id: addBranch,
-          course_id: addCourse,
-          batch_id: addBatch,
-          on: addStarted,
-        }),
+        body: JSON.stringify(transferBody()),
+        headers: { "Idempotency-Key": transferKey.current },
       });
       setTransferFrom(null);
+      setTransferPreview(null);
+      notify("Transferred. Results stay on the previous batch.");
       await reload();
     } catch (reason) {
       setAddError(reason instanceof Error ? reason.message : "Could not transfer this enrollment.");
     } finally {
       setAddSaving(false);
+    }
+  }
+
+  async function saveArchive(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!record || archiveSaving) return;
+    if (!archiveReason.trim()) {
+      setArchiveError("Enter a reason.");
+      return;
+    }
+    setArchiveSaving(true);
+    setArchiveError("");
+    try {
+      await api(`/api/v1/students/${record.id}/archive`, {
+        method: "POST",
+        body: JSON.stringify({ archived: !record.archived, reason: archiveReason.trim() }),
+      });
+      setArchiveOpen(false);
+      notify(record.archived ? "Reactivated. Enrollments were left as they were." : "Archived. Enrollments and results were left as they were.");
+      await reload();
+    } catch (reason) {
+      setArchiveError(reason instanceof Error ? reason.message : "Could not update this student.");
+    } finally {
+      setArchiveSaving(false);
     }
   }
 
@@ -755,11 +897,65 @@ export function StudentPage() {
   const addCourses = options.courses.filter((item) => optionFits(item, addFilters));
   const enrolledBatches = new Set(shown?.enrollments.map((item) => item.batch_id) || []);
   const addBatches = options.batches.filter((item) => optionFits(item, addFilters) && !enrolledBatches.has(item.id));
-  const visibleTab = tab === "history" && historyPermitted === false ? "personal" : tab;
+  const visibleTab = tab === "history" && historyPermitted === false ? "overview" : tab;
   const editedFields = visibleTab === "personal" ? [...CONTACT_ORDER, ...ADDRESS_ORDER] : ACADEMIC_ORDER;
   const recordTabs: StudentTab[] = historyPermitted
-    ? ["personal", "education", "enrollments", "progress", "admissions", "history"]
-    : ["personal", "education", "enrollments", "progress", "admissions"];
+    ? RECORD_TABS
+    : RECORD_TABS.filter((item) => item !== "history");
+  const progressMatches = shown ? matchingEnrollments(shown.enrollments, branch, course, batch) : [];
+  const progressChoice = shown ? progressEnrollment(shown.enrollments, branch, course, batch, scope) : null;
+  const progressNeedsChoice = Boolean(shown?.actions.card) && !progressChoice && progressMatches.length > 1;
+  const scopedAssessments = (shown?.assessments || []).filter((item) => !progressChoice || item.batch_id === progressChoice.batch_id);
+  const currentRows = shown ? shown.enrollments.filter(isCurrentEnrollment) : [];
+  const historicalRows = shown ? shown.enrollments.filter((item) => !isCurrentEnrollment(item)) : [];
+
+  function enrollmentTable(title: string, rows: StudentEnrollment[]) {
+    if (!shown) return null;
+    return (
+      <>
+        <h2>{title}</h2>
+        {rows.length === 0 ? <p>None recorded.</p> : (
+          <div className="table-wrap">
+            <table className="people-table">
+              <caption className="sr-only">{title} for {shown.display_name}.</caption>
+              <thead>
+                <tr>
+                  <th>Branch</th>
+                  <th>Course</th>
+                  <th>Batch</th>
+                  <th>From</th>
+                  <th>Until</th>
+                  <th>Enrollment status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((item) => (
+                  <tr key={item.id || `${item.branch_id}-${item.batch_id}`}>
+                    <td>{recordedName(item.branch_name)}</td>
+                    <td>{recordedName(item.course_name)}</td>
+                    <td>{recordedName(item.batch_name)}</td>
+                    <td>{recordedDate(item.started_on)}</td>
+                    <td>{recordedDate(item.ended_on)}</td>
+                    <td>{enrollmentStateLabel(item)}</td>
+                    <td>
+                      <div className="row-actions">
+                        {item.manage ? <button type="button" className="quiet" onClick={() => openDates(item)}>Edit dates</button> : null}
+                        {item.manage && item.status !== "historical" ? <button type="button" className="quiet" onClick={() => openTransfer(item)}>Transfer</button> : null}
+                        {shown.actions.card ? <Link to={cardHref(item)}>Progress card</Link> : null}
+                        <Link to={contextHref("/marksheets", item)}>Marksheets</Link>
+                        <Link to={contextHref("/views", item)}>Views</Link>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </>
+    );
+  }
 
   return (
     <section className="panel wide student-record" aria-busy={phase === "loading"}>
@@ -787,26 +983,93 @@ export function StudentPage() {
               <div>
                 <p className="eyebrow">Student</p>
                 <h1>{shown.display_name}</h1>
-                <p className="meta">{shown.student_code} · {shown.archived ? "Archived" : "Active"}</p>
+                <p className="meta">{shown.student_code}</p>
+                <p className="meta">Person status: {shown.archived ? "Archived" : "Active"}</p>
+                <p className="meta">{currentRows.length ? enrollmentLine(currentRows[0]) : "No current enrollment"}{currentRows.length > 1 ? ` · ${currentRows.length} current enrollments` : ""}</p>
                 {chips.length ? <p className="context-chips">{chips.map((label) => <span key={label} className="chip">{label}</span>)}</p> : null}
                 {shown.aliases.length ? <p className="meta">Previous names: {shown.aliases.map((item) => item.display_name).join(", ")}</p> : null}
               </div>
             </div>
-            <div className="icon-actions">
-              {shown.actions.edit && (visibleTab === "personal" || visibleTab === "education" || visibleTab === "admissions") ? <button type="button" onClick={startEdit}>Edit</button> : null}
+            <div className="row-actions">
+              {shown.actions.edit ? <button type="button" onClick={() => startEdit("personal")}>Edit profile</button> : null}
+              {shown.actions.archive ? <button type="button" className="quiet" onClick={() => { setArchiveReason(""); setArchiveError(""); setArchiveOpen(true); }}>{shown.archived ? "Reactivate" : "Archive"}</button> : null}
               {shown.actions.card ? <Link to={cardHref()}>Progress card</Link> : null}
             </div>
           </div>
-          <div className="page-tabs" role="tablist" aria-label="Student" onKeyDown={(event) => moveTab(event, recordTabs, visibleTab, chooseTab)}>
-            <button type="button" role="tab" aria-selected={visibleTab === "personal"} onClick={() => chooseTab("personal")}>Personal</button>
-            <button type="button" role="tab" aria-selected={visibleTab === "education"} onClick={() => chooseTab("education")}>Previous education</button>
-            <button type="button" role="tab" aria-selected={visibleTab === "enrollments"} onClick={() => chooseTab("enrollments")}>Enrollments</button>
-            <button type="button" role="tab" aria-selected={visibleTab === "progress"} onClick={() => chooseTab("progress")}>Progress</button>
-            <button type="button" role="tab" aria-selected={visibleTab === "admissions"} onClick={() => chooseTab("admissions")}>Admissions</button>
-            {historyPermitted ? <button type="button" role="tab" aria-selected={visibleTab === "history"} onClick={() => chooseTab("history")}>Activity</button> : null}
+          <div className="page-tabs" role="tablist" aria-label="Student sections" onKeyDown={(event) => moveTab(event, recordTabs, visibleTab, chooseTab)}>
+            <button type="button" role="tab" id="student-tab-overview" aria-controls="student-panel-overview" aria-selected={visibleTab === "overview"} onClick={() => chooseTab("overview")}>Overview</button>
+            <button type="button" role="tab" id="student-tab-personal" aria-controls="student-panel-personal" aria-selected={visibleTab === "personal"} onClick={() => chooseTab("personal")}>Personal</button>
+            <button type="button" role="tab" id="student-tab-education" aria-controls="student-panel-education" aria-selected={visibleTab === "education"} onClick={() => chooseTab("education")}>Previous education</button>
+            <button type="button" role="tab" id="student-tab-enrollments" aria-controls="student-panel-enrollments" aria-selected={visibleTab === "enrollments"} onClick={() => chooseTab("enrollments")}>Enrollments</button>
+            <button type="button" role="tab" id="student-tab-progress" aria-controls="student-panel-progress" aria-selected={visibleTab === "progress"} onClick={() => chooseTab("progress")}>Progress</button>
+            <button type="button" role="tab" id="student-tab-admissions" aria-controls="student-panel-admissions" aria-selected={visibleTab === "admissions"} onClick={() => chooseTab("admissions")}>Admissions</button>
+            {historyPermitted ? <button type="button" role="tab" id="student-tab-history" aria-controls="student-panel-history" aria-selected={visibleTab === "history"} onClick={() => chooseTab("history")}>Activity</button> : null}
           </div>
+          {visibleTab === "overview" ? (
+            <div role="tabpanel" id="student-panel-overview" aria-labelledby="student-tab-overview">
+              <h2>Overview</h2>
+              <dl className="facts">
+                <div>
+                  <dt>Person status</dt>
+                  <dd>{shown.archived ? "Archived" : "Active"}</dd>
+                </div>
+                <div>
+                  <dt>Student ID</dt>
+                  <dd>{shown.student_code}</dd>
+                </div>
+                {shown.actions.contact === false ? null : (
+                  <div>
+                    <dt>Contact</dt>
+                    <dd className={shown.phone ? undefined : "is-empty"}>{shown.phone || "Not recorded"}</dd>
+                  </div>
+                )}
+              </dl>
+              <h2>Current enrollments</h2>
+              {currentRows.length === 0 ? <p>No current enrollment.</p> : (
+                <ul className="people">
+                  {currentRows.map((item) => (
+                    <li key={item.id || `${item.branch_id}-${item.batch_id}`}>
+                      <button type="button" className="quiet" onClick={() => chooseTab("enrollments")}>{enrollmentLine(item)}</button>
+                      <span className="meta"> · {enrollmentStateLabel(item)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <h2>Next</h2>
+              <div className="row-actions">
+                {shown.actions.edit ? <button type="button" onClick={() => startEdit("personal")}>Edit profile</button> : null}
+                {shown.actions.enroll ? <button type="button" onClick={openAdd}>Add enrollment</button> : null}
+                <button type="button" className="quiet" onClick={() => chooseTab("admissions")}>Source admissions</button>
+                {shown.actions.card ? <button type="button" className="quiet" onClick={() => chooseTab("progress")}>Published progress</button> : null}
+              </div>
+              {shown.actions.card ? (
+                <>
+                  <h2>Published progress</h2>
+                  {progressNeedsChoice ? <p>Select an enrollment. Results from different courses are not combined.</p> : null}
+                  {progressNeedsChoice ? (
+                    <label>Enrollment
+                      <select aria-label="Progress enrollment" value={scope} onChange={(event) => chooseScope(event.target.value)}>
+                        <option value="">Choose an enrollment</option>
+                        {progressMatches.map((item) => <option key={item.id || item.batch_id} value={item.id || ""}>{enrollmentLine(item)}</option>)}
+                      </select>
+                    </label>
+                  ) : <p className="meta">{progressChoice ? enrollmentLine(progressChoice) : "Published results for this student."}</p>}
+                  {progressState === "loading" ? <p role="status">Loading progress…</p> : null}
+                  {progressState === "error" ? <p className="error" role="alert">{progressError}</p> : null}
+                  {progress && !progressNeedsChoice ? (
+                    progress.empty_reason ? <p role="status">{EMPTY_REASONS[progress.empty_reason] || "Nothing matches this report."}</p> : (
+                      <p>
+                        {progress.performance.percentage == null ? "No published percentage" : `${progress.performance.percentage.toFixed(2)}%`}
+                        {progress.performance.band ? <BandMark band={progress.performance.band} name={progress.performance.band_name} place={progress.performance.band_place} /> : null}
+                      </p>
+                    )
+                  ) : null}
+                </>
+              ) : null}
+            </div>
+          ) : null}
           {visibleTab === "personal" ? (
-            <>
+            <div role="tabpanel" id="student-panel-personal" aria-labelledby="student-tab-personal">
               <FactGrid order={shown.actions.contact === false ? ["date_of_birth", "gender", "blood_group"] : CONTACT_ORDER} values={shown} />
               {shown.actions.contact === false ? <p>Contact and address are available to staff who manage this student.</p> : (
                 <>
@@ -827,13 +1090,16 @@ export function StudentPage() {
                   </dl>
                 </>
               ) : null}
-            </>
+            </div>
           ) : null}
           {visibleTab === "education" || visibleTab === "admissions" || visibleTab === "enrollments" || visibleTab === "progress" ? (
             <>
               {visibleTab === "education" ? (
                 <>
-                  <h2>Previous education</h2>
+                  <div className="title-row">
+                    <h2>Previous education</h2>
+                    {shown.actions.edit ? <button type="button" onClick={() => startEdit("education")}>Edit previous education</button> : null}
+                  </div>
                   {(shown.academic_records || []).length === 0 ? <p>No academic records yet.</p> : (
                     <div className="table-wrap">
                       <table className="people-table">
@@ -855,6 +1121,12 @@ export function StudentPage() {
                     </div>
                   )}
                 </>
+              ) : null}
+              {visibleTab === "admissions" && shown.actions.edit ? (
+                <div className="title-row">
+                  <h2>Admissions</h2>
+                  <button type="button" onClick={() => startEdit("admissions")}>Edit admission answers</button>
+                </div>
               ) : null}
               {visibleTab === "admissions" && admissionBusiness.length ? (
                 <>
@@ -903,50 +1175,22 @@ export function StudentPage() {
                   <button type="button" onClick={openAdd}>Add enrollment</button>
                 ) : null}
               </div>
-              {shown.enrollments.length === 0 ? <p>No enrollments in this view.</p> : (
-                <div className="table-wrap">
-                  <table className="people-table directory">
-                    <caption className="sr-only">Enrollments for {shown.display_name}.</caption>
-                    <thead>
-                      <tr>
-                        <th>Branch</th>
-                        <th>Course</th>
-                        <th>Batch</th>
-                        <th>From</th>
-                        <th>Until</th>
-                        <th>Status</th>
-                        <th>Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {shown.enrollments.map((item) => (
-                        <tr key={item.id || `${item.branch_id}-${item.batch_id}`}>
-                          <td>{recordedName(item.branch_name)}</td>
-                          <td>{recordedName(item.course_name)}</td>
-                          <td>{recordedName(item.batch_name)}</td>
-                          <td>{recordedDate(item.started_on)}</td>
-                          <td>{recordedDate(item.ended_on)}</td>
-                          <td>{recordedStatus(item.status)}</td>
-                          <td>
-                            <div className="actions">
-                              {item.manage ? <button type="button" className="quiet" onClick={() => openDates(item)}>Edit dates</button> : null}
-                              {item.manage && item.status !== "historical" ? <button type="button" className="quiet" onClick={() => openTransfer(item)}>Transfer</button> : null}
-                              {shown.actions.card ? <Link to={cardHref(item)}>Progress card</Link> : null}
-                              <Link to={contextHref("/marksheets", item)}>Marksheets</Link>
-                              <Link to={contextHref("/views", item)}>Views</Link>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+              {enrollmentTable("Current enrollments", currentRows)}
+              {enrollmentTable("Enrollment history", historicalRows)}
               </>
               ) : null}
               {visibleTab === "progress" && shown.actions.card ? (
                 <>
                   <h2>Progress</h2>
+                  {progressMatches.length > 1 ? (
+                    <label>Enrollment
+                      <select aria-label="Progress enrollment" value={progressChoice?.id || ""} onChange={(event) => chooseScope(event.target.value)}>
+                        <option value="">Choose an enrollment</option>
+                        {progressMatches.map((item) => <option key={item.id || item.batch_id} value={item.id || ""}>{enrollmentLine(item)}</option>)}
+                      </select>
+                    </label>
+                  ) : <p className="meta">{progressChoice ? enrollmentLine(progressChoice) : "Published results for this student."}</p>}
+                  {progressNeedsChoice ? <p>Select an enrollment. Results from different courses are not combined.</p> : null}
                   {progressState === "loading" ? <p role="status">Loading progress…</p> : null}
                   {progressState === "error" ? (
                     <>
@@ -967,9 +1211,11 @@ export function StudentPage() {
               {visibleTab === "progress" ? (
                 <>
                   <h2>Published results</h2>
-                  {(shown.assessments || []).length === 0 ? <p>No published results for this student.</p> : (
+                  {progressNeedsChoice ? <p>Select an enrollment to see its published results.</p> : null}
+                  {!progressNeedsChoice && scopedAssessments.length === 0 ? <p>No published results for this enrollment.</p> : null}
+                  {!progressNeedsChoice && scopedAssessments.length > 0 ? (
                     <ul className="people">
-                      {shown.assessments?.map((item) => (
+                      {scopedAssessments.map((item) => (
                         <li key={`${item.id}-${item.batch_id}`}>
                           <Link to={contextHref(`/marksheets/${item.id}`, shown.enrollments.find((enrollment) => enrollment.batch_id === item.batch_id))}>{item.title}</Link>
                           {" · "}{item.status}
@@ -977,7 +1223,7 @@ export function StudentPage() {
                         </li>
                       ))}
                     </ul>
-                  )}
+                  ) : null}
                 </>
               ) : null}
             </>
@@ -992,6 +1238,7 @@ export function StudentPage() {
               ) : null}
               {historyState === "loading" ? <p role="status">Loading history…</p> : null}
               {history.length === 0 && historyState === "ready" ? <p>No recorded changes for this student.</p> : null}
+              {historyTruncated ? <p>Older changes are not listed here.</p> : null}
               {history.length > 0 ? (
                 <div className="table-wrap">
                   <table className="people-table">
@@ -1272,8 +1519,8 @@ export function StudentPage() {
           ) : null}
           {transferFrom ? (
             <Dialog title="Transfer enrollment" onClose={() => setTransferFrom(null)}>
-              <form className="form-grid" onSubmit={saveTransfer}>
-                <p className="span-2">The current batch stays on record. Results already stored there stay there.</p>
+              <form className="form-grid" onSubmit={previewTransfer}>
+                <p className="span-2">From {enrollmentLine(transferFrom)}. The current batch stays on record.</p>
                 <label>Branch
                   <select value={addBranch} onChange={(event) => chooseAdd("branch_id", event.target.value)}>
                     <option value="">Choose</option>
@@ -1292,13 +1539,41 @@ export function StudentPage() {
                     {addBatches.filter((item) => item.id !== transferFrom.batch_id).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
                   </select>
                 </label>
-                <label>On
-                  <input type="date" value={addStarted} onChange={(event) => setAddStarted(event.target.value)} />
+                <label>Effective date
+                  <input type="date" value={addStarted} onChange={(event) => { setAddStarted(event.target.value); setTransferPreview(null); }} />
                 </label>
+                <label className="span-2">Reason
+                  <input value={transferReason} aria-label="Transfer reason" onChange={(event) => { setTransferReason(event.target.value); setTransferPreview(null); }} />
+                </label>
+                {transferPreview ? (
+                  <div className="span-2">
+                    <p>{transferPreview.source_batch || "Current batch"} ends on {transferPreview.source_ends_on}. {transferPreview.target_batch || "New batch"} starts on {transferPreview.target_starts_on}.</p>
+                    <p>{transferPreview.overlap}</p>
+                    <p>{transferPreview.results}</p>
+                  </div>
+                ) : null}
                 {addError ? <p className="error span-2" role="alert">{addError}</p> : null}
                 <div className="dialog-actions span-2">
                   <button type="button" className="quiet" onClick={() => setTransferFrom(null)}>Cancel</button>
-                  <button type="submit" disabled={addSaving}>{addSaving ? "Saving…" : "Transfer"}</button>
+                  <button type="submit" disabled={addSaving}>{addSaving ? "Working…" : "Preview transfer"}</button>
+                  <button type="button" disabled={addSaving || !transferPreview} onClick={() => void saveTransfer()}>{addSaving ? "Saving…" : "Confirm transfer"}</button>
+                </div>
+              </form>
+            </Dialog>
+          ) : null}
+          {archiveOpen && shown ? (
+            <Dialog title={shown.archived ? "Reactivate student" : "Archive student"} onClose={() => setArchiveOpen(false)}>
+              <form onSubmit={saveArchive}>
+                <p>{shown.archived
+                  ? "This student returns to the default directory. Current enrollments and published results stay as they are."
+                  : "This hides the student from the default directory. It does not end enrollments or remove published results."}</p>
+                <label>Reason
+                  <input value={archiveReason} aria-label="Archive reason" onChange={(event) => setArchiveReason(event.target.value)} />
+                </label>
+                {archiveError ? <p className="error" role="alert">{archiveError}</p> : null}
+                <div className="dialog-actions">
+                  <button type="button" className="quiet" onClick={() => setArchiveOpen(false)}>Cancel</button>
+                  <button type="submit" disabled={archiveSaving}>{archiveSaving ? "Saving…" : shown.archived ? "Reactivate" : "Archive"}</button>
                 </div>
               </form>
             </Dialog>

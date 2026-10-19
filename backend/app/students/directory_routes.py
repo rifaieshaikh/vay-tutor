@@ -9,7 +9,15 @@ from app.context import _restrict_batches, resolve_academic
 from app.deps import current_user, db, institute_resource
 from app.errors import AppError
 from app.queries import _report_filters, _student_sort_key
-from app.students import card_visible, directory_facts, enrollment_context, enrollment_visible, identity_editable
+from app.students import (
+    card_visible,
+    contact_visible,
+    directory_facts,
+    enrollment_context,
+    enrollment_resource,
+    enrollment_visible,
+    identity_editable,
+)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -66,7 +74,11 @@ async def student_options(request: Request, manage: bool = False) -> dict:
             "label": row.get("name") or "",
             "started_on": row.get("started_on") or "",
             "ended_on": row.get("ended_on") or "",
-            "parents": {"branch_id": row.get("branch_id"), "course_id": row.get("course_id")},
+            "parents": {
+                "branch_id": row.get("branch_id"),
+                "course_id": row.get("course_id"),
+                "session_key": row.get("session_key") or "",
+            },
         })
     visible_branches.sort(key=lambda item: item["label"].casefold())
     visible_courses.sort(key=lambda item: item["label"].casefold())
@@ -89,6 +101,7 @@ async def list_students(
     attempt: str = "",
     period: str = "",
     enrollment: str = "",
+    include_archived: str = "",
     sort: str = "name",
     direction: str = "asc",
     page: int = 0,
@@ -138,12 +151,38 @@ async def list_students(
     students = []
     if student_ids:
         students = await db(request).students.find({"_id": {"$in": student_ids}}).to_list(length=len(student_ids))
+    if include_archived not in {"", "1"}:
+        raise AppError(422, "students.archived", "Include archived must be 1 or omitted.")
+    if include_archived != "1":
+        students = [student for student in students if not student.get("archived")]
     needle = q.casefold().strip()
+    alias_hits: set[str] = set()
+    if needle and student_ids:
+        for alias in await db(request).aliases.find(
+            {"institute_id": user["institute_id"], "student_id": {"$in": student_ids}}
+        ).to_list(length=5000):
+            if needle in str(alias.get("display_name") or "").casefold():
+                alias_hits.add(alias["student_id"])
+    owned: dict[str, list] = {}
+    if student_ids:
+        for item in await db(request).enrollments.find(
+            {"institute_id": user["institute_id"], "student_id": {"$in": student_ids}}
+        ).to_list(length=5000):
+            owned.setdefault(item["student_id"], []).append(item)
+
+    def matches_student(student: dict) -> bool:
+        if not needle:
+            return True
+        identity = f"{student.get('student_code', '')} {student.get('display_name', '')}".casefold()
+        if needle in identity or student["_id"] in alias_hits:
+            return True
+        if not contact_visible(user["grants"], owned.get(student["_id"], [])):
+            return False
+        contact = f"{student.get('phone') or ''} {student.get('email') or ''}".casefold()
+        return needle in contact
+
     if needle:
-        students = [
-            student for student in students
-            if needle in f"{student.get('student_code', '')} {student.get('display_name', '')}".casefold()
-        ]
+        students = [student for student in students if matches_student(student)]
     from app.calculating import aggregate
     from app.reporting import hydrate, matches, policy_for
 
@@ -168,12 +207,6 @@ async def list_students(
                 continue
             grouped.setdefault(row.get("student_id"), []).append(row)
     manage = allows(user["grants"], "student.manage", institute_resource(user))
-    owned: dict[str, list] = {}
-    if student_ids:
-        for item in await db(request).enrollments.find(
-            {"institute_id": user["institute_id"], "student_id": {"$in": student_ids}}
-        ).to_list(length=5000):
-            owned.setdefault(item["student_id"], []).append(item)
     items = []
     included_rows: list = []
     for student in students:
@@ -182,10 +215,13 @@ async def list_students(
             continue
         summary = aggregate(rows, policy)
         latest = max((str(row.get("exam_date") or "") for row in rows), default="")
+        visible_contact = contact_visible(user["grants"], owned.get(student["_id"], []))
         item = {
             "id": student["_id"],
             "student_code": student["student_code"],
             "display_name": student["display_name"],
+            "archived": bool(student.get("archived")),
+            "contact": (student.get("phone") or student.get("email") or None) if visible_contact else None,
             "performance": {
                 "percentage": summary["percentage"],
                 "scored": summary["scored"],
@@ -206,10 +242,29 @@ async def list_students(
             item["name_key"] = student.get("name_key")
         items.append(item)
         included_rows.extend(rows)
-    if enrollment not in {"", "current"}:
-        raise AppError(422, "students.enrollment", "Enrollment must be current or omitted.")
-    if enrollment == "current":
+    if enrollment not in {"", "current", "historical", "none"}:
+        raise AppError(422, "students.enrollment", "Enrollment must be current, historical, none, or omitted.")
+    if enrollment == "none":
+        items = await _students_without_matching_enrollment(
+            request,
+            user,
+            clause,
+            facts,
+            set(student_ids),
+            needle,
+            include_archived,
+            manage,
+        )
+        included_rows = []
+    elif enrollment == "current":
         items = [item for item in items if any(row.get("status") != "historical" for row in item["enrollments"])]
+        kept = {item["id"] for item in items}
+        included_rows = [row for row in included_rows if row.get("student_id") in kept]
+    elif enrollment == "historical":
+        items = [
+            item for item in items
+            if item["enrollments"] and all(row.get("status") == "historical" for row in item["enrollments"])
+        ]
         kept = {item["id"] for item in items}
         included_rows = [row for row in included_rows if row.get("student_id") in kept]
     report = aggregate(included_rows, policy)
@@ -232,3 +287,93 @@ async def list_students(
         items = items[offset:offset + size]
     pages = max(1, (total + size - 1) // size) if total else 1
     return {"items": items, "total": total, "page": current if page else 0, "pages": pages, "summary": summary}
+
+
+def _institute_wide_lookup(grants: list[dict]) -> bool:
+    for grant in grants:
+        if "student.lookup" not in (grant.get("actions") or []):
+            continue
+        scope = grant.get("scope") or {}
+        if not any(scope.get(field) for field in ("branch_id", "course_id", "batch_id", "subject_id", "paper_id")):
+            return True
+    return False
+
+
+async def _students_without_matching_enrollment(
+    request,
+    user: dict,
+    clause: dict,
+    facts: dict,
+    matched_ids: set[str],
+    needle: str,
+    include_archived: str,
+    manage: bool,
+) -> list[dict]:
+    """People the caller may see who have no enrollment in the applied branch, course, batch, or intake period."""
+    database = db(request)
+    broad = await database.enrollments.find({"institute_id": user["institute_id"], **clause}).to_list(length=1000)
+    broad = [
+        row for row in broad
+        if enrollment_visible(user["grants"], row, facts["subject_by_id"], facts["paper_subject"], facts["rosters"])
+    ]
+    authorized = {row["student_id"] for row in broad}
+    if _institute_wide_lookup(user["grants"]):
+        query: dict = {"institute_id": user["institute_id"]}
+        if include_archived != "1":
+            query["archived"] = {"$ne": True}
+        for student in await database.students.find(query, {"_id": 1}).to_list(length=1000):
+            authorized.add(student["_id"])
+    missing_ids = [student_id for student_id in authorized if student_id not in matched_ids]
+    if not missing_ids:
+        return []
+    students = await database.students.find({"_id": {"$in": missing_ids}}).to_list(length=len(missing_ids))
+    if include_archived != "1":
+        students = [student for student in students if not student.get("archived")]
+    alias_hits: set[str] = set()
+    if needle:
+        for alias in await database.aliases.find(
+            {"institute_id": user["institute_id"], "student_id": {"$in": missing_ids}}
+        ).to_list(length=5000):
+            if needle in str(alias.get("display_name") or "").casefold():
+                alias_hits.add(alias["student_id"])
+    owned: dict[str, list] = {}
+    for item in await database.enrollments.find(
+        {"institute_id": user["institute_id"], "student_id": {"$in": missing_ids}}
+    ).to_list(length=5000):
+        owned.setdefault(item["student_id"], []).append(item)
+    items = []
+    for student in students:
+        if needle:
+            identity = f"{student.get('student_code', '')} {student.get('display_name', '')}".casefold()
+            contact_ok = contact_visible(user["grants"], owned.get(student["_id"], []))
+            contact = f"{student.get('phone') or ''} {student.get('email') or ''}".casefold()
+            if needle not in identity and student["_id"] not in alias_hits and not (contact_ok and needle in contact):
+                continue
+        rows = owned.get(student["_id"], [])
+        visible_contact = contact_visible(user["grants"], rows)
+        item = {
+            "id": student["_id"],
+            "student_code": student.get("student_code") or "",
+            "display_name": student.get("display_name") or "",
+            "archived": bool(student.get("archived")),
+            "contact": (student.get("phone") or student.get("email") or None) if visible_contact else None,
+            "performance": {
+                "percentage": None,
+                "scored": 0,
+                "expected": 0,
+                "missing": 0,
+                "absent": 0,
+                "band": None,
+            },
+            "latest_exam_date": None,
+            "empty_reason": "enrollment",
+            "enrollments": [],
+            "actions": {
+                "edit": identity_editable(user["grants"], rows),
+                "card": card_visible(user["grants"], rows),
+            },
+        }
+        if manage:
+            item["name_key"] = student.get("name_key")
+        items.append(item)
+    return items

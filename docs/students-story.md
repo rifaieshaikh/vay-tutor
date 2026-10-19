@@ -1,6 +1,6 @@
 # STU-01 — Modern student directory and record workspace
 
-Date: 19 October 2026 · Status: proposed; policy decisions, visual review and implementation pending.
+Date: 19 October 2026 · Status: recommended baselines are implemented. Staff design review and acceptance are still open.
 
 ## User story
 
@@ -51,6 +51,17 @@ This is a design/execution story, not authorization to start application changes
 | Merge | Advanced restricted operation with impact preview and explicit confirmation. | Define conflicts, source archive/redirect behavior, audit and recoverability; do not introduce a merge recommendation based only on a shared phone/name. |
 | Progress | Authorized active published revisions only; label enrollment/period/coverage. | Decide multi-enrollment default and comparability rules; no unqualified cross-course average. |
 | Historical answers | Application snapshots stay with source admissions; ongoing profile fields remain clearly separate. | Define explicit reconciliation when approved personal details differ; never silently overwrite all records. |
+
+## Accepted contract
+
+The requester asked for this story to be completed on 19 October 2026. These rules are now what the application enforces:
+
+- One student identity can have many enrollments. Shared name or phone never merges records by itself.
+- Archive and reactivate change only the person status. They do not end enrollments or remove results. A merged source stays archived. A reason is required.
+- The directory defaults to authorized non-archived students. Include archived is explicit. Clear filters restores that default.
+- Current means the applied branch, course, batch, and intake period contain an enrollment that has not ended. Historical means every enrollment in that scope has ended. No matching enrollment means the person is authorized and has no enrollment in that scope. Intake period is the batch session, not the enrollment dates. A closed batch does not by itself end an enrollment.
+- A transfer ends the selected enrollment and starts the new one on the same effective date, after a preview and a reason. Results stay on the previous batch. Repeating the same idempotency key does not create a second enrollment.
+- Merge requires a preview and explicit confirmation. It cannot be undone from the screen. Enrollments that already exist on the student who is kept stay on the archived source.
 
 ## Acceptance criteria
 

@@ -1,6 +1,8 @@
 import { FormEvent, useEffect, useState } from "react";
 import { Link, Navigate, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
+import { periodLabel } from "../context";
+import { Option, optionFits } from "../filters";
 import { notify } from "../notify";
 import { StudentDialog } from "../ui";
 import { StudentEnrollment, StudentFilters, recordedName, studentRecordHref } from "./links";
@@ -17,6 +19,7 @@ type Preview = {
   moves?: StudentEnrollment[];
   kept?: StudentEnrollment[];
   alias: string;
+  recovery?: string;
 };
 
 function Notes({ error }: { error: string }) {
@@ -25,7 +28,24 @@ function Notes({ error }: { error: string }) {
 }
 
 type StudentActions = { edit: boolean; card: boolean };
-type StudentRow = { id: string; student_code: string; display_name: string; enrollments: StudentEnrollment[]; actions: StudentActions };
+type StudentRow = {
+  id: string;
+  student_code: string;
+  display_name: string;
+  archived?: boolean;
+  contact?: string | null;
+  enrollments: StudentEnrollment[];
+  actions: StudentActions;
+};
+type FilterOptions = { branches: Option[]; courses: Option[]; batches: Option[] };
+type FilterDraft = {
+  branchId: string;
+  courseId: string;
+  batchId: string;
+  period: string;
+  enrollment: string;
+  includeArchived: boolean;
+};
 
 function readStudentFilters(params: URLSearchParams): StudentFilters {
   return {
@@ -49,20 +69,45 @@ const SORT_LABELS: Record<SortField, string> = {
   status: "Status",
 };
 
+function currentEnrollments(rows: StudentEnrollment[]) {
+  return rows.filter((item) => !item.ended_on && item.status !== "historical");
+}
+
 function enrollmentSummary(rows: StudentEnrollment[]) {
-  const current = rows.filter((item) => !item.ended_on && item.status !== "historical");
+  const current = currentEnrollments(rows);
   const shown = current.length ? current : rows;
-  if (!shown.length) return "No enrollment";
+  if (!shown.length) return "No enrollment in this view";
   if (shown.length === 1) {
     return [shown[0].branch_name, shown[0].course_name, shown[0].batch_name].filter(Boolean).join(" · ") || "Enrollment recorded";
   }
-  return `${shown.length} current enrollments`;
+  return `${shown.length} ${current.length ? "current" : "matching"} enrollments in this view`;
 }
 
-function personStatus(rows: StudentEnrollment[]) {
-  if (!rows.length) return "No enrollment";
-  if (rows.some((item) => !item.ended_on && item.status !== "historical")) return "Active";
-  return "Ended";
+function personStatus(archived?: boolean) {
+  return archived ? "Archived" : "Active";
+}
+
+const SORT_OPTIONS = [
+  ["name:asc", "Name, A to Z"],
+  ["name:desc", "Name, Z to A"],
+  ["code:asc", "Student ID, A to Z"],
+  ["code:desc", "Student ID, Z to A"],
+  ["branch:asc", "Branch, A to Z"],
+  ["branch:desc", "Branch, Z to A"],
+  ["course:asc", "Course, A to Z"],
+  ["course:desc", "Course, Z to A"],
+  ["batch:asc", "Batch, A to Z"],
+  ["batch:desc", "Batch, Z to A"],
+  ["started:asc", "From, earliest"],
+  ["started:desc", "From, latest"],
+  ["ended:asc", "Until, earliest"],
+  ["ended:desc", "Until, latest"],
+  ["status:asc", "Enrollment status, A to Z"],
+  ["status:desc", "Enrollment status, Z to A"],
+] as const;
+
+function sortToken(field: SortField, direction: "asc" | "desc") {
+  return `${field}:${direction}`;
 }
 
 function readSort(value: string | null): SortField {
@@ -185,6 +230,7 @@ function MergeDialog({ catalog, onClose, onMerged }: { catalog: Catalog; onClose
           <p>Enrollments that move: {(preview.moves || []).length === 0 ? "none." : (preview.moves || []).map((item) => [item.branch_name, item.course_name, item.batch_name].filter(Boolean).join(" · ")).join("; ")}</p>
           <p>Enrollments that stay separate because that batch is already on the remaining student: {(preview.kept || []).length === 0 ? "none." : (preview.kept || []).map((item) => [item.branch_name, item.course_name, item.batch_name].filter(Boolean).join(" · ")).join("; ")}</p>
           <p>The source name is kept as a previous name.</p>
+          <p>{preview.recovery || "This merge cannot be undone. The source student is archived and linked to the student you keep."}</p>
           <label><input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} /> I have reviewed this impact.</label>
           <div className="dialog-actions">
             <button type="button" className="destructive" onClick={merge} disabled={!acknowledged || busy}>Confirm merge</button>
@@ -203,21 +249,31 @@ export function StudentsPage({ session }: { session: Session }) {
   const direction = params.get("direction") === "desc" ? "desc" : "asc";
   const page = Math.max(1, Number(params.get("page")) || 1);
   const canMerge = session.actions.includes("catalog.manage");
+  const canAdmit = session.actions.includes("student.manage");
   const [query, setQuery] = useState(applied.q);
   const [students, setStudents] = useState<StudentRow[]>([]);
   const [total, setTotal] = useState(0);
   const [pages, setPages] = useState(1);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
-  const [sortOpen, setSortOpen] = useState(false);
-  const [sortDraft, setSortDraft] = useState<SortField>(sort);
-  const [directionDraft, setDirectionDraft] = useState<"asc" | "desc">(direction);
+  const [options, setOptions] = useState<FilterOptions>({ branches: [], courses: [], batches: [] });
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [merging, setMerging] = useState(false);
   const [listNonce, setListNonce] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const period = params.get("period") || "";
-  const currentOnly = params.get("enrollment") === "current";
-  const listKey = [applied.q, applied.branch_id, applied.course_id, applied.batch_id, period, currentOnly, sort, direction, page, listNonce].join("|");
+  const enrollment = ["current", "historical", "none"].includes(params.get("enrollment") || "") ? params.get("enrollment") || "" : "";
+  const includeArchived = params.get("include_archived") === "1";
+  const appliedDraft = (): FilterDraft => ({
+    branchId: applied.branch_id,
+    courseId: applied.course_id,
+    batchId: applied.batch_id,
+    period,
+    enrollment,
+    includeArchived,
+  });
+  const [filterDraft, setFilterDraft] = useState<FilterDraft>(appliedDraft);
+  const listKey = [applied.q, applied.branch_id, applied.course_id, applied.batch_id, period, enrollment, includeArchived, sort, direction, page, listNonce].join("|");
 
   useEffect(() => {
     setQuery(applied.q);
@@ -252,7 +308,8 @@ export function StudentsPage({ session }: { session: Session }) {
     if (applied.course_id) search.set("course_id", applied.course_id);
     if (applied.batch_id) search.set("batch_id", applied.batch_id);
     if (period) search.set("period", period);
-    if (currentOnly) search.set("enrollment", "current");
+    if (enrollment) search.set("enrollment", enrollment);
+    if (includeArchived) search.set("include_archived", "1");
     if (sort !== "name") search.set("sort", sort);
     if (direction === "desc") search.set("direction", "desc");
     search.set("page", String(page));
@@ -263,6 +320,7 @@ export function StudentsPage({ session }: { session: Session }) {
         setStudents(result.items);
         setTotal(result.total);
         setPages(result.pages);
+        setError("");
       })
       .catch((reason: Error) => {
         if (!cancelled) setError(reason.message);
@@ -275,27 +333,16 @@ export function StudentsPage({ session }: { session: Session }) {
     };
   }, [listKey]);
 
+  useEffect(() => {
+    let cancelled = false;
+    api<FilterOptions>("/api/v1/students/options")
+      .then((result) => { if (!cancelled) setOptions(result); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
   function write(next: URLSearchParams) {
     setParams(next);
-  }
-
-  function clearSearch() {
-    setQuery("");
-    const next = new URLSearchParams(params);
-    next.delete("q");
-    next.delete("enrollment");
-    next.delete("page");
-    next.delete("student");
-    write(next);
-  }
-
-  function setCurrentOnly(enabled: boolean) {
-    const next = new URLSearchParams(params);
-    next.delete("page");
-    next.delete("student");
-    if (enabled) next.set("enrollment", "current");
-    else next.delete("enrollment");
-    write(next);
   }
 
   function commitSearch() {
@@ -309,24 +356,56 @@ export function StudentsPage({ session }: { session: Session }) {
     write(next);
   }
 
-  function chooseSort(value: SortField, nextDirection: "asc" | "desc" = sort === value && direction === "asc" ? "desc" : "asc") {
+  function applySort(value: string) {
+    const [field, nextDirection] = value.split(":");
     const next = new URLSearchParams(params);
     next.delete("student");
     next.delete("page");
-    writeSort(next, value, nextDirection);
+    writeSort(next, readSort(field), nextDirection === "desc" ? "desc" : "asc");
     write(next);
   }
 
-  function openSort() {
-    setSortDraft(sort);
-    setDirectionDraft(direction);
-    setSortOpen(true);
+  function applyFilters(event: FormEvent) {
+    event.preventDefault();
+    const next = new URLSearchParams(params);
+    next.delete("page");
+    next.delete("student");
+    const writeField = (key: string, value: string) => { if (value) next.set(key, value); else next.delete(key); };
+    writeField("branch_id", filterDraft.branchId);
+    writeField("course_id", filterDraft.courseId);
+    writeField("batch_id", filterDraft.batchId);
+    writeField("period", filterDraft.period);
+    writeField("enrollment", ["current", "historical", "none"].includes(filterDraft.enrollment) ? filterDraft.enrollment : "");
+    if (filterDraft.includeArchived) next.set("include_archived", "1");
+    else next.delete("include_archived");
+    write(next);
+    setFiltersOpen(false);
   }
 
-  function applySort(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setSortOpen(false);
-    chooseSort(sortDraft, directionDraft);
+  function removeChip(key: string) {
+    const next = new URLSearchParams(params);
+    next.delete("page");
+    next.delete("student");
+    if (key === "q") {
+      next.delete("q");
+      setQuery("");
+    } else if (key === "branch_id") {
+      next.delete("branch_id");
+      next.delete("course_id");
+      next.delete("batch_id");
+    } else if (key === "course_id" || key === "period") {
+      next.delete(key);
+      next.delete("batch_id");
+    } else next.delete(key);
+    write(next);
+  }
+
+  function clearFilters() {
+    setQuery("");
+    const next = new URLSearchParams();
+    if (sort !== "name") next.set("sort", sort);
+    if (direction === "desc") next.set("direction", "desc");
+    write(next);
   }
 
   function setPage(value: number) {
@@ -344,17 +423,6 @@ export function StudentsPage({ session }: { session: Session }) {
     return search ? `/students?${search}` : "/students";
   }
 
-  function cardHref(id: string) {
-    const next = new URLSearchParams();
-    next.set("student", id);
-    if (applied.branch_id) next.set("branch_id", applied.branch_id);
-    if (applied.course_id) next.set("course_id", applied.course_id);
-    if (applied.batch_id) next.set("batch_id", applied.batch_id);
-    if (period) next.set("period", period);
-    next.set("returnTo", listPath());
-    return `/cards?${next.toString()}`;
-  }
-
   if (legacyId) {
     const back = new URLSearchParams(params);
     back.delete("student");
@@ -367,6 +435,28 @@ export function StudentsPage({ session }: { session: Session }) {
   const rangeFrom = total === 0 ? 0 : (page - 1) * 8 + 1;
   const rangeTo = Math.min(total, (page - 1) * 8 + students.length);
   const path = listPath();
+  const filtered = Boolean(applied.q || applied.branch_id || applied.course_id || applied.batch_id || period || enrollment || includeArchived);
+  const enrollmentLabel = enrollment === "current" ? "Currently enrolled" : enrollment === "historical" ? "Historical enrollment" : enrollment === "none" ? "No matching enrollment" : "";
+  const labelFor = (items: Option[], id: string) => items.find((item) => item.id === id)?.label || "Selected";
+  const chips: { key: string; label: string }[] = [];
+  if (applied.q) chips.push({ key: "q", label: `Search: ${applied.q}` });
+  if (applied.branch_id) chips.push({ key: "branch_id", label: labelFor(options.branches, applied.branch_id) });
+  if (applied.course_id) chips.push({ key: "course_id", label: labelFor(options.courses, applied.course_id) });
+  if (period) chips.push({ key: "period", label: periodLabel(period) });
+  if (applied.batch_id) chips.push({ key: "batch_id", label: labelFor(options.batches, applied.batch_id) });
+  if (enrollmentLabel) chips.push({ key: "enrollment", label: enrollmentLabel });
+  if (includeArchived) chips.push({ key: "include_archived", label: "Include archived" });
+  const draftCourses = options.courses.filter((item) => optionFits(item, { branch_id: filterDraft.branchId }));
+  const draftPeriods = Array.from(new Set(
+    options.batches
+      .filter((item) => optionFits(item, { branch_id: filterDraft.branchId, course_id: filterDraft.courseId }) && item.parents?.session_key)
+      .map((item) => item.parents?.session_key || ""),
+  )).filter(Boolean).sort();
+  const draftBatches = options.batches.filter((item) => {
+    if (!optionFits(item, { branch_id: filterDraft.branchId, course_id: filterDraft.courseId })) return false;
+    return !filterDraft.period || item.parents?.session_key === filterDraft.period;
+  });
+  const token = sortToken(sort, direction);
 
   return (
     <section className="panel wide">
@@ -375,87 +465,118 @@ export function StudentsPage({ session }: { session: Session }) {
           <p className="eyebrow">People</p>
           <h1>Students</h1>
         </div>
-        <button type="button" className="quiet" onClick={openSort} aria-label={`Sort by ${SORT_LABELS[sort]}, ${direction === "desc" ? "descending" : "ascending"}`}>Sort</button>
+        {canAdmit ? <Link className="button" to="/students/admissions/new">Create admission</Link> : null}
       </div>
-      <Notes error={error} />
-      {error ? <button type="button" className="secondary" onClick={() => setListNonce((value) => value + 1)}>Try again</button> : null}
-      <div className="preset-row" role="group" aria-label="Views">
-        <button type="button" className="secondary" aria-pressed={currentOnly} onClick={() => setCurrentOnly(!currentOnly)}>Currently enrolled</button>
-      </div>
-      <div className="toolbar common">
+      <form className="toolbar" onSubmit={(event) => { event.preventDefault(); commitSearch(); }}>
         <label>Search
-          <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitSearch(); } }} placeholder="Name or student id" />
+          <input value={query} aria-label="Search students" placeholder="Name, student ID, previous name, or contact" onChange={(event) => setQuery(event.target.value)} />
         </label>
-      </div>
+        <label>Sort
+          <select aria-label="Sort" value={SORT_OPTIONS.some((item) => item[0] === token) ? token : "name:asc"} onChange={(event) => applySort(event.target.value)}>
+            {SORT_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </label>
+        <button type="button" className="secondary" onClick={() => { setFilterDraft(appliedDraft()); setFiltersOpen(true); }}>Filters</button>
+      </form>
       <p className="filter-row">
-        {applied.q ? <button type="button" className="chip-button" onClick={clearSearch}>Search: {applied.q}</button> : null}
-        {currentOnly ? <button type="button" className="chip-button" onClick={() => setCurrentOnly(false)}>Currently enrolled</button> : null}
-        {applied.q || currentOnly ? <button type="button" className="quiet" onClick={clearSearch}>Clear</button> : null}
-        <span>{loading ? "Loading students…" : `${total} student${total === 1 ? "" : "s"}`}</span>
+        <span role="status">{loading ? "Loading students…" : error ? "Students could not be loaded." : `${rangeFrom}–${rangeTo} of ${total}`}</span>
+        {chips.map((chip) => (
+          <button key={chip.key} type="button" className="chip-button" onClick={() => removeChip(chip.key)}>{chip.label}</button>
+        ))}
+        {filtered ? <button type="button" className="quiet" onClick={clearFilters}>Clear filters</button> : null}
       </p>
-      {sortOpen ? (
-        <StudentDialog title="Sort" onClose={() => setSortOpen(false)}>
-          <form className="form-grid" onSubmit={applySort}>
-            <label className="span-2">Sort by
-              <select value={sortDraft} onChange={(event) => setSortDraft(readSort(event.target.value))}>
-                {SORT_FIELDS.map((field) => <option key={field} value={field}>{SORT_LABELS[field]}</option>)}
-              </select>
-            </label>
-            <label className="span-2">Order
-              <select value={directionDraft} onChange={(event) => setDirectionDraft(event.target.value === "desc" ? "desc" : "asc")}>
-                <option value="asc">Ascending</option>
-                <option value="desc">Descending</option>
-              </select>
-            </label>
-            <div className="dialog-actions span-2">
-              <button type="button" className="quiet" onClick={() => setSortOpen(false)}>Cancel</button>
-              <button type="submit">Apply</button>
-            </div>
-          </form>
-        </StudentDialog>
-      ) : null}
-      {!loading && !error && total === 0 ? <p>{applied.q || currentOnly ? "No students match this view. Clear it to see the full list." : "No students match this context."}</p> : null}
+      <Notes error={error} />
+      {error ? <button type="button" className="secondary" onClick={() => setListNonce((value) => value + 1)}>Retry</button> : null}
+      {!loading && !error && total === 0 ? <p>{filtered ? "No students match." : "No students yet."}</p> : null}
       {students.length > 0 ? (
         <div className="table-wrap">
           <table className="people-table directory">
             <caption className="sr-only">{total} student{total === 1 ? "" : "s"}. Page {page} of {pages}. Sorted by {SORT_LABELS[sort]}, {direction === "desc" ? "descending" : "ascending"}.</caption>
             <thead>
               <tr>
-                <th aria-sort={sort === "name" ? (direction === "desc" ? "descending" : "ascending") : "none"}>
-                  <button type="button" className="sort" onClick={() => chooseSort("name")}>Name</button>
-                </th>
-                <th aria-sort={sort === "code" ? (direction === "desc" ? "descending" : "ascending") : "none"}>
-                  <button type="button" className="sort" onClick={() => chooseSort("code")}>Student ID</button>
-                </th>
+                <th aria-sort={sort === "name" ? (direction === "desc" ? "descending" : "ascending") : "none"}>Name</th>
+                <th aria-sort={sort === "code" ? (direction === "desc" ? "descending" : "ascending") : "none"}>Student ID</th>
                 <th>Enrollment</th>
-                <th>Status</th>
-                <th>Actions</th>
+                <th>Person status</th>
               </tr>
             </thead>
             <tbody>
               {students.map((row) => (
                 <tr key={row.id}>
-                  <td><Link to={studentRecordHref(row.id, path, applied)}>{recordedName(row.display_name)}</Link></td>
-                  <td className="nowrap">{row.student_code}</td>
-                  <td>{enrollmentSummary(row.enrollments)}</td>
-                  <td>{personStatus(row.enrollments)}</td>
-                  <td>
-                    <div className="actions">
-                      {row.actions?.edit ? <Link to={studentRecordHref(row.id, path, applied, true)}>Edit</Link> : null}
-                      {row.actions?.card ? <Link to={cardHref(row.id)}>Progress card</Link> : null}
+                  <td className="person">
+                    <div className="person-cell">
+                      <Link to={studentRecordHref(row.id, path, applied)}>{recordedName(row.display_name)}</Link>
+                      {row.contact ? <span className="meta">{row.contact}</span> : null}
                     </div>
                   </td>
+                  <td className="nowrap">{row.student_code}</td>
+                  <td>{enrollmentSummary(row.enrollments)}</td>
+                  <td>{personStatus(row.archived)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       ) : null}
-      <p className="pager">
-        <button type="button" className="quiet" disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</button>
-        <span>{rangeFrom}–{rangeTo} of {total}</span>
-        <button type="button" className="quiet" disabled={page >= pages} onClick={() => setPage(page + 1)}>Next</button>
-      </p>
+      {!error && total > 0 ? (
+        <p className="pager">
+          <button type="button" className="quiet" disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</button>
+          <span>{rangeFrom}–{rangeTo} of {total}</span>
+          <button type="button" className="quiet" disabled={page >= pages} onClick={() => setPage(page + 1)}>Next</button>
+        </p>
+      ) : null}
+      {filtersOpen ? (
+        <StudentDialog title="Filters" onClose={() => setFiltersOpen(false)}>
+          <form className="form-grid" onSubmit={applyFilters}>
+            <label>Branch
+              <select aria-label="Branch" value={filterDraft.branchId} onChange={(event) => setFilterDraft({ ...filterDraft, branchId: event.target.value, courseId: "", batchId: "" })}>
+                <option value="">Any branch</option>
+                {options.branches.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+            </label>
+            <label>Course
+              <select aria-label="Course" value={filterDraft.courseId} onChange={(event) => setFilterDraft({ ...filterDraft, courseId: event.target.value, batchId: "" })}>
+                <option value="">Any course</option>
+                {draftCourses.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+            </label>
+            <label>Intake period
+              <select aria-label="Intake period" value={filterDraft.period} onChange={(event) => {
+                const value = event.target.value;
+                const batch = options.batches.find((item) => item.id === filterDraft.batchId);
+                const batchStillFits = !value || batch?.parents?.session_key === value;
+                setFilterDraft({ ...filterDraft, period: value, batchId: batchStillFits ? filterDraft.batchId : "" });
+              }}>
+                <option value="">Any period</option>
+                {draftPeriods.map((key) => <option key={key} value={key}>{periodLabel(key)}</option>)}
+              </select>
+            </label>
+            <label>Batch
+              <select aria-label="Batch" value={filterDraft.batchId} onChange={(event) => setFilterDraft({ ...filterDraft, batchId: event.target.value })}>
+                <option value="">Any batch</option>
+                {draftBatches.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+            </label>
+            <label>Enrollment
+              <select aria-label="Enrollment" value={filterDraft.enrollment} onChange={(event) => setFilterDraft({ ...filterDraft, enrollment: event.target.value })}>
+                <option value="">Any enrollment in this view</option>
+                <option value="current">Currently enrolled</option>
+                <option value="historical">Historical enrollment</option>
+                <option value="none">No matching enrollment</option>
+              </select>
+            </label>
+            <label className="checkbox-row">
+              <input type="checkbox" checked={filterDraft.includeArchived} onChange={(event) => setFilterDraft({ ...filterDraft, includeArchived: event.target.checked })} />
+              Include archived
+            </label>
+            <div className="dialog-actions span-2">
+              <button type="button" className="quiet" onClick={() => setFilterDraft({ branchId: "", courseId: "", batchId: "", period: "", enrollment: "", includeArchived: false })}>Reset</button>
+              <button type="button" className="secondary" onClick={() => setFiltersOpen(false)}>Cancel</button>
+              <button type="submit">Apply</button>
+            </div>
+          </form>
+        </StudentDialog>
+      ) : null}
       {canMerge ? (
         <p className="advanced-action">
           <button type="button" className="quiet" onClick={() => setMerging(true)}>Merge students</button>

@@ -2,6 +2,7 @@
 
 from app.students.directory import (
     card_visible,
+    contact_visible,
     directory_facts,
     enrollment_context,
     enrollment_resource,
@@ -16,6 +17,7 @@ from app.students.directory import (
 
 __all__ = [
     "card_visible",
+    "contact_visible",
     "directory_facts",
     "enrollment_context",
     "enrollment_resource",

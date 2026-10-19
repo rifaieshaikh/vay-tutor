@@ -561,8 +561,9 @@ th button.sort { color: #5c6770; font-weight: 700; }
 .icon-actions { display: flex; gap: 0.3rem; align-items: center; }
 .icon-actions a, .icon-actions button { width: 2rem; height: 2rem; display: inline-flex; align-items: center; justify-content: center; padding: 0; background: #0f6e6b; color: white; border-radius: 8px; }
 .icon-actions a:hover, .icon-actions button:hover { background: #0c5856; }
-table.people-table.directory { min-width: 62rem; }
+table.people-table.directory { min-width: 40rem; }
 table.people-table.directory td { white-space: nowrap; }
+table.people-table.directory td.person { white-space: normal; min-width: 12rem; }
 .row-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; }
 .row-actions a, .row-actions button { width: auto; background: #0f6e6b; color: white; border-radius: 8px; padding: 0.35rem 0.65rem; font-size: 0.85rem; text-decoration: none; white-space: nowrap; }
 .row-actions .quiet { background: transparent; color: #0f6e6b; }

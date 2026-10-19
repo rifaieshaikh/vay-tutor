@@ -179,6 +179,7 @@ def test_a_prospect_stays_one_student_through_transfer_and_published_results(cli
             "course_id": course_id,
             "batch_id": destination_id,
             "on": "2027-02-01",
+            "reason": "Moving to the next batch",
         },
     )
     assert moved.status_code == 200, moved.text
