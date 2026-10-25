@@ -254,7 +254,7 @@ export function AdmissionsPage({ session }: { session: Session }) {
         </div>
         {canManage ? (
           <div className="actions">
-            <Link className="button secondary" to="/students/admissions/import">Import</Link>
+            <Link className="button secondary" to="/students/admissions/import?new=1">Import</Link>
             <Link className="button" to="/students/admissions/new">Add admission</Link>
           </div>
         ) : null}
@@ -536,7 +536,7 @@ export function AdmissionPage({ session }: { session: Session }) {
   if (!admission) {
     return <section className="panel">{error ? <p className="error" role="alert">{error}</p> : <p>Loading admission…</p>}</section>;
   }
-  const batches = (admission.batches || []).filter((item) => !branchId || item.branch_id === branchId);
+  const batches = (admission.batches || []).filter((item) => item.open && (!branchId || item.branch_id === branchId));
   const open = admission.status !== "converted" && admission.status !== "closed";
   const readiness = admission.readiness || "";
   const selectionDirty = branchId !== (admission.branch_id || "") || batchId !== (admission.batch_id || "");

@@ -236,7 +236,7 @@ export function EnquiriesPage({ session }: { session: Session }) {
         </div>
         {canManage ? (
           <div className="actions">
-            <Link className="button secondary" to="/students/enquiries/import">Import</Link>
+            <Link className="button secondary" to="/students/enquiries/import?new=1">Import</Link>
             <button type="button" onClick={() => setAdding(true)}>Add enquiry</button>
           </div>
         ) : null}

@@ -3,6 +3,8 @@ export {
   recordedDate,
   recordedName,
   recordedStatus,
+  safeAcademicReturn,
+  safeBatchList,
   safeBatchWorkspace,
   safeStudentList,
   studentRecordHref,

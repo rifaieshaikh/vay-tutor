@@ -20,12 +20,31 @@ export function safeBatchWorkspace(value: string | null) {
   if (!/^\/batches\/[A-Za-z0-9]+$/.test(path)) return "";
   const incoming = new URLSearchParams(query);
   const next = new URLSearchParams();
-  for (const key of ["branch_id", "course_id", "batch_id", "period", "student_page", "assessment_page"]) {
+  for (const key of ["branch_id", "course_id", "batch_id", "period", "student_page", "assessment_page", "section"]) {
     const item = incoming.get(key) || "";
-    if (item && !item.includes("/")) next.set(key, item);
+    if (!item || item.includes("/")) continue;
+    if (key === "section" && !["students", "teachers", "curriculum", "assessments"].includes(item)) continue;
+    next.set(key, item);
   }
   const search = next.toString();
   return search ? `${path}?${search}` : path;
+}
+
+export function safeBatchList(value: string | null) {
+  if (!value || !value.startsWith("/batches") || value.startsWith("//") || value.includes("://") || value.includes("\\")) return "";
+  const path = value.split("?")[0];
+  if (path !== "/batches") return "";
+  return value;
+}
+
+export function safeAcademicReturn(value: string | null) {
+  const list = safeBatchList(value);
+  if (list) return list;
+  if (!value || value.startsWith("//") || value.includes("://") || value.includes("\\")) return "";
+  const path = value.split("?")[0];
+  if (path === "/institute" || path === "/courses") return value;
+  if (/^\/institute\/branches\/[A-Za-z0-9]+$/.test(path) || /^\/courses\/[A-Za-z0-9]+$/.test(path)) return value;
+  return "";
 }
 
 export function safeStudentList(value: string | null) {

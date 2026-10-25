@@ -52,6 +52,26 @@ def test_weighted_aggregate_bands_and_dense_rank():
     assert ranks == {"one": 1, "two": 1, "three": 2}
 
 
+def test_top_mark_uses_the_highest_scored_result():
+    from app.reporting import _top_text, present, tops_for
+
+    siblings = [
+        {"id": "a", "status": "scored", "score": 12, "maximum": 20, "batch_id": "sept"},
+        {"id": "b", "status": "scored", "score": 18, "maximum": 20, "batch_id": "sept"},
+        {"id": "c", "status": "absent", "score": None, "maximum": 20, "batch_id": "sept"},
+        {"id": "d", "status": "missing", "score": None, "maximum": 20, "batch_id": "jan"},
+        {"id": "e", "status": "scored", "score": 19, "maximum": 20, "batch_id": "jan"},
+        {"id": "f", "status": "scored", "score": 0, "maximum": 20, "batch_id": "jan"},
+    ]
+    assert tops_for(siblings, "sept") == (19, 18)
+    assert tops_for(siblings[:3], "sept") == (18, None)
+    assert tops_for([siblings[2]], "sept") == (None, None)
+    shown = present(siblings[0], {"bands": {"danger_below": 40, "safe_above": 60}}, 3, 2, 19, 18)
+    assert shown["top_score"] == 19
+    assert shown["batch_top_score"] == 18
+    assert _top_text(shown) == "19 of 20 | batch 18 of 20"
+
+
 def test_academic_sections_follow_custom_policy_and_report_missing_results():
     rows = [
         {"id": "score", "student_id": "s1", "assessment_id": "exam", "branch_id": "b1", "marksheet_id": "sheet", "status": "scored", "score": 15, "maximum": 20},
@@ -262,6 +282,7 @@ def test_correction_and_restricted_outputs_stay_on_the_active_revision(client):
     assert restricted["partial"] is True
     assert all(item.get("title") != "Law secret" for item in restricted["results"])
     assert "law" not in {item.get("subject_id") for item in restricted["results"]}
+    assert all(item.get("rank") is None and item.get("top_score") is None for item in restricted["results"])
     queued = client.post("/api/v1/reports/cards", json={"format": "pdf", "scope": {"subject_id": catalog["subjects"][0]["id"]}})
     assert queued.status_code == 403
     client.post("/api/v1/auth/logout")
@@ -311,6 +332,59 @@ def test_added_marksheet_stays_draft_until_published(client):
     assert detail["available_students"] == []
     assert client.get("/api/v1/views/institute").json()["empty"] is True
     assert client.post("/api/v1/marksheets", json=body).status_code == 409
+
+
+def test_progress_card_reports_the_exam_top_mark(client):
+    bootstrap(client)
+    database = sync_db(client)
+    institute_id = database.institutes.find_one()["_id"]
+    branch, course, batch, subject, paper, lower, higher = (str(ObjectId()) for _ in range(7))
+    database.branches.insert_one({"_id": branch, "institute_id": institute_id, "name": "IAM Tirur"})
+    database.courses.insert_one({"_id": course, "institute_id": institute_id, "name": "CA Foundation"})
+    database.offerings.insert_one({"_id": str(ObjectId()), "institute_id": institute_id, "branch_id": branch, "course_id": course})
+    database.batches.insert_one({"_id": batch, "institute_id": institute_id, "branch_id": branch, "course_id": course, "name": "September 2026"})
+    database.subjects.insert_one({"_id": subject, "institute_id": institute_id, "course_id": course, "name": "Accounting"})
+    database.papers.insert_one({"_id": paper, "institute_id": institute_id, "subject_id": subject, "number": 1, "name": "Paper 1"})
+    database.students.insert_many([
+        {"_id": lower, "institute_id": institute_id, "display_name": "LOWER MARK", "student_code": "IAM-000201", "name_key": "lower mark"},
+        {"_id": higher, "institute_id": institute_id, "display_name": "HIGHER MARK", "student_code": "IAM-000202", "name_key": "higher mark"},
+    ])
+    database.enrollments.insert_many([
+        {"_id": str(ObjectId()), "institute_id": institute_id, "student_id": lower, "branch_id": branch, "course_id": course, "batch_id": batch},
+        {"_id": str(ObjectId()), "institute_id": institute_id, "student_id": higher, "branch_id": branch, "course_id": course, "batch_id": batch},
+    ])
+    created = client.post(
+        "/api/v1/marksheets",
+        json={
+            "title": "Class test",
+            "branch_id": branch,
+            "course_id": course,
+            "batch_id": batch,
+            "subject_id": subject,
+            "paper_id": paper,
+            "exam_type": "unit",
+            "maximum": 20,
+            "exam_date": "2026-10-08",
+            "attempt": "original",
+        },
+    )
+    assert created.status_code == 200, created.text
+    sheet_id = created.json()["id"]
+    assert client.post(f"/api/v1/marksheets/{sheet_id}/results", json={"student_id": lower, "status": "scored", "score": 12}).status_code == 200
+    assert client.post(f"/api/v1/marksheets/{sheet_id}/results", json={"student_id": higher, "status": "scored", "score": 18}).status_code == 200
+    assert client.post(f"/api/v1/marksheets/{sheet_id}/publish").status_code == 200
+    card = client.get(f"/api/v1/students/{lower}/card").json()
+    result = card["results"][0]
+    assert result["score"] == 12
+    assert result["rank"] == 2
+    assert result["top_score"] == 18
+    assert result["batch_top_score"] is None
+    queued = client.post("/api/v1/reports/cards", json={"format": "pdf", "scope": {"student_id": lower}})
+    assert queued.status_code == 200, queued.text
+    assert client.post(f"/api/v1/jobs/{queued.json()['id']}/run").json()["state"] == "succeeded"
+    contents = open(database.files.find_one({"job_id": queued.json()["id"]})["path"], "rb").read()
+    assert b"Top mark" in contents
+    assert b"18 of 20" in contents
 
 
 def test_cleared_score_card_filters_and_owned_export(client):
@@ -451,8 +525,8 @@ def test_report_filters_reach_the_list_card_and_export(client):
     database.offerings.insert_one({"_id": str(ObjectId()), "institute_id": institute_id, "branch_id": branch, "course_id": course})
     offering = str(ObjectId())
     database.batches.insert_many([
-        {"_id": batch, "institute_id": institute_id, "branch_id": branch, "course_id": course, "name": "September 2026", "offering_id": offering, "session_key": "2026-09"},
-        {"_id": other_batch, "institute_id": institute_id, "branch_id": branch, "course_id": course, "name": "January 2027", "offering_id": offering, "session_key": "2027-01"},
+        {"_id": batch, "institute_id": institute_id, "branch_id": branch, "course_id": course, "name": "September 2026", "name_key": "september 2026", "offering_id": offering, "session_key": "2026-09"},
+        {"_id": other_batch, "institute_id": institute_id, "branch_id": branch, "course_id": course, "name": "January 2027", "name_key": "january 2027", "offering_id": offering, "session_key": "2027-01"},
     ])
     database.subjects.insert_one({"_id": subject, "institute_id": institute_id, "course_id": course, "name": "Accounting"})
     database.papers.insert_one({"_id": paper, "institute_id": institute_id, "subject_id": subject, "number": 1, "name": "Paper 1"})
@@ -739,6 +813,7 @@ def test_academic_view_participation_uses_the_confirmed_roster(client):
                 "institute_id": institute,
                 "branch_id": "branch-part",
                 "name": "September",
+                "name_key": "september",
                 "offering_id": "offering-part",
                 "session_key": "2026-09",
             },
@@ -747,6 +822,7 @@ def test_academic_view_participation_uses_the_confirmed_roster(client):
                 "institute_id": institute,
                 "branch_id": "branch-part",
                 "name": "January",
+                "name_key": "january",
                 "offering_id": "offering-part",
                 "session_key": "2027-01",
             },

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict
 from pymongo.errors import DuplicateKeyError
 
+from app.academics.curriculum import active_kind, public_kinds
 from app.acl import allows
 from app.deps import current_user, db, institute_resource, new_id, require, write_audit
 from app.errors import AppError
@@ -28,7 +29,6 @@ _PLACE_LIMITS = {
     "notes": 500,
 }
 _PLACE_FIELDS = ("street", "place", "district", "state", "pin", "phone", "email", "notes")
-_ITEM_KINDS = {"paper", "chapter", "module"}
 
 
 class PlaceBody(BaseModel):
@@ -42,6 +42,7 @@ class PlaceBody(BaseModel):
     phone: str | None = None
     email: str | None = None
     notes: str | None = None
+    expected_revision: int | None = None
 
 
 class CourseBody(BaseModel):
@@ -78,6 +79,7 @@ class SubjectItemBody(BaseModel):
 class SubjectItemName(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = ""
+    kind: str | None = None
 
 
 def _now() -> datetime:
@@ -97,6 +99,79 @@ def _reader(user: dict) -> None:
     known = {"student.lookup", "catalog.correct", "catalog.manage"}
     if not any(known.intersection(grant.get("actions") or []) for grant in user["grants"]):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+
+
+_NODE_ACTIONS = ("student.lookup", "catalog.correct", "catalog.manage", "marksheet.view")
+
+
+def _node_visible(user: dict, resource: dict) -> bool:
+    return any(allows(user["grants"], action, resource, True) for action in _NODE_ACTIONS)
+
+
+def _subject_visible(user: dict, subject: dict) -> bool:
+    return _node_visible(user, {
+        "institute_id": user["institute_id"],
+        "course_id": subject.get("course_id"),
+        "subject_id": subject["_id"],
+    })
+
+
+def _paper_visible(user: dict, paper: dict, course_id: str | None) -> bool:
+    return _node_visible(user, {
+        "institute_id": user["institute_id"],
+        "course_id": course_id,
+        "subject_id": paper.get("subject_id"),
+        "paper_id": paper["_id"],
+    })
+
+
+def _grant_edits(
+    user: dict,
+    resource: dict,
+    *,
+    block_subject: bool,
+    block_paper: bool,
+    subject_id: str = "",
+    paper_id: str = "",
+) -> bool:
+    for grant in user["grants"]:
+        actions = set(grant.get("actions") or [])
+        if "catalog.correct" not in actions and "catalog.manage" not in actions:
+            continue
+        scope = grant.get("scope") or {}
+        if block_subject and (scope.get("subject_id") or scope.get("paper_id")):
+            continue
+        if block_paper and scope.get("paper_id"):
+            continue
+        if subject_id and scope.get("subject_id") and scope.get("subject_id") != subject_id:
+            continue
+        if paper_id and scope.get("paper_id") and scope.get("paper_id") != paper_id:
+            continue
+        action = "catalog.correct" if "catalog.correct" in actions else "catalog.manage"
+        if allows([grant], action, resource, True):
+            return True
+    return False
+
+
+def _require_course_editor(user: dict, course_id: str) -> None:
+    resource = {"institute_id": user["institute_id"], "course_id": course_id}
+    if not _grant_edits(user, resource, block_subject=True, block_paper=True):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+
+
+def _require_subject_editor(user: dict, subject: dict) -> None:
+    resource = {
+        "institute_id": user["institute_id"],
+        "course_id": subject.get("course_id"),
+        "subject_id": subject["_id"],
+    }
+    if not _grant_edits(user, resource, block_subject=False, block_paper=True, subject_id=subject["_id"]):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+
+
+def _reject_archived(record: dict | None, message: str) -> None:
+    if record is not None and record.get("archived"):
+        raise AppError(422, "catalog.archived", message)
 
 
 def place_text(value: str | None, limit: int, field: str) -> str:
@@ -177,6 +252,7 @@ async def institute_profile(request: Request) -> dict:
         "name": institute.get("name") or "",
         "code": institute.get("code") or "",
         **place_view(institute),
+        "revision": int(institute.get("revision") or 0),
     }
 
 
@@ -185,6 +261,11 @@ async def save_institute(request: Request, body: PlaceBody) -> dict:
     user = await current_user(request)
     _editor(user)
     institute = await db(request).institutes.find_one({"_id": user["institute_id"]})
+    if (
+        "expected_revision" in body.model_fields_set
+        and int(body.expected_revision or 0) != int(institute.get("revision") or 0)
+    ):
+        raise AppError(409, "catalog.stale", "This record changed. Reload it and try again.")
     sets, unsets = place_changes(body, institute)
     if "name" in body.model_fields_set:
         text = " ".join(str(body.name or "").split())
@@ -195,6 +276,7 @@ async def save_institute(request: Request, body: PlaceBody) -> dict:
             sets["previous_name"] = institute.get("name") or ""
     if not sets and not unsets:
         return {"id": institute["_id"], "name": institute.get("name") or ""}
+    sets["revision"] = int(institute.get("revision") or 0) + 1
     change: dict = {}
     if sets:
         change["$set"] = sets
@@ -263,6 +345,8 @@ async def create_subject(request: Request, course_id: str, body: SubjectBody) ->
     course = await database.courses.find_one({"_id": course_id, "institute_id": user["institute_id"]})
     if course is None:
         raise AppError(404, "not_found", "That record was not found.")
+    _require_course_editor(user, course["_id"])
+    _reject_archived(course, "This course is archived. New subjects stay out until it is restored.")
     document = {
         "_id": str(ObjectId()),
         "institute_id": user["institute_id"],
@@ -287,11 +371,29 @@ async def branch_profile(request: Request, branch_id: str) -> dict:
     if branch is None:
         raise AppError(404, "not_found", "That record was not found.")
     scope = {"institute_id": user["institute_id"], "branch_id": branch_id}
-    offerings = await database.offerings.find(scope).to_list(length=200)
+    offerings = await database.offerings.find(scope).to_list(length=5000)
     course_ids = [item.get("course_id") for item in offerings if item.get("course_id")]
-    courses = await database.courses.find({"_id": {"$in": course_ids}}).to_list(length=200) if course_ids else []
-    batches = await database.batches.find(scope).to_list(length=200)
-    students = await database.enrollments.distinct("student_id", scope)
+    courses = await database.courses.find({"_id": {"$in": course_ids}}).to_list(length=5000) if course_ids else []
+    batches = await database.batches.find(scope).to_list(length=5000)
+    from app.students import directory_facts, enrollment_visible
+
+    facts = await directory_facts(database, user["institute_id"])
+    enrollment_rows = await database.enrollments.find(scope).to_list(length=5000)
+    visible_ids: list[str] = []
+    for row in enrollment_rows:
+        student_id = row.get("student_id")
+        if student_id and enrollment_visible(
+            user["grants"], row, facts["subject_by_id"], facts["paper_subject"], facts["rosters"]
+        ):
+            visible_ids.append(student_id)
+    unique_ids = list(dict.fromkeys(visible_ids))
+    archived_ids = set()
+    if unique_ids:
+        for student in await database.students.find(
+            {"_id": {"$in": unique_ids}, "archived": True}, {"_id": 1}
+        ).to_list(length=len(unique_ids)):
+            archived_ids.add(student["_id"])
+    student_count = sum(1 for student_id in unique_ids if student_id not in archived_ids)
     by_course: dict[str, list] = {}
     for batch in batches:
         by_course.setdefault(batch.get("course_id") or "", []).append({
@@ -302,6 +404,7 @@ async def branch_profile(request: Request, branch_id: str) -> dict:
             "timings": batch.get("timings") or None,
             "session_key": batch.get("session_key") or None,
             "archived": bool(batch.get("archived")),
+            "closed": bool(batch.get("closed")),
         })
     course_rows = []
     for course in sorted(courses, key=lambda item: (item.get("name") or "").casefold()):
@@ -316,7 +419,8 @@ async def branch_profile(request: Request, branch_id: str) -> dict:
         "archived": bool(branch.get("archived")),
         **place_view(branch),
         "courses": course_rows,
-        "student_count": len(students),
+        "student_count": student_count,
+        "revision": int(branch.get("revision") or 0),
     }
 
 
@@ -329,6 +433,8 @@ async def offer_course(request: Request, branch_id: str, body: BranchCourseBody)
     course = await database.courses.find_one({"_id": body.course_id, "institute_id": user["institute_id"]})
     if branch is None or course is None:
         raise AppError(404, "not_found", "That record was not found.")
+    _reject_archived(branch, "This branch is archived. New offerings stay out until it is restored.")
+    _reject_archived(course, "This course is archived. New offerings stay out until it is restored.")
     document = {
         "_id": str(ObjectId()),
         "institute_id": user["institute_id"],
@@ -354,6 +460,9 @@ async def create_batch(request: Request, branch_id: str, body: BranchBatchBody) 
     })
     if branch is None or offering is None:
         raise AppError(404, "not_found", "Offer the course at this branch before adding a batch.")
+    course = await database.courses.find_one({"_id": body.course_id, "institute_id": user["institute_id"]})
+    _reject_archived(branch, "This branch is archived. New batches stay out until it is restored.")
+    _reject_archived(course, "This course is archived. New batches stay out until it is restored.")
     text = " ".join(body.name.split())
     if not text:
         raise AppError(422, "catalog.profile", "Enter a name.", field="name")
@@ -390,16 +499,22 @@ async def create_batch(request: Request, branch_id: str, body: BranchBatchBody) 
 async def add_subject_item(request: Request, subject_id: str, body: SubjectItemBody) -> dict:
     user = await current_user(request)
     _editor(user)
-    if body.kind not in _ITEM_KINDS:
-        raise AppError(422, "catalog.profile", "Choose paper, chapter, or module.", field="kind")
     text = " ".join(body.name.split())
     if not text:
         raise AppError(422, "catalog.profile", "Enter a name.", field="name")
     database = db(request)
+    institute = await database.institutes.find_one({"_id": user["institute_id"]})
+    kind = active_kind(public_kinds((institute or {}).get("curriculum_kinds")), body.kind)
+    if kind is None:
+        raise AppError(422, "catalog.profile", "Choose a subject partition.", field="kind")
     subject = await database.subjects.find_one({"_id": subject_id, "institute_id": user["institute_id"]})
     if subject is None:
         raise AppError(404, "not_found", "That record was not found.")
-    if body.kind == "paper":
+    _require_subject_editor(user, subject)
+    course = await database.courses.find_one({"_id": subject.get("course_id"), "institute_id": user["institute_id"]})
+    _reject_archived(course, "This course is archived. New curriculum items stay out until it is restored.")
+    _reject_archived(subject, "This subject is archived. New curriculum items stay out until it is restored.")
+    if kind["storage"] == "paper":
         existing = await database.papers.find({"subject_id": subject_id}).to_list(length=200)
         numbers = [int(item["number"]) for item in existing if isinstance(item.get("number"), int)]
         document = {
@@ -432,25 +547,146 @@ async def rename_subject_item(request: Request, subject_id: str, item_id: str, b
     if not text:
         raise AppError(422, "catalog.profile", "Enter a name.", field="name")
     database = db(request)
+    institute = await database.institutes.find_one({"_id": user["institute_id"]})
+    kinds = public_kinds((institute or {}).get("curriculum_kinds"))
     subject = await database.subjects.find_one({"_id": subject_id, "institute_id": user["institute_id"]})
     if subject is None:
         raise AppError(404, "not_found", "That record was not found.")
+    _require_subject_editor(user, subject)
     units = list(subject.get("units") or [])
     found = next((item for item in units if item.get("id") == item_id), None)
-    if found is None:
+    paper = await database.papers.find_one({
+        "_id": item_id,
+        "subject_id": subject_id,
+        "institute_id": user["institute_id"],
+    })
+    if found is None and paper is None:
         raise AppError(404, "not_found", "That record was not found.")
-    duplicate = any(
-        item.get("id") != item_id and item.get("kind") == found.get("kind") and item.get("name_key") == name_key(text)
+    current_kind = (paper or found).get("kind") or "paper"
+    requested = body.kind or current_kind
+    kind_row = next((item for item in kinds if item["key"] == requested), None)
+    if kind_row is None or (requested != current_kind and kind_row["archived"]):
+        raise AppError(422, "catalog.profile", "Choose a subject partition.", field="kind")
+    if kind_row["storage"] != "paper" and any(
+        item.get("id") != item_id and item.get("kind") == requested and item.get("name_key") == name_key(text)
         for item in units
-    )
-    if duplicate:
+    ):
         raise AppError(409, "catalog.exists", "That name is already used for this subject.")
-    found["previous_name"] = found.get("name") or ""
-    found["name"] = text
-    found["name_key"] = name_key(text)
-    await database.subjects.update_one({"_id": subject_id}, {"$set": {"units": units}})
-    await _audit(request, user, {"name": text}, item_id, found.get("kind") or "chapter")
-    return {"id": item_id}
+    await _reject_shared_exam(database, user["institute_id"], item_id, requested)
+    client = request.app.state.client
+    async with await client.start_session() as session:
+        async with session.start_transaction():
+            await _store_item_kind(
+                database, session, user, subject_id, item_id, text, requested, kind_row["storage"], found, paper, units,
+            )
+            await _retarget_item_exams(database, session, user["institute_id"], item_id, requested, kind_row["storage"])
+    await _audit(request, user, {"name": text, "kind": requested}, item_id, requested)
+    return {"id": item_id, "kind": requested}
+
+
+async def _reject_shared_exam(database, institute_id: str, item_id: str, kind: str) -> None:
+    exams = await database.exams.find({
+        "institute_id": institute_id,
+        "$or": [{"paper_id": item_id}, {"scope.item_ids": item_id}],
+    }).to_list(length=200)
+    for exam in exams:
+        scope = exam.get("scope") or {}
+        ids = list(scope.get("item_ids") or [])
+        if item_id in ids and len(ids) > 1 and scope.get("kind") != kind:
+            raise AppError(
+                409,
+                "catalog.kind",
+                "This item is used with other items on an exam. Change that exam before changing the kind.",
+            )
+
+
+async def _store_item_kind(
+    database, session, user, subject_id, item_id, text, kind, storage, found, paper, units,
+) -> None:
+    if storage == "paper":
+        if paper is None:
+            existing = await database.papers.find({"subject_id": subject_id}, session=session).to_list(length=200)
+            numbers = [int(item["number"]) for item in existing if isinstance(item.get("number"), int)]
+            await database.papers.insert_one({
+                "_id": item_id,
+                "institute_id": user["institute_id"],
+                "subject_id": subject_id,
+                "number": max(numbers, default=0) + 1,
+                "name": text,
+                "name_key": name_key(text),
+                "kind": kind,
+                "previous_name": (found or {}).get("name") or "",
+            }, session=session)
+            units = [item for item in units if item.get("id") != item_id]
+            await database.subjects.update_one({"_id": subject_id}, {"$set": {"units": units}}, session=session)
+            return
+        await database.papers.update_one(
+            {"_id": item_id},
+            {"$set": {
+                "name": text,
+                "name_key": name_key(text),
+                "kind": kind,
+                "previous_name": paper.get("name") or "",
+            }},
+            session=session,
+        )
+        return
+    if paper is not None:
+        await database.papers.delete_one({"_id": item_id}, session=session)
+        units.append({
+            "id": item_id,
+            "name": text,
+            "name_key": name_key(text),
+            "kind": kind,
+            "previous_name": paper.get("name") or "",
+        })
+    else:
+        found["previous_name"] = found.get("name") or ""
+        found["name"] = text
+        found["name_key"] = name_key(text)
+        found["kind"] = kind
+    await database.subjects.update_one({"_id": subject_id}, {"$set": {"units": units}}, session=session)
+
+
+async def _retarget_item_exams(database, session, institute_id: str, item_id: str, kind: str, storage: str) -> None:
+    exams = await database.exams.find({
+        "institute_id": institute_id,
+        "$or": [{"paper_id": item_id}, {"scope.item_ids": item_id}],
+    }, session=session).to_list(length=200)
+    paper_id = item_id if storage == "paper" else ""
+    for exam in exams:
+        scope = dict(exam.get("scope") or {})
+        ids = list(scope.get("item_ids") or [])
+        if item_id not in ids and exam.get("paper_id") != item_id:
+            continue
+        if scope.get("kind") == kind and (exam.get("paper_id") or "") == paper_id:
+            continue
+        if item_id not in ids:
+            ids = [item_id]
+        scope["kind"] = kind
+        scope["item_ids"] = ids
+        await database.exams.update_one(
+            {"_id": exam["_id"]},
+            {"$set": {"scope": scope, "exam_type": kind, "paper_id": paper_id}},
+            session=session,
+        )
+        await database.assessments.update_many(
+            {"exam_id": exam["_id"]},
+            {"$set": {"exam_type": kind, "paper_id": paper_id}},
+            session=session,
+        )
+        await database.marksheets.update_many(
+            {"exam_id": exam["_id"]},
+            {"$set": {"exam_type": kind, "paper_id": paper_id}},
+            session=session,
+        )
+        sheets = await database.marksheets.find({"exam_id": exam["_id"]}, session=session).to_list(length=20)
+        if sheets:
+            await database.results.update_many(
+                {"marksheet_id": {"$in": [item["_id"] for item in sheets]}},
+                {"$set": {"exam_type": kind, "paper_id": paper_id}},
+                session=session,
+            )
 
 
 class BatchAssignmentBody(BaseModel):
@@ -485,6 +721,43 @@ async def _open_batch(request: Request, user: dict, batch_id: str) -> dict:
     return batch
 
 
+@router.get("/batches/{batch_id}/roster")
+async def batch_roster(request: Request, batch_id: str) -> dict:
+    user = await current_user(request)
+    await _open_batch(request, user, batch_id)
+    database = db(request)
+    from app.enrollment import assign_enrollment_code
+    from app.students import directory_facts, enrollment_visible
+
+    facts = await directory_facts(database, user["institute_id"])
+    enrollments = await database.enrollments.find(
+        {"institute_id": user["institute_id"], "batch_id": batch_id}
+    ).to_list(length=5000)
+    visible = [
+        row for row in enrollments
+        if enrollment_visible(user["grants"], row, facts["subject_by_id"], facts["paper_subject"], facts["rosters"])
+        and not row.get("ended_on")
+    ]
+    student_ids = [row.get("student_id") for row in visible if row.get("student_id")]
+    people = {}
+    if student_ids:
+        for student in await database.students.find({"_id": {"$in": student_ids}}).to_list(length=len(student_ids)):
+            people[student["_id"]] = student
+    items = []
+    for row in visible:
+        code = await assign_enrollment_code(database, row)
+        person = people.get(row.get("student_id")) or {}
+        items.append({
+            "id": row.get("student_id"),
+            "enrollment_id": row.get("_id"),
+            "enrollment_code": code,
+            "student_code": person.get("student_code") or "",
+            "display_name": person.get("display_name") or "Not recorded",
+        })
+    items.sort(key=lambda item: (item["display_name"].casefold(), item["enrollment_code"]))
+    return {"batch_id": batch_id, "items": items}
+
+
 @router.get("/batches/{batch_id}")
 async def batch_workspace(
     request: Request,
@@ -492,6 +765,11 @@ async def batch_workspace(
     student_page: int = 1,
     assessment_page: int = 1,
     page_size: int = 8,
+    student_q: str = "",
+    student_state: str = "",
+    assessment_q: str = "",
+    assessment_status: str = "",
+    assessment_subject: str = "",
 ) -> dict:
     user = await current_user(request)
     batch = await _open_batch(request, user, batch_id)
@@ -520,10 +798,23 @@ async def batch_workspace(
             "enrollment_id": row.get("_id"),
             "student_code": person.get("student_code") or "",
             "display_name": person.get("display_name") or "Not recorded",
+            "enrollment_code": row.get("enrollment_code") or "",
             "started_on": row.get("started_on") or None,
             "ended_on": row.get("ended_on") or None,
         })
+    if student_state not in {"", "current", "historical"}:
+        raise AppError(422, "batch.students", "Enrollment state must be current, historical, or omitted.")
     student_rows.sort(key=lambda item: item["display_name"].casefold())
+    needle = student_q.casefold().strip()
+    if needle:
+        student_rows = [
+            item for item in student_rows
+            if needle in f"{item['display_name']} {item['student_code']} {item.get('enrollment_code') or ''}".casefold()
+        ]
+    if student_state == "current":
+        student_rows = [item for item in student_rows if not item.get("ended_on")]
+    elif student_state == "historical":
+        student_rows = [item for item in student_rows if item.get("ended_on")]
     student_items, student_total, student_number, student_pages = _page(student_rows, student_page, page_size)
 
     subjects = await database.subjects.find(
@@ -533,6 +824,16 @@ async def batch_workspace(
     papers = await database.papers.find(
         {"institute_id": user["institute_id"], "subject_id": {"$in": subject_ids}}
     ).to_list(length=400) if subject_ids else []
+    papers = [
+        paper for paper in papers
+        if _paper_visible(user, paper, batch.get("course_id"))
+    ]
+    visible_subjects = []
+    for subject in subjects:
+        own_papers = [paper for paper in papers if paper.get("subject_id") == subject["_id"]]
+        if _subject_visible(user, subject) or own_papers:
+            visible_subjects.append(subject)
+    subjects = visible_subjects
     papers_for: dict[str, list] = {}
     for paper in papers:
         papers_for.setdefault(paper.get("subject_id"), []).append({
@@ -545,6 +846,15 @@ async def batch_workspace(
             "id": subject["_id"],
             "name": subject.get("name") or "",
             "papers": sorted(papers_for.get(subject["_id"], []), key=lambda item: item["name"].casefold()),
+            "units": [
+                {
+                    "id": unit.get("id"),
+                    "name": unit.get("name") or "",
+                    "kind": unit.get("kind") or "chapter",
+                }
+                for unit in subject.get("units") or []
+                if unit.get("id")
+            ],
         })
 
     subject_name = {item["_id"]: item.get("name") or "" for item in subjects}
@@ -556,6 +866,9 @@ async def batch_workspace(
     for teacher in teachers:
         for item in teacher.get("assignments") or []:
             if item.get("batch_id") != batch["_id"]:
+                continue
+            subject_id = item.get("subject_id") or ""
+            if subject_id and subject_id not in subject_name:
                 continue
             assignments.append({
                 "id": item.get("id"),
@@ -582,6 +895,9 @@ async def batch_workspace(
     for sheet in sheets:
         if not marksheet_visible(user, sheet):
             continue
+        subject_id = sheet.get("subject_id") or ""
+        if subject_id and subject_id not in subject_name:
+            continue
         assessment_rows.append({
             "id": sheet["_id"],
             "title": sheet.get("title") or sheet.get("status") or "Marksheet",
@@ -590,6 +906,13 @@ async def batch_workspace(
             "exam_date": sheet.get("exam_date") or None,
         })
     assessment_rows.sort(key=lambda item: str(item["title"]).casefold())
+    assessment_needle = assessment_q.casefold().strip()
+    if assessment_needle:
+        assessment_rows = [item for item in assessment_rows if assessment_needle in str(item["title"]).casefold()]
+    if assessment_status.strip():
+        assessment_rows = [item for item in assessment_rows if item["status"] == assessment_status.strip()]
+    if assessment_subject.strip():
+        assessment_rows = [item for item in assessment_rows if item["subject_id"] == assessment_subject.strip()]
     assessment_items, assessment_total, assessment_number, assessment_pages = _page(
         assessment_rows, assessment_page, page_size
     )
@@ -604,7 +927,8 @@ async def batch_workspace(
         "started_on": batch.get("started_on") or None,
         "ended_on": batch.get("ended_on") or None,
         "timings": batch.get("timings") or None,
-        "closed": bool(batch.get("ended_on")),
+        "archived": bool(batch.get("archived")),
+        "closed": bool(batch.get("closed")),
         "students": {"items": student_items, "total": student_total, "page": student_number, "pages": student_pages},
         "curriculum": curriculum,
         "assignments": assignments,
@@ -622,7 +946,9 @@ async def assign_batch_teacher(request: Request, batch_id: str, body: BatchAssig
     user = await current_user(request)
     require(user, "user.manage", institute_resource(user))
     batch = await _open_batch(request, user, batch_id)
-    if batch.get("ended_on"):
+    if batch.get("archived"):
+        raise AppError(422, "batch.archived", "This batch is archived.")
+    if batch.get("closed"):
         raise AppError(422, "batch.closed", "This batch is closed.")
     database = db(request)
     teacher = await database.teachers.find_one({"_id": body.teacher_id, "institute_id": user["institute_id"]})
@@ -720,6 +1046,7 @@ async def end_batch_assignment(
 class CatalogPatch(BaseModel):
     name: str | None = None
     archived: bool | None = None
+    closed: bool | None = None
     notes: str | None = None
     street: str | None = None
     place: str | None = None
@@ -731,6 +1058,7 @@ class CatalogPatch(BaseModel):
     started_on: str | None = None
     ended_on: str | None = None
     timings: str | None = None
+    expected_revision: int | None = None
 
 
 def batch_visible(user: dict, batch: dict) -> bool:
@@ -757,21 +1085,48 @@ async def catalog(request: Request) -> dict:
     ):
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
     database = db(request)
-    branches = await database.branches.find({"institute_id": user["institute_id"]}).to_list(length=200)
-    courses = await database.courses.find({"institute_id": user["institute_id"]}).to_list(length=200)
-    batches = [
-        item
-        for item in await database.batches.find({"institute_id": user["institute_id"]}).to_list(length=200)
-        if batch_visible(user, item)
+    limit = 5000
+
+    async def take(collection: str) -> tuple[list, bool]:
+        rows = await database[collection].find({"institute_id": user["institute_id"]}).to_list(length=limit + 1)
+        return rows[:limit], len(rows) > limit
+
+    branches, branches_truncated = await take("branches")
+    courses, courses_truncated = await take("courses")
+    batch_rows, batches_truncated = await take("batches")
+    batches = [item for item in batch_rows if batch_visible(user, item)]
+    subjects, subjects_truncated = await take("subjects")
+    students, students_truncated = await take("students")
+    papers, papers_truncated = await take("papers")
+    course_of_subject = {item["_id"]: item.get("course_id") for item in subjects}
+    kept_subjects = []
+    for subject in subjects:
+        own_papers = [paper for paper in papers if paper.get("subject_id") == subject["_id"]]
+        if _subject_visible(user, subject) or any(
+            _paper_visible(user, paper, subject.get("course_id")) for paper in own_papers
+        ):
+            kept_subjects.append(subject)
+    subjects = kept_subjects
+    visible_subject_ids = {item["_id"] for item in subjects}
+    papers = [
+        paper for paper in papers
+        if paper.get("subject_id") in visible_subject_ids
+        and _paper_visible(user, paper, course_of_subject.get(paper.get("subject_id")))
     ]
-    subjects = await database.subjects.find({"institute_id": user["institute_id"]}).to_list(length=200)
-    students = await database.students.find({"institute_id": user["institute_id"]}).to_list(length=500)
-    papers = await database.papers.find({"institute_id": user["institute_id"]}).to_list(length=200)
-    offerings = await database.offerings.find({"institute_id": user["institute_id"]}).to_list(length=200)
+    offerings, offerings_truncated = await take("offerings")
     return {
+        "truncated": any((
+            branches_truncated,
+            courses_truncated,
+            batches_truncated,
+            subjects_truncated,
+            students_truncated,
+            papers_truncated,
+            offerings_truncated,
+        )),
         "branches": [_catalog_row(item) for item in branches],
         "courses": [_catalog_row(item) for item in courses],
-        "batches": [_catalog_row(item) for item in batches],
+        "batches": [{**_catalog_row(item), "closed": bool(item.get("closed"))} for item in batches],
         "subjects": [_catalog_row(item) for item in subjects],
         "papers": [_catalog_row(item) for item in papers],
         "students": [_catalog_row(item) for item in students],
@@ -802,6 +1157,32 @@ async def patch_catalog(request: Request, kind: str, record_id: str, body: Catal
     record = await db(request)[collection].find_one({"_id": record_id, "institute_id": user["institute_id"]})
     if record is None:
         raise AppError(404, "not_found", "That record was not found.")
+    if "expected_revision" in body.model_fields_set and int(body.expected_revision or 0) != int(record.get("revision") or 0):
+        raise AppError(409, "catalog.stale", "This record changed. Reload it and try again.")
+    if kind == "course":
+        _require_course_editor(user, record["_id"])
+    elif kind == "subject":
+        _require_subject_editor(user, record)
+    elif kind == "paper":
+        parent = await db(request).subjects.find_one({"_id": record.get("subject_id"), "institute_id": user["institute_id"]})
+        resource = {
+            "institute_id": user["institute_id"],
+            "course_id": None if parent is None else parent.get("course_id"),
+            "subject_id": record.get("subject_id"),
+            "paper_id": record["_id"],
+        }
+        if not _grant_edits(
+            user, resource, block_subject=False, block_paper=False,
+            subject_id=str(record.get("subject_id") or ""), paper_id=record["_id"],
+        ):
+            raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    elif kind in {"branch", "batch"}:
+        resource = {"institute_id": user["institute_id"], "branch_id": record["_id"] if kind == "branch" else record.get("branch_id")}
+        if kind == "batch":
+            resource["course_id"] = record.get("course_id")
+            resource["batch_id"] = record["_id"]
+        if not _grant_edits(user, resource, block_subject=True, block_paper=True):
+            raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
     updates = {}
     unsets = {}
     sent = body.model_fields_set
@@ -859,8 +1240,11 @@ async def patch_catalog(request: Request, kind: str, record_id: str, body: Catal
                     updates["timings"] = timings
                 else:
                     unsets["timings"] = ""
+        if "closed" in sent and bool(body.closed) != bool(record.get("closed")):
+            updates["closed"] = bool(body.closed)
     if not updates and not unsets:
         raise AppError(422, "catalog.empty", "Choose a new name or an archive state.")
+    updates["revision"] = int(record.get("revision") or 0) + 1
     change = {}
     if updates:
         change["$set"] = updates
@@ -888,6 +1272,7 @@ def _catalog_row(item: dict) -> dict:
         "id": item["_id"],
         "name": item.get("name") or item.get("display_name"),
         "archived": bool(item.get("archived")),
+        "revision": int(item.get("revision") or 0),
         "student_code": item.get("student_code"),
     }
     for key in (
@@ -901,6 +1286,7 @@ def _catalog_row(item: dict) -> dict:
         "timings",
         "notes",
         "session_key",
+        "kind",
     ):
         if item.get(key) is not None:
             row[key] = item[key]

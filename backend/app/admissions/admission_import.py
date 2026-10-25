@@ -19,6 +19,7 @@ from app.admissions.enquiry_import import (
     expiry_from,
     load_grid,
     mapping_fingerprint,
+    sheet_preview,
 )
 from app.errors import AppError
 from app.security import name_key, phone_key
@@ -95,6 +96,7 @@ def evaluate_plan(
     students: list[dict],
     admissions: list[dict],
     prospects: list[dict],
+    taken_names: list[dict] | None = None,
 ) -> dict:
     sources = plan.get("sources") or []
     if not sources:
@@ -159,7 +161,10 @@ def evaluate_plan(
                     mode,
                 )
             )
-    _mark_duplicates(rows, students, admissions, prospects, course_by_id)
+    identity_mode = plan.get("identity_mode") or "manual"
+    if identity_mode not in {"manual", "automatic"}:
+        raise AppError(422, "import.field", "Choose how to confirm identity.", field="identity_mode")
+    _mark_duplicates(rows, students, admissions, prospects, course_by_id, identity_mode, taken_names or [])
     return {"phase": "review", "columns": columns, "rows": rows, "issues": []}
 
 
@@ -356,8 +361,11 @@ def _review_row(
     }
 
 
-def _mark_duplicates(rows, students, admissions, prospects, course_by_id) -> None:
+def _mark_duplicates(
+    rows, students, admissions, prospects, course_by_id, identity_mode="manual", taken_names=None
+) -> None:
     created_keys: dict[str, dict] = {}
+    reserved_names = [dict(item) for item in (taken_names or [])]
     for row in rows:
         if row["status"] == "skipped":
             continue
@@ -440,29 +448,69 @@ def _mark_duplicates(rows, students, admissions, prospects, course_by_id) -> Non
             _readiness(row)
             continue
         action = row["action"] or "create"
+        exact = [item for item in candidates if item["kind"] == "student" and item.get("linkable")]
         student_matches = [item for item in candidates if item["kind"] == "student"]
-        needs_choice = student_matches or any(item["kind"] == "application" for item in candidates)
-        if needs_choice and action == "create" and not row.get("explicit"):
-            row["status"] = "blocked"
-            row["errors"].append(
-                _issue("", "action", "Choose a separate application, a matching student, or skip. A shared name or phone is not proof.")
-            )
-            _readiness(row)
-            continue
-        if action == "link":
-            allowed = {item["id"] for item in candidates if item.get("linkable") and item["kind"] == "student"}
-            if (row.get("student_id") or "") not in allowed:
-                row["status"] = "blocked"
-                row["errors"].append(_issue("", "student_id", "Choose a student with the same name and contact number."))
-            else:
-                row["values"]["match_decision"] = "attach"
-        elif action == "prospect":
+        if action == "prospect":
             allowed = {item["id"] for item in candidates if item["kind"] == "prospect" and item.get("linkable")}
             if (row.get("prospect_id") or "") not in allowed:
                 row["status"] = "blocked"
                 row["errors"].append(_issue("", "prospect_id", "Choose one of the suggested prospects."))
-        elif action == "create" and student_matches and row.get("explicit"):
-            row["values"]["match_decision"] = "create"
+        elif identity_mode == "automatic" and action != "skip":
+            if len(exact) == 1 and action == "create":
+                row["student_id"] = exact[0]["id"]
+                row["action"] = "link"
+                action = "link"
+            if action == "link" or (len(exact) == 1 and action == "create"):
+                allowed = {item["id"] for item in exact}
+                if (row.get("student_id") or "") not in allowed:
+                    row["status"] = "blocked"
+                    row["errors"].append(
+                        _issue("", "student_id", "Choose a student with the same name and contact number.")
+                    )
+                else:
+                    row["values"]["match_decision"] = "attach"
+            elif len(exact) > 1:
+                row["status"] = "blocked"
+                row["errors"].append(
+                    _issue(
+                        "",
+                        "student_id",
+                        "More than one student has this name and contact number. Choose which student.",
+                    )
+                )
+            else:
+                row["values"]["match_decision"] = "create"
+                if not phone:
+                    row["status"] = "blocked"
+                    row["errors"].append(_issue("Contact number", "phone", "Enter the contact number."))
+                elif folded and any(
+                    item.get("name_key") == folded and item.get("student_id") != (row.get("student_id") or "")
+                    for item in reserved_names
+                ):
+                    row["status"] = "blocked"
+                    row["errors"].append(
+                        _issue("Name", "name", "Another student in that batch already uses this name.")
+                    )
+        else:
+            needs_choice = student_matches or any(item["kind"] == "application" for item in candidates)
+            if needs_choice and action == "create" and not row.get("explicit"):
+                row["status"] = "blocked"
+                row["errors"].append(
+                    _issue("", "action", "Choose a separate application, a matching student, or skip. A shared name or phone is not proof.")
+                )
+                _readiness(row)
+                continue
+            if action == "link":
+                allowed = {item["id"] for item in candidates if item.get("linkable") and item["kind"] == "student"}
+                if (row.get("student_id") or "") not in allowed:
+                    row["status"] = "blocked"
+                    row["errors"].append(
+                        _issue("", "student_id", "Choose a student with the same name and contact number.")
+                    )
+                else:
+                    row["values"]["match_decision"] = "attach"
+            elif action == "create" and student_matches and row.get("explicit"):
+                row["values"]["match_decision"] = "create"
         duplicates = [item for item in candidates if item["kind"] == "application"]
         if duplicates and action != "skip" and not (row.get("episode_note") or "").strip():
             label = course_by_id.get(values.get("course_id") or "", {}).get("name") or "this course"
@@ -479,6 +527,11 @@ def _mark_duplicates(rows, students, admissions, prospects, course_by_id) -> Non
                 "label": values.get("name") or "",
                 "course_id": values.get("course_id") or "",
             }
+        if identity_mode == "automatic" and row["status"] != "blocked" and folded:
+            if row["values"].get("match_decision") == "create":
+                reserved_names.append({"name_key": folded, "student_id": f"new:{row['key']}"})
+            elif row["values"].get("match_decision") == "attach":
+                reserved_names.append({"name_key": folded, "student_id": row.get("student_id") or ""})
         if row["errors"] and row["status"] != "skipped":
             row["status"] = "blocked"
         _readiness(row)
@@ -502,6 +555,22 @@ def _readiness(row: dict) -> None:
     )
     row["readiness"] = admission_readiness(draft, requirements, batch_open=False)
     row["requirement_messages"] = [item["message"] for item in requirements]
+
+
+async def _matching_students(database, institute_id: str, name: str, phone: str, session) -> list[dict]:
+    key = name_key(name)
+    number = phone_key(phone)
+    if not key or not number:
+        return []
+    people = await database.students.find(
+        {"institute_id": institute_id, "name_key": key, "archived": {"$ne": True}},
+        session=session,
+    ).to_list(length=50)
+    return [
+        person
+        for person in people
+        if (person.get("phone_key") or phone_key(person.get("phone") or "")) == number
+    ]
 
 
 def _public_row(item: dict) -> dict:
@@ -565,7 +634,13 @@ async def _context(request, user, row: dict) -> tuple[dict, dict]:
         {"name": 1, "name_key": 1, "phone": 1, "phone_key": 1, "course_id": 1, "status": 1, "reference": 1},
     ).to_list(length=5000)
     prospects = await db(request).prospects.find({"institute_id": user["institute_id"]}).to_list(length=5000)
-    reviewed = evaluate_plan(grid, plan, courses, questions, students, admissions, prospects)
+    taken_names = []
+    if (plan.get("identity_mode") or "manual") == "automatic" and row.get("batch_id"):
+        taken_names = await db(request).enrollment_names.find(
+            {"batch_id": row["batch_id"]},
+            {"name_key": 1, "student_id": 1},
+        ).to_list(length=5000)
+    reviewed = evaluate_plan(grid, plan, courses, questions, students, admissions, prospects, taken_names)
     return grid, {"courses": courses, "questions": questions, "reviewed": reviewed}
 
 
@@ -584,6 +659,10 @@ async def present_operation(request, user, row: dict) -> dict:
         "expires_at": row.get("expires_at").isoformat() if row.get("expires_at") is not None else "",
         "expired": expired,
         "status": row.get("status") or "open",
+        "branch_id": row.get("branch_id") or "",
+        "course_id": row.get("course_id") or "",
+        "batch_id": row.get("batch_id") or "",
+        "identity_mode": plan.get("identity_mode") or "manual",
         "limits": {"bytes": 10_000_000, "rows": 10_000, "sheets": 20},
         "result": row.get("result"),
         "phase": "source",
@@ -609,6 +688,7 @@ async def present_operation(request, user, row: dict) -> dict:
             "name": sheet["name"],
             "index": sheet["index"],
             "row_count": len(sheet["rows"]),
+            "cells": sheet_preview(sheet),
             "selected": any(source.get("sheet") == sheet["name"] for source in plan.get("sources") or []),
             "header_row": next(
                 (
@@ -666,7 +746,7 @@ async def _saved_mappings(request, user) -> list[dict]:
     return saved
 
 
-async def store_upload(request, user, filename: str, data: bytes) -> dict:
+async def store_upload(request, user, filename: str, data: bytes, branch_id: str, course_id: str, batch_id: str) -> dict:
     from bson import ObjectId
     from bson.binary import Binary
 
@@ -683,7 +763,10 @@ async def store_upload(request, user, filename: str, data: bytes) -> dict:
         "format": grid["format"],
         "delimiter": grid.get("delimiter") or "",
         "detected_delimiter": grid.get("detected_delimiter") or "",
-        "plan": {},
+        "branch_id": branch_id,
+        "course_id": course_id,
+        "batch_id": batch_id,
+        "plan": {"defaults": {"course_id": course_id, "interest": "", "mode": "blanks"}, "identity_mode": "manual"},
         "revision": 1,
         "status": "open",
         "result": None,
@@ -704,6 +787,9 @@ async def save_plan(request, user, operation_id: str, plan: dict) -> dict:
         raise AppError(422, "import.expired", "This import expired. Upload the file again.")
     if int(plan.get("revision") or 0) != int(row.get("revision") or 1):
         raise AppError(409, "import.revision", "This preview changed. Review the latest rows before continuing.")
+    identity_mode = plan.get("identity_mode") or "manual"
+    if identity_mode not in {"manual", "automatic"}:
+        raise AppError(422, "import.field", "Choose how to confirm identity.", field="identity_mode")
     stored = {
         "delimiter": plan.get("delimiter") or "",
         "sources": plan.get("sources") or [],
@@ -714,6 +800,7 @@ async def save_plan(request, user, operation_id: str, plan: dict) -> dict:
         "date_format": plan.get("date_format") or "",
         "formulas": plan.get("formulas") or {},
         "decisions": plan.get("decisions") or [],
+        "identity_mode": identity_mode,
     }
     grid = load_grid(row.get("filename") or "import.xlsx", bytes(row.get("content") or b""), stored["delimiter"])
     if grid["format"] == "csv" and stored["sources"] and stored["sources"][0].get("sheet") not in {"", "CSV"}:
@@ -735,7 +822,7 @@ async def save_plan(request, user, operation_id: str, plan: dict) -> dict:
 
 
 async def commit_saved_plan(request, user, operation_id: str, revision: int, idempotency_key: str) -> dict:
-    from app.admissions.routes import AdmissionBody, _save_admission, db
+    from app.admissions.routes import AdmissionBody, _commit_student, _eligible_batch, _event, _save_admission, db
     from app.deps import write_audit
 
     if not idempotency_key:
@@ -775,6 +862,12 @@ async def commit_saved_plan(request, user, operation_id: str, revision: int, ide
         for item in reviewed
         if item["status"] == "skipped"
     ]
+    chosen = None
+    if row.get("batch_id"):
+        chosen = await _eligible_batch(
+            request, user, {"course_id": row.get("course_id") or ""}, row.get("branch_id") or "", row["batch_id"]
+        )
+    identity_mode = (row.get("plan") or {}).get("identity_mode") or "manual"
     created = []
     client = request.app.state.client
     try:
@@ -814,6 +907,68 @@ async def commit_saved_plan(request, user, operation_id: str, revision: int, ide
                         quiet=True,
                         source={"operation_id": operation_id, "sheet": item["sheet"], "row": item["row"]},
                     )
+                    same_course = (values.get("course_id") or "") == (row.get("course_id") or "")
+                    if chosen and same_course:
+                        await db(request).admissions.update_one(
+                            {"_id": saved["id"]},
+                            {
+                                "$set": {"branch_id": row.get("branch_id") or "", "batch_id": chosen["_id"]},
+                                "$push": {
+                                    "events": _event(
+                                        "selection",
+                                        f"Selected {chosen.get('name') or 'a batch'}.",
+                                        user.get("name") or "",
+                                    )
+                                },
+                            },
+                            session=session,
+                        )
+                    enrolled = None
+                    if identity_mode == "automatic" and chosen and same_course and decision in {"create", "attach"}:
+                        people = await _matching_students(
+                            db(request),
+                            user["institute_id"],
+                            values.get("name") or "",
+                            values.get("phone") or "",
+                            session,
+                        )
+                        if len(people) > 1:
+                            raise AppError(
+                                422,
+                                "admission.match",
+                                "More than one student has this name and contact number. Choose which student.",
+                            )
+                        resolved_id = people[0]["_id"] if people else None
+                        resolved = "attach" if resolved_id else "create"
+                        enrolled = await _commit_student(
+                            request,
+                            user,
+                            {
+                                "name": values.get("name") or "",
+                                "name_key": name_key(values.get("name") or ""),
+                                "phone": values.get("phone") or "",
+                                "email": values.get("email") or "",
+                                "date_of_birth": values.get("date_of_birth") or "",
+                                "gender": values.get("gender") or "",
+                                "street": values.get("street") or "",
+                                "place": values.get("place") or "",
+                                "district": values.get("district") or "",
+                                "state": values.get("state") or "",
+                                "pin": values.get("pin") or "",
+                                "guardian_name": values.get("guardian_name") or "",
+                                "guardian_phone": values.get("guardian_phone") or "",
+                                "course_id": values.get("course_id") or "",
+                                "academic_records": [],
+                                "business_answers": item.get("business_answers") or [],
+                            },
+                            chosen,
+                            item.get("course_answers") or [],
+                            resolved_id,
+                            saved["id"],
+                            resolved,
+                            session=session,
+                            announce=False,
+                        )
                     created.append(
                         {
                             "id": saved["id"],
@@ -821,6 +976,9 @@ async def commit_saved_plan(request, user, operation_id: str, revision: int, ide
                             "sheet": item["sheet"],
                             "row": item["row"],
                             "name": values.get("name") or "",
+                            "student_id": (enrolled or {}).get("id") or "",
+                            "enrollment_id": (enrolled or {}).get("enrollment_id") or "",
+                            "student_created": bool((enrolled or {}).get("created")),
                         }
                     )
                 result = {"created": created, "skipped": skipped}

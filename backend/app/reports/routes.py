@@ -286,7 +286,7 @@ async def student_card(
     ]
     results = await db(request).results.find({"student_id": student_id, "active": {"$ne": False}}).to_list(length=500)
     from app.calculating import aggregate, public_bands
-    from app.reporting import comparisons, hydrate, matches, policy_for, present, ranks_for
+    from app.reporting import comparisons, hydrate, matches, policy_for, present, ranks_for, tops_for
 
     policy = await policy_for(db(request), user["institute_id"])
     hydrated = await hydrate(db(request), results)
@@ -349,10 +349,12 @@ async def student_card(
             empty_reason = None
     presented = []
     for row in selected:
-        rank = batch_rank = None
+        rank = batch_rank = top_score = batch_top_score = None
         if not hidden:
-            rank, batch_rank = ranks_for(row, siblings.get(row.get("marksheet_id"), [row]))
-        presented.append(present(row, policy, rank, batch_rank))
+            group = siblings.get(row.get("marksheet_id"), [row])
+            rank, batch_rank = ranks_for(row, group)
+            top_score, batch_top_score = tops_for(group, row.get("batch_id"))
+        presented.append(present(row, policy, rank, batch_rank, top_score, batch_top_score))
     summary = aggregate(selected, policy)
     grouped: dict[tuple, list] = {}
     for row in selected:

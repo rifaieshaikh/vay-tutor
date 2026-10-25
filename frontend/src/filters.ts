@@ -62,3 +62,48 @@ export function clearDescendants(filters: Record<string, string>, changed: strin
   }
   return { filters: next, cleared };
 }
+
+export function scopeOptions(draft: Record<string, string>, options: Record<string, Option[]>) {
+  const branchId = draft.branch_id || "";
+  const courseId = draft.course_id || "";
+  const period = draft.period || "";
+  const selected = { branch_id: branchId, course_id: courseId };
+  const courses = (options.course || []).filter((item) => optionFits(item, { branch_id: branchId }));
+  const periods = Array.from(
+    new Set(
+      (options.batch || [])
+        .filter((item) => optionFits(item, selected) && item.parents?.session_key)
+        .map((item) => item.parents?.session_key || ""),
+    ),
+  ).filter(Boolean).sort();
+  const periodChoices = period && !periods.includes(period) ? [period, ...periods] : periods;
+  const batches = (options.batch || []).filter((item) => optionFits(item, selected) && (!period || item.parents?.session_key === period));
+  return { courses, periodChoices, batches };
+}
+
+export function applyScopeChange(filters: Record<string, string>, options: Record<string, Option[]>, key: string, value: string) {
+  const merged = { ...filters, [key]: value };
+  const manual: string[] = [];
+  if (key === "branch_id") {
+    for (const field of ["course_id", "batch_id"]) {
+      if (!merged[field]) continue;
+      merged[field] = "";
+      manual.push(field);
+    }
+  } else if (key === "course_id" && merged.batch_id) {
+    merged.batch_id = "";
+    manual.push("batch_id");
+  } else if (key === "period" && merged.batch_id) {
+    const batch = (options.batch || []).find((item) => item.id === merged.batch_id);
+    if (!value || batch?.parents?.session_key !== value) {
+      merged.batch_id = "";
+      manual.push("batch_id");
+    }
+  }
+  const fitted = clearIncompatible(merged, options, key);
+  const opened = value ? { filters: fitted.filters, cleared: [] as string[] } : clearDescendants(fitted.filters, key);
+  return {
+    filters: value ? fitted.filters : opened.filters,
+    cleared: [...new Set([...manual, ...fitted.cleared, ...opened.cleared])],
+  };
+}

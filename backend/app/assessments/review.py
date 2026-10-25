@@ -29,7 +29,22 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
 
     resource = _sheet_resource(sheet)
     if not allows(user["grants"], "marksheet.view", resource):
-        raise AppError(404, "not_found", "That record was not found.")
+        batches = await db(request).batches.find(
+            {"_id": {"$in": sheet.get("batch_ids") or []}, "institute_id": user["institute_id"]}
+        ).to_list(length=20)
+        visible = False
+        for batch in batches:
+            wider = {
+                **resource,
+                "branch_id": batch.get("branch_id"),
+                "batch_id": batch["_id"],
+            }
+            if allows(user["grants"], "marksheet.view", wider, True):
+                visible = True
+                break
+        if not visible:
+            raise AppError(404, "not_found", "That record was not found.")
+    exam = await db(request).exams.find_one({"marksheet_id": sheet["_id"], "institute_id": user["institute_id"]})
     revision = sheet.get("active_revision") or sheet.get("revision") or 1
     results = await db(request).results.find(
         {"marksheet_id": sheet["_id"], "revision": revision}
@@ -68,6 +83,7 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
         "maximum": sheet.get("maximum"),
         "source_file": sheet.get("source_file"),
         "source_sheet": sheet.get("source_sheet"),
+        "exam_id": (exam or {}).get("_id") or "",
         "revision": revision,
         "edit_version": sheet.get("edit_version", 0),
         "file_id": sheet.get("file_id"),

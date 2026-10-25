@@ -47,8 +47,11 @@ async def context_options(request: Request, dimension: str, q: str = "") -> dict
     if dimension == "exam_type":
         return {"items": [
             {"id": "unit", "label": "Unit", "parents": {}},
+            {"id": "subject", "label": "Subject", "parents": {}},
             {"id": "part", "label": "Part", "parents": {}},
+            {"id": "paper", "label": "Paper", "parents": {}},
             {"id": "chapter", "label": "Chapter", "parents": {}},
+            {"id": "module", "label": "Module", "parents": {}},
         ]}
     if collection_name is None:
         raise AppError(422, "context.unknown", "Choose a known context level.")
@@ -253,7 +256,7 @@ async def _batch_metric(request: Request, user: dict, applied: dict) -> dict:
     rows = await db(request).batches.find({"institute_id": user["institute_id"]}).to_list(length=500)
     count = 0
     for batch in rows:
-        if batch.get("ended_on"):
+        if batch.get("closed"):
             continue
         if applied["branch_id"] and batch.get("branch_id") != applied["branch_id"]:
             continue
@@ -328,7 +331,7 @@ async def _import_queue(request: Request, user: dict, applied: dict, batch_ids_f
         "label": "Failed imports",
         "count": len(matched),
         "href": _href(
-            "/import",
+            "/ecr",
             state="failed",
             branch_id=applied["branch_id"],
             course_id=applied["course_id"],

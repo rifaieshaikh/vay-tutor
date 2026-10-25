@@ -1,10 +1,11 @@
-import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { notify } from "../notify";
-import { Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
+import { periodLabel } from "../context";
+import { Option, applyScopeChange, clearIncompatible, optionFits, scopeOptions } from "../filters";
 import { Band, BandMark, bandTone } from "../bands";
-import { moveTab } from "../ui";
+import { StudentDialog, moveTab } from "../ui";
 
 type Section = { id: string; label: string; students: number; results: number; percentage: number | null; band: string | null; band_name?: string | null; band_place?: string | null; coverage: string; missing?: number; absent?: number; marksheet_ids?: string[] };
 type Standing = {
@@ -102,8 +103,7 @@ const FILTERS = [
   ["paper_id", "Paper", "paper"],
   ["exam_type", "Exam type", "exam_type"],
 ] as const;
-const FILTER_KEYS = ["branch_id", "course_id", "batch_id", "period", "subject_id", "paper_id", "exam_type", "attempt", "exam_date_from", "exam_date_to"] as const;
-const REPORT_KEYS = ["subject_id", "paper_id", "exam_type", "attempt", "exam_date_from", "exam_date_to"] as const;
+const FILTER_KEYS = ["branch_id", "course_id", "period", "batch_id", "subject_id", "paper_id", "exam_type", "attempt", "exam_date_from", "exam_date_to"] as const;
 const CRUMBS: { level: (typeof LEVELS)[number]; field: string; dimension: string }[] = [
   { level: "branch", field: "branch_id", dimension: "branch" },
   { level: "course", field: "course_id", dimension: "course" },
@@ -293,57 +293,6 @@ function AttentionBoards({ shown, cardSuffix, returnTo }: { shown: View; cardSuf
   );
 }
 
-function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
-  const panelRef = useRef<HTMLDivElement>(null);
-  const closeRef = useRef(onClose);
-  closeRef.current = onClose;
-  useEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const node = panelRef.current;
-    function focusable() {
-      if (!node) return [];
-      return [...node.querySelectorAll<HTMLElement>("button, [href], input, select, textarea")].filter((item) => !item.hasAttribute("disabled"));
-    }
-    const fields = focusable();
-    (fields.find((item) => item.matches("input, select, textarea")) || fields[0] || node)?.focus();
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeRef.current();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const items = focusable();
-      if (items.length === 0) return;
-      const first = items[0];
-      const last = items[items.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      previous?.focus();
-    };
-  }, []);
-  return (
-    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div ref={panelRef} className="modal compact" role="dialog" aria-modal="true" aria-labelledby="academic-filters-title" tabIndex={-1}>
-        <div className="modal-head">
-          <h2 id="academic-filters-title">{title}</h2>
-          <button type="button" className="text-button" onClick={onClose}>Close</button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
-
 function read(params: URLSearchParams) {
   const filters: Record<string, string> = {};
   for (const key of FILTER_KEYS) filters[key] = params.get(key) || "";
@@ -439,18 +388,16 @@ export function ViewsPage() {
   function labelFor(key: string, value: string) {
     if (key === "attempt") return value === "retest" ? "Retest" : "Original";
     if (key === "exam_date_from" || key === "exam_date_to") return formatDate(value);
+    if (key === "period") return periodLabel(value);
     const field = FILTERS.find(([name]) => name === key);
     return field ? optionLabel(field[2], value) : value;
   }
 
   function editDraft(key: string, value: string) {
-    const merged = { ...draft, [key]: value };
-    const fitted = clearIncompatible(merged, options, key);
-    const opened = value ? { filters: fitted.filters, cleared: [] as string[] } : clearDescendants(fitted.filters, key);
-    const cleared = [...fitted.cleared, ...opened.cleared];
-    setDraft(value ? fitted.filters : opened.filters);
+    const { filters: next, cleared } = applyScopeChange(draft, options, key, value);
+    setDraft(next);
     setRangeError("");
-    const labels = cleared.map((field) => FILTERS.find(([name]) => name === field)?.[1] || field).join(", ");
+    const labels = cleared.map((field) => FILTERS.find(([name]) => name === field)?.[1] || (field === "period" ? "Period" : field)).join(", ");
     if (labels) notify(value ? `${labels} cleared because it does not belong with that choice.` : `${labels} cleared because All authorized includes each of them.`);
   }
 
@@ -478,7 +425,7 @@ export function ViewsPage() {
 
   function resetFilters() {
     const kept = { ...filters };
-    for (const key of REPORT_KEYS) kept[key] = "";
+    for (const key of FILTER_KEYS) kept[key] = "";
     setDraft(kept);
     setRangeError("");
     setSectionSearch("");
@@ -487,8 +434,7 @@ export function ViewsPage() {
   }
 
   function removeFilter(key: string) {
-    const opened = clearDescendants({ ...filters, [key]: "" }, key);
-    write(level, opened.filters, 1, panel);
+    write(level, applyScopeChange(filters, options, key, "").filters, 1, panel);
   }
 
   function explainCleared(cleared: string[]) {
@@ -522,7 +468,7 @@ export function ViewsPage() {
     }
   }
 
-  const active = REPORT_KEYS.filter((key) => filters[key]);
+  const active = FILTER_KEYS.filter((key) => filters[key]);
   const levelIndex = LEVELS.indexOf(level as (typeof LEVELS)[number]);
   const crumbs = [
     { label: "Institute", level: "institute" },
@@ -543,6 +489,10 @@ export function ViewsPage() {
   }
 
   const dirty = FILTER_KEYS.some((key) => (draft[key] || "") !== (filters[key] || ""));
+  const scope = scopeOptions(draft, options);
+  function chipName(key: string) {
+    return FILTERS.find(([name]) => name === key)?.[1] || (key === "period" ? "Period" : key === "exam_date_from" ? "From" : key === "exam_date_to" ? "To" : "Attempt");
+  }
   const returnTo = encodeURIComponent(`/views?${params.toString()}`);
   const cardQuery = new URLSearchParams();
   FILTER_KEYS.forEach((key) => {
@@ -566,14 +516,8 @@ export function ViewsPage() {
           <h1>Academic performance</h1>
         </div>
         <div className="actions">
-          {active.map((key) => (
-            <button key={key} type="button" className="chip-button" onClick={() => removeFilter(key)}>{FILTERS.find(([name]) => name === key)?.[1] || (key === "exam_date_from" ? "From" : key === "exam_date_to" ? "To" : "Attempt")}: {labelFor(key, filters[key])}</button>
-          ))}
-          <div className="actions">
-            {active.length ? <button type="button" className="secondary" onClick={resetFilters}>Clear</button> : null}
-            <button type="button" className="secondary" onClick={openFilters}>More filters{active.length ? ` (${active.length})` : ""}</button>
-            <Link className="button secondary" to={`/cards${cardSuffix ? `?${cardSuffix}` : ""}`}>Progress cards</Link>
-          </div>
+          <button type="button" className="secondary" onClick={openFilters}>Filters{active.length ? ` (${active.length})` : ""}</button>
+          <Link className="button secondary" to={`/cards${cardSuffix ? `?${cardSuffix}` : ""}`}>Progress cards</Link>
         </div>
       </div>
       <nav className="page-tabs" role="tablist" aria-label="Academic level" onKeyDown={(event) => moveTab(event, LEVELS, LEVELS.includes(level as (typeof LEVELS)[number]) ? level as (typeof LEVELS)[number] : "institute", goToLevel)}>
@@ -581,10 +525,46 @@ export function ViewsPage() {
           <button key={item} type="button" role="tab" aria-selected={level === item} onClick={() => goToLevel(item)}>{LEVEL_LABELS[item]}</button>
         ))}
       </nav>
+      {active.length ? (
+        <p className="filter-row">
+          {active.map((key) => (
+            <button key={key} type="button" className="chip-button" onClick={() => removeFilter(key)}>{chipName(key)}: {labelFor(key, filters[key])}</button>
+          ))}
+          <button type="button" className="quiet" onClick={resetFilters}>Clear filters</button>
+        </p>
+      ) : null}
       {filtersOpen ? (
-        <Dialog title="Report filters" onClose={closeFilters}>
+        <StudentDialog title="Filters" onClose={closeFilters}>
           <form className="report-filters" onSubmit={(event: FormEvent) => { event.preventDefault(); applyDraft(); }}>
             <div className="form-grid">
+              <label>
+                Branch
+                <select aria-label="Branch" value={draft.branch_id || ""} onChange={(event) => editDraft("branch_id", event.target.value)}>
+                  <option value="">All authorized</option>
+                  {(options.branch || []).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+                </select>
+              </label>
+              <label>
+                Course
+                <select aria-label="Course" value={draft.course_id || ""} onChange={(event) => editDraft("course_id", event.target.value)}>
+                  <option value="">All authorized</option>
+                  {scope.courses.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+                </select>
+              </label>
+              <label>
+                Period
+                <select aria-label="Period" value={draft.period || ""} onChange={(event) => editDraft("period", event.target.value)}>
+                  <option value="">All authorized</option>
+                  {scope.periodChoices.map((key) => <option key={key} value={key}>{periodLabel(key)}</option>)}
+                </select>
+              </label>
+              <label>
+                Batch
+                <select aria-label="Batch" value={draft.batch_id || ""} onChange={(event) => editDraft("batch_id", event.target.value)}>
+                  <option value="">All authorized</option>
+                  {scope.batches.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+                </select>
+              </label>
               {FILTERS.filter(([key]) => key === "subject_id" || key === "paper_id").map(([key, label, dimension]) => (
                 <label key={key}>
                   {label}
@@ -617,11 +597,12 @@ export function ViewsPage() {
             {rangeError || periodError(draft.exam_date_from || "", draft.exam_date_to || "") ? <p className="error" role="alert">{rangeError || periodError(draft.exam_date_from || "", draft.exam_date_to || "")}</p> : null}
             {dirty ? <p className="meta">Choices change when you apply them.</p> : null}
             <div className="dialog-actions">
-              <button type="button" className="text-button" onClick={() => { const kept = { ...draft }; for (const key of REPORT_KEYS) kept[key] = ""; setDraft(kept); setRangeError(""); }}>Reset</button>
-              <button type="submit" disabled={Boolean(periodError(draft.exam_date_from || "", draft.exam_date_to || ""))}>Apply filters</button>
+              <button type="button" className="quiet" onClick={() => { const kept = { ...draft }; for (const key of FILTER_KEYS) kept[key] = ""; setDraft(kept); setRangeError(""); }}>Reset</button>
+              <button type="button" className="secondary" onClick={closeFilters}>Cancel</button>
+              <button type="submit" disabled={Boolean(periodError(draft.exam_date_from || "", draft.exam_date_to || ""))}>Apply</button>
             </div>
           </form>
-        </Dialog>
+        </StudentDialog>
       ) : null}
       {loading ? <p role="status">Loading this view…</p> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}

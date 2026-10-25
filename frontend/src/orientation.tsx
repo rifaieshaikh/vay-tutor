@@ -39,9 +39,28 @@ const RULES: [RegExp, Crumb[]][] = [
     { label: "Assessments", to: "/marksheets" },
     { label: "Marksheets" },
   ]],
+  [/^\/ecr\/import$/, [
+    { label: "Assessments", to: "/ecr" },
+    { label: "ECR", to: "/ecr" },
+    { label: "Import exams" },
+  ]],
+  [/^\/ecr\/exams\/[^/]+\/import$/, [
+    { label: "Assessments", to: "/ecr" },
+    { label: "ECR", to: "/ecr" },
+    { label: "Upload marklist" },
+  ]],
+  [/^\/ecr\/[^/]+$/, [
+    { label: "Assessments", to: "/ecr" },
+    { label: "ECR", to: "/ecr" },
+    { label: "Register" },
+  ]],
+  [/^\/ecr$/, [
+    { label: "Assessments", to: "/ecr" },
+    { label: "ECR" },
+  ]],
   [/^\/import$/, [
-    { label: "Assessments", to: "/import" },
-    { label: "Import Marklist" },
+    { label: "Assessments", to: "/ecr" },
+    { label: "ECR", to: "/ecr" },
   ]],
   [/^\/cards$/, [
     { label: "Reports", to: "/cards" },

@@ -154,7 +154,7 @@ def test_batch_workspace_connects_the_academic_workflow(client):
     assert client.get("/api/v1/catalog").status_code == 200
     assert client.get("/api/v1/students").status_code == 200
 
-    database.batches.update_one({"_id": later.json()["id"]}, {"$set": {"ended_on": "2027-06-01"}})
+    database.batches.update_one({"_id": later.json()["id"]}, {"$set": {"closed": True}})
     closed = client.post(
         f"/api/v1/students/{student_id}/enrollments",
         json={"branch_id": branch_id, "course_id": course_id, "batch_id": later.json()["id"]},

@@ -65,12 +65,12 @@ export function SetupPage({ onReady }: { onReady: () => Promise<void> }) {
           <input name="admin_name" required />
         </label>
         <label>
-          Email
-          <input name="admin_email" type="email" autoComplete="username" required />
+          Username
+          <input name="admin_email" type="text" autoComplete="username" required />
         </label>
         <label>
           Password
-          <input name="admin_password" type="password" autoComplete="new-password" minLength={10} required />
+          <input name="admin_password" type="password" autoComplete="new-password" required />
         </label>
         {error ? <p className="error">{error}</p> : null}
         <button type="submit" disabled={pending}>

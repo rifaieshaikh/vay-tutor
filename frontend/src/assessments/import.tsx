@@ -63,6 +63,8 @@ type HistoryItem = {
   created_at?: string | null;
   outcomes: { name: string; status: string; reason?: string }[];
   summary?: Preview["summary"];
+  marksheet_id?: string;
+  source?: string;
 };
 
 const LEVELS = [
@@ -123,7 +125,14 @@ function sessionLabel(key: string) {
 }
 
 function columnLetter(index: number) {
-  return String.fromCharCode(65 + index);
+  let value = index + 1;
+  let letters = "";
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    letters = String.fromCharCode(65 + remainder) + letters;
+    value = Math.floor((value - 1) / 26);
+  }
+  return letters;
 }
 
 function markText(student: Student) {
@@ -379,7 +388,7 @@ const GROUP_CHOICES = [
   ["skip_duplicate", "Skip duplicate"],
 ] as const;
 
-export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
+export function ImportPage({ canUpload = true, examId = "" }: { canUpload?: boolean; examId?: string }) {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const fromList = useRef(false);
@@ -394,7 +403,20 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
   const [sheetId, setSheetId] = useState("");
   const [defaults, setDefaults] = useState<Record<string, { mode: string; value: string }>>({});
   const [confirmUpdates, setConfirmUpdates] = useState(false);
+  const [exam, setExam] = useState<{ id: string; title: string; maximum: number; scope_label: string; marksheet_id: string; exam_date: string } | null>(null);
   const saveChain = useRef(Promise.resolve());
+  type ScopeItem = { id: string; name: string; archived?: boolean; closed?: boolean; branch_id?: string; course_id?: string; subject_id?: string };
+  type GridRow = { enrollment_code: string; name: string; score: string };
+  const [scopeCatalog, setScopeCatalog] = useState<{
+    branches: ScopeItem[];
+    courses: ScopeItem[];
+    batches: ScopeItem[];
+    subjects: ScopeItem[];
+    papers: ScopeItem[];
+    offerings: { branch_id?: string; course_id?: string }[];
+  } | null>(null);
+  const [scope, setScope] = useState({ branch_id: "", course_id: "", batch_id: "", subject_id: "", paper_id: "", title: "", maximum: "", exam_type: "unit" });
+  const [grid, setGrid] = useState<GridRow[]>([]);
 
   const stateFilter = params.get("state") || "";
   const [inheritedLabel, setInheritedLabel] = useState("");
@@ -407,6 +429,7 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
 
   async function loadHistory() {
     const search = new URLSearchParams();
+    if (examId) search.set("exam_id", examId);
     if (stateFilter) search.set("state", stateFilter);
     if (branchFilter) search.set("branch_id", branchFilter);
     if (courseFilter) search.set("course_id", courseFilter);
@@ -418,7 +441,18 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
 
   useEffect(() => {
     loadHistory().catch((reason: Error) => setError(reason.message));
-  }, [stateFilter, branchFilter, courseFilter, batchFilter]);
+  }, [stateFilter, branchFilter, courseFilter, batchFilter, examId]);
+
+  useEffect(() => {
+    if (!examId) return;
+    api<{ id: string; title: string; maximum: number; scope_label: string; marksheet_id: string; exam_date: string }>(`/api/v1/exams/${examId}`)
+      .then((loaded) => {
+        setExam(loaded);
+        setOpen(true);
+        setStep(0);
+      })
+      .catch((reason: Error) => setError(reason.message));
+  }, [examId]);
 
   useEffect(() => {
     const branchId = params.get("branch_id") || "";
@@ -531,6 +565,96 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
     });
   }
 
+  useEffect(() => {
+    if (!open || scopeCatalog) return;
+    api<{ branches: ScopeItem[]; courses: ScopeItem[]; batches: ScopeItem[]; subjects: ScopeItem[]; papers: ScopeItem[]; offerings: { branch_id?: string; course_id?: string }[] }>("/api/v1/catalog")
+      .then(setScopeCatalog)
+      .catch((reason: Error) => setError(reason.message));
+  }, [open, scopeCatalog]);
+
+  useEffect(() => {
+    if (!open || !scope.batch_id) return;
+    api<{ items: { enrollment_code: string; display_name: string }[] }>(`/api/v1/batches/${scope.batch_id}/roster`)
+      .then((result) => {
+        setGrid((result.items || []).map((item) => ({ enrollment_code: item.enrollment_code, name: item.display_name, score: "" })));
+      })
+      .catch((reason: Error) => setError(reason.message));
+  }, [open, scope.batch_id]);
+
+  function applyPaste(text: string) {
+    const lines = text.replace(/\r/g, "").split("\n").filter((line) => line.trim());
+    if (!lines.length) return;
+    const cells = lines.map((line) => line.split("\t"));
+    const header = cells[0].map((cell) => cell.trim().toLowerCase());
+    const start = header.some((cell) => cell.includes("enroll")) ? 1 : 0;
+    setGrid(cells.slice(start).map((row) => ({
+      enrollment_code: (row[0] || "").trim(),
+      name: (row[1] || "").trim(),
+      score: (row[2] || "").trim(),
+    })));
+  }
+
+  function named(items: ScopeItem[] | undefined, id: string) {
+    return items?.find((item) => item.id === id)?.name || "";
+  }
+
+  function chooseScope(field: keyof typeof scope, value: string) {
+    setScope((current) => {
+      const next = { ...current, [field]: value };
+      if (field === "branch_id") {
+        next.course_id = "";
+        next.batch_id = "";
+        next.subject_id = "";
+        next.paper_id = "";
+      }
+      if (field === "course_id") {
+        next.batch_id = "";
+        next.subject_id = "";
+        next.paper_id = "";
+      }
+      if (field === "subject_id") next.paper_id = "";
+      return next;
+    });
+    const catalogField = field === "branch_id" ? "branch" : field === "course_id" ? "course" : field === "batch_id" ? "batch" : field === "subject_id" ? "subject" : field === "paper_id" ? "paper" : "";
+    if (!catalogField || !scopeCatalog) return;
+    const list = catalogField === "branch" ? scopeCatalog.branches : catalogField === "course" ? scopeCatalog.courses : catalogField === "batch" ? scopeCatalog.batches : catalogField === "subject" ? scopeCatalog.subjects : scopeCatalog.papers;
+    levelChange(catalogField, "mode", value ? "existing" : "detect");
+    levelChange(catalogField, "value", named(list, value));
+  }
+
+  async function saveGrid() {
+    setError("");
+    const maximum = Number(scope.maximum);
+    if (!scope.title.trim() || !scope.subject_id || !scope.paper_id || !(maximum > 0)) {
+      setError("Enter a title, subject, paper, and maximum before saving the marks.");
+      return;
+    }
+    setPending(true);
+    try {
+      await api("/api/v1/marksheets/grid", {
+        method: "POST",
+        body: JSON.stringify({
+          title: scope.title.trim(),
+          branch_id: scope.branch_id,
+          course_id: scope.course_id,
+          batch_id: scope.batch_id,
+          subject_id: scope.subject_id,
+          paper_id: scope.paper_id,
+          exam_type: scope.exam_type,
+          maximum,
+          rows: grid.map((row) => ({ enrollment_code: row.enrollment_code, score: row.score })),
+        }),
+      });
+      notify("Marksheet saved.");
+      setOpen(false);
+      await loadHistory();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The marks were not saved.");
+    } finally {
+      setPending(false);
+    }
+  }
+
   function showImport(next: Preview, preferred?: number) {
     setPreview(next);
     const firstProblem = next.sheets.find((sheet) => sheet.groups.some((group) => group.students.some((student) => rowNeedsFix(sheet, student, next.blockers))));
@@ -552,8 +676,8 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
     const body = new FormData();
     body.append("file", file);
     try {
-      const created = await api<{ id: string }>("/api/v1/imports", { method: "POST", body });
-      const chosen = { ...inheritedDefaults.current, ...defaults };
+      const created = await api<{ id: string }>(examId ? `/api/v1/exams/${examId}/marklist` : "/api/v1/imports", { method: "POST", body });
+      const chosen = examId ? {} : { ...inheritedDefaults.current, ...defaults };
       if (Object.keys(chosen).length) {
         await api(`/api/v1/imports/${created.id}`, { method: "PATCH", body: JSON.stringify({ defaults: chosen }) });
       }
@@ -597,9 +721,10 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
       });
       setPreview(await api<Preview>(`/api/v1/imports/${preview.id}`));
       setStep(5);
+      const marksheetTo = exam?.marksheet_id ? `/marksheets/${exam.marksheet_id}` : "/marksheets";
       notify(result.summary
         ? `Import finished. ${result.summary.counts.results.insert} results inserted, ${result.summary.counts.results.update} updated.`
-        : "Import finished. Drafts stay unpublished until you review the marksheets.", "success", { label: "Open marksheets", to: "/marksheets" });
+        : "Import finished. Drafts stay unpublished until you review the marksheet.", "success", { label: examId ? "Open marksheet" : "Open marksheets", to: examId ? marksheetTo : "/marksheets" });
       await loadHistory();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Commit failed.");
@@ -644,6 +769,23 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
     if (fromList.current) navigate("/marksheets");
   }
 
+  async function removeHistory(item: HistoryItem) {
+    const label = item.filename || "this import";
+    if (item.state === "committed") return;
+    if (!window.confirm(`Delete ${label} from the import history?`)) return;
+    try {
+      await api(`/api/v1/imports/${item.id}`, { method: "DELETE" });
+      if (preview?.id === item.id) {
+        setOpen(false);
+        setPreview(null);
+      }
+      notify("Import removed from the history.");
+      await loadHistory();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The import was not deleted.");
+    }
+  }
+
   const activeSheet = preview?.sheets.find((sheet) => sheet.id === sheetId) || preview?.sheets[0];
   const updates = preview?.totals.updates || 0;
   const problemCount = useMemo(() => {
@@ -659,10 +801,11 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
       <div className="page-title">
         <div>
           <p className="eyebrow">Assessments</p>
-          <h1>Import history</h1>
+          <h1>{exam ? exam.title : "Import history"}</h1>
+          {exam ? <p className="page-lead">{exam.scope_label} · out of {exam.maximum} · {exam.exam_date}</p> : null}
           {stateFilter === "failed" ? <p className="page-lead">Failed imports.</p> : null}
         </div>
-        {canUpload ? <button type="button" onClick={() => { setPreview(null); setStep(0); setError(""); setOpen(true); }}>Import marklist</button> : null}
+        {canUpload ? <button type="button" onClick={() => { setPreview(null); setStep(0); setError(""); setOpen(true); }}>{examId ? "Upload marklist" : "Import marklist"}</button> : null}
       </div>
       {stateFilter || branchFilter || courseFilter || batchFilter ? (
         <p className="filter-row">
@@ -673,7 +816,7 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
           <button type="button" className="quiet" onClick={() => setParams(new URLSearchParams())}>Clear</button>
         </p>
       ) : null}
-      <p>Each workbook stays in this list. Opening the import wizard does not remove earlier imports. Close the window and the history is still here.</p>
+      <p>A saved import stays in this list. You can delete an import that has not been saved.</p>
       {error && !open ? <p className="error" role="alert">{error}</p> : null}
       {history.length === 0 ? <p>{stateFilter === "failed" ? "No failed imports." : "No imports yet."}</p> : (
         <div className="table-wrap">
@@ -690,7 +833,14 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
                   <td><span className={`chip ${item.state}`}>{STATUS_LABEL[item.state] || item.state}</span></td>
                   <td>{item.outcomes.length ? `${item.outcomes.filter((outcome) => outcome.status === "committed").length} imported, ${item.outcomes.filter((outcome) => outcome.status === "skipped").length} skipped` : "—"}</td>
                   <td>{item.summary ? `${item.summary.counts.results.insert} inserted, ${item.summary.counts.results.update} updated` : "—"}</td>
-                  <td>{canUpload ? <button type="button" className="text-button" onClick={() => api<Preview>(`/api/v1/imports/${item.id}`).then(showImport).catch((reason: Error) => setError(reason.message))}>{item.state === "committed" ? "View" : "Continue"}</button> : null}</td>
+                  <td>{canUpload ? (
+                    <div className="row-actions">
+                      {item.marksheet_id ? <Link to={`/marksheets/${item.marksheet_id}`}>Open</Link> : (
+                        <button type="button" onClick={() => api<Preview>(`/api/v1/imports/${item.id}`).then(showImport).catch((reason: Error) => setError(reason.message))}>{item.state === "committed" ? "View" : "Continue"}</button>
+                      )}
+                      {item.state === "committed" ? null : <button type="button" className="quiet" onClick={() => removeHistory(item)}>Delete</button>}
+                    </div>
+                  ) : null}</td>
                 </tr>
               ))}
             </tbody>
@@ -700,7 +850,7 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
 
       {open ? (
         <div className="modal-backdrop">
-          <div ref={dialogRef} className={preview && (step === 2 || step === 3) ? "modal sheet-view" : "modal"} role="dialog" aria-modal="true" aria-labelledby="import-title" tabIndex={-1}>
+          <div ref={dialogRef} className={preview && (step === 1 || step === 2 || step === 3 || step === 5) ? "modal sheet-view" : "modal"} role="dialog" aria-modal="true" aria-labelledby="import-title" tabIndex={-1}>
             <div className="modal-head">
               <h2 id="import-title">{preview?.filename || "Import marklist"}</h2>
               <button type="button" className="text-button" onClick={closeWizard}>Close</button>
@@ -718,8 +868,9 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
 
             {step === 0 ? (
               <>
-                <p>Detect keeps the value found in the workbook. Existing or new applies one value to every sheet.</p>
-                {inheritedLabel ? <p>This import uses {inheritedLabel}. A workbook that names something else must be confirmed before it is saved.</p> : null}
+                <p>{examId ? "Upload a workbook with a name column and a mark column. Marks are saved for students already enrolled in this exam’s batches. A name that is not enrolled is left out." : "Upload the marklist workbook. Detect keeps a value found in the file. Existing or new applies one value to every sheet."}</p>
+                {inheritedLabel && !examId ? <p>This import uses {inheritedLabel}. A workbook that names something else must be confirmed before it is saved.</p> : null}
+                {examId ? null : (
                 <div className="stack">
                   {LEVELS.map(([field, label]) => (
                     <label key={field}>
@@ -735,6 +886,7 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
                     </label>
                   ))}
                 </div>
+                )}
                 <form onSubmit={upload}>
                   <label>
                     Workbook
@@ -742,34 +894,130 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
                   </label>
                   <button type="submit" disabled={pending}>{pending ? "Reading…" : "Upload and continue"}</button>
                 </form>
+                {examId ? null : (
+                <details>
+                  <summary>Enter marks for one batch</summary>
+                  <p>Choose the batch, then paste marks from Excel or type them in the grid. The enrollment number is the row key.</p>
+                  <div className="stack">
+                    <label>Branch
+                      <select aria-label="Branch" value={scope.branch_id} onChange={(event) => chooseScope("branch_id", event.target.value)}>
+                        <option value="">Choose a branch</option>
+                        {(scopeCatalog?.branches || []).filter((item) => !item.archived).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                      </select>
+                    </label>
+                    <label>Course
+                      <select aria-label="Course" value={scope.course_id} disabled={!scope.branch_id} onChange={(event) => chooseScope("course_id", event.target.value)}>
+                        <option value="">Choose a course</option>
+                        {(scopeCatalog?.courses || []).filter((item) => !item.archived && scopeCatalog?.offerings.some((offering) => offering.branch_id === scope.branch_id && offering.course_id === item.id)).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                      </select>
+                    </label>
+                    <label>Batch
+                      <select aria-label="Batch" value={scope.batch_id} disabled={!scope.course_id} onChange={(event) => chooseScope("batch_id", event.target.value)}>
+                        <option value="">Choose a batch</option>
+                        {(scopeCatalog?.batches || []).filter((item) => !item.archived && !item.closed && item.branch_id === scope.branch_id && item.course_id === scope.course_id).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                      </select>
+                    </label>
+                  </div>
+                  {scope.batch_id ? (
+                    <>
+                      <div className="actions">
+                        <button type="button" className="secondary" onClick={() => navigator.clipboard.readText().then(applyPaste).catch(() => setError("The clipboard could not be read. Paste into the grid instead."))}>Paste from Excel</button>
+                      </div>
+                      <p>Paste replaces the grid. Columns are enrollment number, name, and score. Type absent for a student who was not present. Leave a score blank to skip that student.</p>
+                      <div className="table-wrap" onPaste={(event) => {
+                        const text = event.clipboardData.getData("text");
+                        if (text.includes("\t") || text.includes("\n")) {
+                          event.preventDefault();
+                          applyPaste(text);
+                        }
+                      }}>
+                        <table className="sheet-grid">
+                          <caption>Marks for this batch</caption>
+                          <thead>
+                            <tr>
+                              <th className="col-letter" />
+                              <th className="col-letter">A</th>
+                              <th className="col-letter">B</th>
+                              <th className="col-letter">C</th>
+                            </tr>
+                            <tr>
+                              <th className="col-letter" />
+                              <th>Enrollment number</th>
+                              <th>Name</th>
+                              <th>Score</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {grid.map((row, index) => (
+                              <tr key={`${row.enrollment_code}-${index}`}>
+                                <th className="row-no">{index + 1}</th>
+                                <td><input aria-label={`Enrollment number ${index + 1}`} value={row.enrollment_code} onChange={(event) => setGrid((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, enrollment_code: event.target.value } : item))} /></td>
+                                <td><input aria-label={`Name ${index + 1}`} value={row.name} onChange={(event) => setGrid((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))} /></td>
+                                <td><input aria-label={`Score ${index + 1}`} value={row.score} onChange={(event) => setGrid((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, score: event.target.value } : item))} /></td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      {grid.length === 0 ? <p>This batch has no current students. Paste rows to enter marks for enrollment numbers you already have.</p> : null}
+                      <div className="stack">
+                        <label>Title
+                          <input aria-label="Marksheet title" value={scope.title} onChange={(event) => setScope((current) => ({ ...current, title: event.target.value }))} />
+                        </label>
+                        <label>Subject
+                          <select aria-label="Subject" value={scope.subject_id} onChange={(event) => chooseScope("subject_id", event.target.value)}>
+                            <option value="">Choose a subject</option>
+                            {(scopeCatalog?.subjects || []).filter((item) => item.course_id === scope.course_id).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                          </select>
+                        </label>
+                        <label>Paper
+                          <select aria-label="Paper" value={scope.paper_id} onChange={(event) => chooseScope("paper_id", event.target.value)}>
+                            <option value="">Choose a paper</option>
+                            {(scopeCatalog?.papers || []).filter((item) => item.subject_id === scope.subject_id).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                          </select>
+                        </label>
+                        <label>Exam type
+                          <select aria-label="Exam type" value={scope.exam_type} onChange={(event) => setScope((current) => ({ ...current, exam_type: event.target.value }))}>
+                            <option value="unit">Unit</option>
+                            <option value="part">Part</option>
+                            <option value="chapter">Chapter</option>
+                          </select>
+                        </label>
+                        <label>Maximum
+                          <input aria-label="Maximum" inputMode="decimal" value={scope.maximum} onChange={(event) => setScope((current) => ({ ...current, maximum: event.target.value }))} />
+                        </label>
+                      </div>
+                      <button type="button" disabled={pending} onClick={() => void saveGrid()}>{pending ? "Saving…" : "Save marks"}</button>
+                    </>
+                  ) : null}
+                </details>
+                )}
               </>
             ) : null}
 
             {preview && step === 1 ? (
-              <>
-                <p>Included sheets are the only ones that will be saved.</p>
-                <ul className="people">
-                  {preview.sheets.map((sheet) => (
-                    <li key={sheet.id}>
-                      <label>
-                        <input type="checkbox" checked={sheet.included} onChange={(event) => patchSheet(sheet.id, { included: event.target.checked, skip_reason: event.target.checked ? "" : "Skipped during review." })} />
-                        {sheet.name}
-                      </label>
-                      <span>{sheet.subject_name} · {sheet.batches.map((batch) => batch.label).join(", ") || "No batch"}</span>
-                    </li>
-                  ))}
-                </ul>
+              <div className="excel-step">
+                <p>{examId ? "Include the one sheet that belongs to this exam. The other sheets in the file are left out." : "Tick a sheet tab to include it. Included sheets are the only ones that will be saved."}</p>
+                {examBlockers(preview)}
+                <SourceGrid
+                  sheets={preview.sheets}
+                  activeId={activeSheet?.id || ""}
+                  onSelect={setSheetId}
+                  onToggle={(targetId, included) => patchSheet(targetId, { included, skip_reason: included ? "" : "Skipped during review." })}
+                />
                 <div className="actions">
                   <button type="button" className="text-button" onClick={() => setStep(0)}>Back</button>
-                  <button type="button" onClick={() => setStep(2)}>Next</button>
+                  <button type="button" onClick={() => setStep(2)} disabled={!preview.sheets.some((sheet) => sheet.included)}>Next</button>
                 </div>
-              </>
+              </div>
             ) : null}
 
             {preview && step === 2 ? (
               <>
-                <p>The opening rows show what was read from the file. Branch, course, batch, subject, and paper at the top apply to every sheet. On a combined exam, a student already in one of the sheet’s batches keeps that batch. Otherwise choose from the batches written on the sheet.</p>
+                <p>{examId ? "Each row needs a name and a mark. Names that are not enrolled in this exam’s batches are left out. Skip every extra mark column." : "The opening rows show what was read from the file. Branch, course, batch, subject, and paper at the top apply to every sheet. On a combined exam, a student already in one of the sheet’s batches keeps that batch. Otherwise choose from the batches written on the sheet."}</p>
+                {examBlockers(preview)}
                 <SheetGrid
+                  lockContext={Boolean(examId)}
                   sheets={preview.sheets.filter((sheet) => sheet.included)}
                   activeId={activeSheet?.id || ""}
                   blockers={preview.blockers}
@@ -814,7 +1062,9 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
                     <button type="submit" disabled={pending}>{pending ? "Reading…" : "Use this workbook"}</button>
                   </form>
                 </div>
+                {examBlockers(preview)}
                 <SheetGrid
+                  lockContext={Boolean(examId)}
                   sheets={preview.sheets.filter((sheet) => sheet.included)}
                   activeId={activeSheet.id}
                   blockers={preview.blockers}
@@ -840,7 +1090,7 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
               <>
                 <h3>Confirm import</h3>
                 <CountGrid counts={preview.totals.planned} />
-                <p>New rows become drafts. A published score changes only when you entered a reason. A score you keep stays as it is.</p>
+                <p>{examId ? "Marks are written onto this exam. Students, admissions, and enrollments are not created. A published score changes only when you entered a reason." : "New rows become drafts. A published score changes only when you entered a reason. A score you keep stays as it is."}</p>
                 {updates > 0 ? (
                   <label>
                     <input type="checkbox" checked={confirmUpdates} onChange={(event) => setConfirmUpdates(event.target.checked)} />
@@ -856,16 +1106,44 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
             ) : null}
 
             {preview && step === 5 ? (
-              <>
+              <div className="excel-step">
                 <h3>Import results</h3>
                 {preview.summary ? <CountGrid counts={preview.summary.counts} /> : <p>{preview.state === "committed" ? "This import was saved before outcome counts were recorded." : "This import has not been committed."}</p>}
-                <ul>
-                  {preview.outcomes.map((item) => <li key={item.name}>{item.name}: {item.status}{item.reason ? ` — ${item.reason}` : ""}</li>)}
-                </ul>
+                <div className="excel">
+                  <div className="table-wrap">
+                    <table className="sheet-grid">
+                      <caption>Imported sheets</caption>
+                      <thead>
+                        <tr>
+                          <th className="col-letter" />
+                          <th className="col-letter">A</th>
+                          <th className="col-letter">B</th>
+                          <th className="col-letter">C</th>
+                        </tr>
+                        <tr>
+                          <th className="col-letter" />
+                          <th>Sheet</th>
+                          <th>Status</th>
+                          <th>Reason</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {preview.outcomes.map((item, index) => (
+                          <tr key={`${item.name}-${index}`}>
+                            <th className="row-no">{index + 1}</th>
+                            <td className="cell-text">{item.name}</td>
+                            <td className="cell-text">{item.status === "committed" ? "Imported" : item.status === "skipped" ? "Skipped" : item.status === "failed" ? "Failed" : item.status}</td>
+                            <td className="cell-text">{item.reason || ""}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
                 {preview.state === "committed" ? <p><a href={`/api/v1/imports/${preview.id}/outcome-report`}>Download outcome report</a></p> : null}
                 <p><Link to="/marksheets">Review the draft marksheets</Link></p>
                 <button type="button" onClick={closeWizard}>Close</button>
-              </>
+              </div>
             ) : null}
           </div>
         </div>
@@ -874,10 +1152,67 @@ export function ImportPage({ canUpload = true }: { canUpload?: boolean }) {
   );
 }
 
+function SourceGrid({
+  sheets,
+  activeId,
+  onSelect,
+  onToggle,
+}: {
+  sheets: Sheet[];
+  activeId: string;
+  onSelect: (id: string) => void;
+  onToggle: (id: string, included: boolean) => void;
+}) {
+  const sheet = sheets.find((item) => item.id === activeId) || sheets[0];
+  if (!sheet) return null;
+  const rows = sheet.rows || [];
+  const width = Math.max(1, ...rows.map((row) => row.cells.length));
+  return (
+    <div className="excel">
+      <div className="table-wrap">
+        <table className="sheet-grid">
+          <caption>{sheet.name}. Tick a sheet tab to include it.</caption>
+          <thead>
+            <tr>
+              <th className="col-letter" />
+              {Array.from({ length: width }, (_, index) => <th key={index} className="col-letter">{columnLetter(index)}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.row} className={row.role === "header" ? "source-row" : undefined}>
+                <th className="row-no">{row.row}</th>
+                {Array.from({ length: width }, (_, index) => (
+                  <td key={index} className="cell-text">{row.cells[index] || ""}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="sheet-tabs excel-tabs" role="tablist" aria-label="Sheets">
+        {sheets.map((item) => (
+          <span key={item.id} className={item.included ? "tab" : "tab excluded"}>
+            <input type="checkbox" checked={item.included} aria-label={`Include ${item.name}`} onChange={(event) => onToggle(item.id, event.target.checked)} />
+            <button type="button" role="tab" aria-selected={item.id === sheet.id} onClick={() => onSelect(item.id)}>{item.name}</button>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function examBlockers(preview: Preview) {
+  const notes = preview.blockers.filter((item) => item.code === "import.exam_sheet" || item.code === "import.exam_column");
+  if (!notes.length) return null;
+  return notes.map((item) => <p key={`${item.code}-${item.sheet_id || ""}`} className="error" role="alert">{item.message}</p>);
+}
+
 function SheetGrid({
   sheets,
   activeId,
   blockers,
+  lockContext = false,
   onSelect,
   onHeading,
   onContextAck,
@@ -892,6 +1227,7 @@ function SheetGrid({
   sheets: Sheet[];
   activeId: string;
   blockers: Blocker[];
+  lockContext?: boolean;
   onSelect: (id: string) => void;
   onHeading: (sheetId: string) => void;
   onContextAck: (sheetId: string) => void;
@@ -922,7 +1258,7 @@ function SheetGrid({
   const trailing = source.filter((item) => item.role !== "student" && item.row > (rows.filter((line) => line.row <= fileMax).at(-1)?.row ?? -1));
   const inFile = rows.filter((line) => line.row <= fileMax);
   const extra = rows.filter((line) => line.row > fileMax);
-  const columns = 2 + sheet.groups.length;
+  const columns = (lockContext ? 1 : 2) + sheet.groups.length;
   const nextRow = Math.max(fileMax === Number.POSITIVE_INFINITY ? 0 : fileMax, ...rows.map((line) => line.row), 0) + 1;
 
   function sourceLine(item: { row: number; cells: string[]; role: string }) {
@@ -930,7 +1266,7 @@ function SheetGrid({
       <tr key={`source-${item.row}`} className="source-row">
         <th className="row-no">{item.row}</th>
         <td className="name">{item.cells.filter(Boolean).join("  ·  ")}</td>
-        <td className="used" colSpan={1 + sheet.groups.length}>{ROW_ROLE[item.role] || "Not a student"}</td>
+        <td className="used" colSpan={(lockContext ? 0 : 1) + sheet.groups.length}>{ROW_ROLE[item.role] || "Not a student"}</td>
       </tr>
     );
   }
@@ -941,6 +1277,10 @@ function SheetGrid({
     const batchBad = codes.includes("import.batch_unassigned");
     const nameBad = codes.includes("import.duplicate_row");
     const batchLabel = sheet.batches.find((batch) => batch.session_key === line.batch)?.label || "";
+    const unmatched = [...line.students.entries()].some(([groupId, student]) => {
+      const group = sheet.groups.find((item) => item.id === groupId);
+      return student.change === "skip" && group?.interpretation !== "skip_duplicate";
+    });
     return (
       <tr key={line.row}>
         <th className="row-no">{line.row}</th>
@@ -950,9 +1290,14 @@ function SheetGrid({
           bad={nameBad}
           title={nameBad ? blockers.find((item) => item.sheet_id === sheet.id && item.row === line.row && item.code === "import.duplicate_row")?.message : undefined}
           onCommit={(name) => onName(sheet.id, line.row, name)}
-          extra={nameBad || sample?.added ? <button type="button" className="cell-link" onClick={() => onDrop(sheet.id, line.row)}>{nameBad ? "Drop" : "Remove"}</button> : null}
+          extra={
+            <>
+              {lockContext && unmatched ? <span className="batch-note">Not enrolled</span> : null}
+              {nameBad || sample?.added ? <button type="button" className="cell-link" onClick={() => onDrop(sheet.id, line.row)}>{nameBad ? "Drop" : "Remove"}</button> : null}
+            </>
+          }
         />
-        <td className={batchBad ? "batch bad" : "batch"} title={batchBad ? blockers.find((item) => item.sheet_id === sheet.id && item.row === line.row && item.code === "import.batch_unassigned")?.message : undefined}>
+        {lockContext ? null : <td className={batchBad ? "batch bad" : "batch"} title={batchBad ? blockers.find((item) => item.sheet_id === sheet.id && item.row === line.row && item.code === "import.batch_unassigned")?.message : undefined}>
           {sheet.batches.length > 1 ? (
             <>
               {line.enrolled.length ? <span className="batch-note">Already in {line.enrolled.map(sessionLabel).join(", ")}</span> : null}
@@ -971,7 +1316,7 @@ function SheetGrid({
               </span>
             </>
           ) : batchLabel}
-        </td>
+        </td>}
         {sheet.groups.map((group) => {
           const student = line.students.get(group.id);
           if (!student) return <td key={group.id} />;
@@ -995,7 +1340,7 @@ function SheetGrid({
 
   return (
     <div className="excel">
-      <ContextBar sheets={sheets} onCommit={onContext} />
+      {lockContext ? null : <ContextBar sheets={sheets} onCommit={onContext} />}
       <div className="table-wrap">
         <table className="sheet-grid">
           <caption>{sheet.name}. Click a name or a mark and type. Press Enter to keep it.</caption>
@@ -1007,7 +1352,7 @@ function SheetGrid({
             <tr>
               <th className="col-letter" />
               <th>Student</th>
-              <th>Batch</th>
+              {lockContext ? null : <th>Batch</th>}
               {sheet.groups.map((group) => {
                 const choice = groupNeedsChoice(sheet, group);
                 const label = GROUP_CHOICES.find(([value]) => value === group.interpretation)?.[1] || String(group.maximum);
@@ -1020,14 +1365,14 @@ function SheetGrid({
                         options={GROUP_CHOICES.map(([value, text]) => ({ value, label: text }))}
                         onPick={(value) => onGroup(sheet.id, group.id, value)}
                       />
-                    ) : group.maximum}
+                    ) : lockContext && sheet.groups.length === 1 ? "Mark" : group.maximum}
                   </th>
                 );
               })}
             </tr>
           </thead>
           <tbody>
-            {blockers.some((item) => item.code === "import.context_conflict" && item.sheet_id === sheet.id) ? (
+            {!lockContext && blockers.some((item) => item.code === "import.context_conflict" && item.sheet_id === sheet.id) ? (
               <tr>
                 <th className="row-no" />
                 <td className="name">Context</td>
@@ -1038,7 +1383,7 @@ function SheetGrid({
                 </td>
               </tr>
             ) : null}
-            {sheet.heading_conflict && !sheet.heading_acknowledged ? (
+            {!lockContext && sheet.heading_conflict && !sheet.heading_acknowledged ? (
               <tr>
                 <th className="row-no" />
                 <td className="name">Heading</td>

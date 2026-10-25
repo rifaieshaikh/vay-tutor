@@ -10,9 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.academics.catalog import router as catalog_router
+from app.academics.curriculum import router as curriculum_router
 from app.academics.questions import router as question_router
 from app.administration.routes import router as administration_router
 from app.admissions.routes import router as admissions_router
+from app.assessments.exams import router as exam_router
 from app.assessments.review import router as review_router
 from app.assessments.routes import router as assessment_router
 from app.config import load_settings
@@ -86,11 +88,13 @@ def create_app() -> FastAPI:
     app.include_router(staff_router)
     app.include_router(dashboard_router)
     app.include_router(catalog_router)
+    app.include_router(curriculum_router)
     app.include_router(question_router)
     app.include_router(admissions_router)
     app.include_router(student_directory_router)
     app.include_router(student_router)
     app.include_router(assessment_router)
+    app.include_router(exam_router)
     app.include_router(review_router)
     app.include_router(reports_router)
 

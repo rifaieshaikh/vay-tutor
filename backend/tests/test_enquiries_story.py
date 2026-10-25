@@ -164,13 +164,23 @@ def _csv(text: str) -> tuple[str, bytes, str]:
     return ("enquiries.csv", text.encode("utf-8"), "text/csv")
 
 
+def _scope(client, course_id: str) -> str:
+    branch = client.post("/api/v1/branches", json={"name": "Tirur"})
+    assert branch.status_code == 200, branch.text
+    offered = client.post(f"/api/v1/branches/{branch.json()['id']}/courses", json={"course_id": course_id})
+    assert offered.status_code == 200, offered.text
+    return branch.json()["id"]
+
+
 def test_mapped_import_resolves_values_and_commits_once(client):
     bootstrap(client)
     course_id, _other = _course(client)
+    branch_id = _scope(client, course_id)
     existing = client.post("/api/v1/enquiries", json={"name": "Meera", "whatsapp": "9000000001", "course_id": course_id})
     assert existing.status_code == 200, existing.text
     uploaded = client.post(
         "/api/v1/enquiry-imports",
+        data={"branch_id": branch_id, "course_id": course_id},
         files={"file": _csv("Student,Mobile,Course,Heat\nAnu,09870000001,CA Fdn,Hot\nMeera,9000000001,CA Fdn,High\n")},
     )
     assert uploaded.status_code == 200, uploaded.text
@@ -247,10 +257,16 @@ def test_mapped_import_resolves_values_and_commits_once(client):
     assert listed.json()["total"] == 1
     stored = listed.json()["items"][0]
     assert stored["whatsapp"] == "09870000001"
+    removed = client.delete(f"/api/v1/enquiry-imports/{operation_id}")
+    assert removed.status_code == 422
+    assert client.get("/api/v1/enquiry-imports").json()["items"][0]["id"] == operation_id
+    assert client.get("/api/v1/enquiries?q=09870000001").json()["total"] == 1
 
 
 def test_formula_cells_are_blocked_until_a_plain_value_is_supplied(client):
     bootstrap(client)
+    course_id, _other = _course(client)
+    branch_id = _scope(client, course_id)
     book = Workbook()
     sheet = book.active
     sheet.title = "Sheet1"
@@ -260,6 +276,7 @@ def test_formula_cells_are_blocked_until_a_plain_value_is_supplied(client):
     book.save(buffer)
     uploaded = client.post(
         "/api/v1/enquiry-imports",
+        data={"branch_id": branch_id, "course_id": course_id},
         files={"file": ("people.xlsx", buffer.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
     )
     assert uploaded.status_code == 200, uploaded.text

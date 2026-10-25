@@ -23,6 +23,7 @@ from app.admissions.routes import (
     student_extras,
 )
 from app.deps import current_user, db, write_audit
+from app.db import allocate_enrollment_code
 from app.enrollment import enrollment_document, name_conflicts, name_document, require_batch_match, require_open_batch
 from app.errors import AppError
 from app.security import name_key, phone_key
@@ -829,6 +830,7 @@ async def add_student_enrollment(request: Request, student_id: str, body: Enroll
         course_id=body.course_id,
         batch_id=body.batch_id,
         started_on=started,
+        enrollment_code=await allocate_enrollment_code(db(request)),
     )
     names = [
         name_document(
@@ -1004,6 +1006,7 @@ async def transfer_student(
             batch_id=body.batch_id,
             started_on=plan["moved_on"],
             status="current",
+            enrollment_code=await allocate_enrollment_code(db(request)),
         )
         names = [
             name_document(

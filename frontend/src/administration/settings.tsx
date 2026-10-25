@@ -1,6 +1,7 @@
 import { FormEvent, useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { api, Session } from "../api";
+import { CurriculumKind, ExamType } from "../academics/kinds";
 import { notify } from "../notify";
 import { Band, BandFields, bandsPayload, bandsReady, draftsFrom } from "../bands";
 import { Icon, moveTab, StudentDialog } from "../ui";
@@ -35,7 +36,7 @@ function percentText(value: number) {
 
 export function SettingsPage({ session }: { session: Session }) {
   const [policy, setPolicy] = useState<Policy | null>(null);
-  const [tab, setTab] = useState<"preferences" | "policy" | "operations">("preferences");
+  const [tab, setTab] = useState<"preferences" | "policy" | "curriculum" | "operations">("preferences");
   const [error, setError] = useState("");
   const [editing, setEditing] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -65,9 +66,10 @@ export function SettingsPage({ session }: { session: Session }) {
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
       {loading ? <p>Loading settings…</p> : null}
-      <div className="page-tabs" role="tablist" aria-label="Settings" onKeyDown={(event) => moveTab(event, ["preferences", "policy", "operations"] as const, tab, setTab)}>
+      <div className="page-tabs" role="tablist" aria-label="Settings" onKeyDown={(event) => moveTab(event, ["preferences", "policy", "curriculum", "operations"] as const, tab, setTab)}>
         <button type="button" role="tab" aria-selected={tab === "preferences"} onClick={() => setTab("preferences")}>Preferences</button>
         <button type="button" role="tab" aria-selected={tab === "policy"} onClick={() => setTab("policy")}>Academic policy</button>
+        <button type="button" role="tab" aria-selected={tab === "curriculum"} onClick={() => setTab("curriculum")}>Curriculum</button>
         <button type="button" role="tab" aria-selected={tab === "operations"} onClick={() => setTab("operations")}>Operations</button>
       </div>
       {tab === "preferences" ? (
@@ -143,6 +145,12 @@ export function SettingsPage({ session }: { session: Session }) {
             </div>
           </dl>
           <p className="meta">The total adds the scores and divides by the sum of the maxima. Drafts stay off cards and academic views until they are published. A published correction keeps the earlier score.</p>
+        </>
+      ) : null}
+      {tab === "curriculum" ? (
+        <>
+          <CurriculumKinds canEdit={session.actions.includes("catalog.manage")} />
+          <ExamTypes canEdit={session.actions.includes("catalog.manage")} />
         </>
       ) : null}
       {tab === "operations" ? (
@@ -231,6 +239,239 @@ function TimezoneField({ initial, canEdit }: { initial: string; canEdit: boolean
       <button type="submit" disabled={saving || draft === zone}>Save</button>
       {error ? <span className="error" role="alert">{error}</span> : null}
     </form>
+  );
+}
+
+function CurriculumKinds({ canEdit }: { canEdit: boolean }) {
+  const [kinds, setKinds] = useState<CurriculumKind[]>([]);
+  const [error, setError] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<CurriculumKind | null>(null);
+
+  function load() {
+    return api<{ items: CurriculumKind[] }>("/api/v1/curriculum-kinds")
+      .then((body) => setKinds(body.items))
+      .catch((reason: Error) => setError(reason.message));
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  async function archive(kind: CurriculumKind, archived: boolean) {
+    setError("");
+    try {
+      await api(`/api/v1/curriculum-kinds/${kind.key}`, { method: "PATCH", body: JSON.stringify({ archived }) });
+      notify(archived ? `${kind.label} is hidden from new items.` : `${kind.label} can be used again.`);
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update that item.");
+    }
+  }
+
+  return (
+    <>
+      <div className="title-row">
+        <div>
+          <h2>Subject partition types</h2>
+          <p className="meta">Paper, part, chapter, and module divide a subject. Paper stays numbered. Archiving hides a partition from new items and leaves existing ones in place.</p>
+        </div>
+        {canEdit ? <button type="button" onClick={() => setAdding(true)}>Add subject partition</button> : null}
+      </div>
+      {error ? <p className="error" role="alert">{error}</p> : null}
+      {kinds.length === 0 ? <p>Loading subject partitions…</p> : (
+        <div className="table-wrap">
+          <table className="people-table">
+            <caption className="sr-only">Subject partition types</caption>
+            <thead><tr><th>Name</th><th>Status</th>{canEdit ? <th>Actions</th> : null}</tr></thead>
+            <tbody>
+              {kinds.map((kind) => (
+                <tr key={kind.key}>
+                  <td>{kind.label}</td>
+                  <td>{kind.archived ? "Archived" : "Active"}{kind.locked ? " · Numbered" : ""}</td>
+                  {canEdit ? (
+                    <td>
+                      <button type="button" className="quiet" onClick={() => setEditing(kind)}>Rename</button>
+                      {kind.locked ? null : (
+                        <button type="button" className="quiet" onClick={() => void archive(kind, !kind.archived)}>{kind.archived ? "Restore" : "Archive"}</button>
+                      )}
+                    </td>
+                  ) : null}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {adding ? (
+        <KindDialog
+          title="Add subject partition"
+          submitLabel="Add subject partition"
+          nameLabel="Subject partition type"
+          onClose={() => setAdding(false)}
+          onSubmit={async (label) => {
+            await api("/api/v1/curriculum-kinds", { method: "POST", body: JSON.stringify({ label }) });
+            notify(`Added ${label.trim()}.`);
+            setAdding(false);
+            await load();
+          }}
+        />
+      ) : null}
+      {editing ? (
+        <KindDialog
+          title="Rename subject partition"
+          submitLabel="Save"
+          nameLabel="Subject partition type"
+          initial={editing.label}
+          onClose={() => setEditing(null)}
+          onSubmit={async (label) => {
+            await api(`/api/v1/curriculum-kinds/${editing.key}`, { method: "PATCH", body: JSON.stringify({ label }) });
+            notify(`Saved ${label.trim()}.`);
+            setEditing(null);
+            await load();
+          }}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function ExamTypes({ canEdit }: { canEdit: boolean }) {
+  const [types, setTypes] = useState<ExamType[]>([]);
+  const [error, setError] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<ExamType | null>(null);
+
+  function load() {
+    return api<{ items: ExamType[] }>("/api/v1/exam-types")
+      .then((body) => setTypes(body.items))
+      .catch((reason: Error) => setError(reason.message));
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  async function archive(item: ExamType, archived: boolean) {
+    setError("");
+    try {
+      await api(`/api/v1/exam-types/${item.key}`, { method: "PATCH", body: JSON.stringify({ archived }) });
+      notify(archived ? `${item.label} is hidden from new exams.` : `${item.label} can be used again.`);
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update that exam type.");
+    }
+  }
+
+  return (
+    <>
+      <div className="title-row">
+        <div>
+          <h2>Exam types</h2>
+          <p className="meta">An exam type names the sitting, such as a test series or a module exam. It does not divide the subject.</p>
+        </div>
+        {canEdit ? <button type="button" onClick={() => setAdding(true)}>Add exam type</button> : null}
+      </div>
+      {error ? <p className="error" role="alert">{error}</p> : null}
+      {types.length === 0 ? <p>Loading exam types…</p> : (
+        <div className="table-wrap">
+          <table className="people-table">
+            <caption className="sr-only">Exam types</caption>
+            <thead><tr><th>Name</th><th>Status</th>{canEdit ? <th>Actions</th> : null}</tr></thead>
+            <tbody>
+              {types.map((item) => (
+                <tr key={item.key}>
+                  <td>{item.label}</td>
+                  <td>{item.archived ? "Archived" : "Active"}</td>
+                  {canEdit ? (
+                    <td>
+                      <button type="button" className="quiet" onClick={() => setEditing(item)}>Rename</button>
+                      <button type="button" className="quiet" onClick={() => void archive(item, !item.archived)}>{item.archived ? "Restore" : "Archive"}</button>
+                    </td>
+                  ) : null}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {adding ? (
+        <KindDialog
+          title="Add exam type"
+          submitLabel="Add exam type"
+          nameLabel="Exam type"
+          onClose={() => setAdding(false)}
+          onSubmit={async (label) => {
+            await api("/api/v1/exam-types", { method: "POST", body: JSON.stringify({ label }) });
+            notify(`Added ${label.trim()}.`);
+            setAdding(false);
+            await load();
+          }}
+        />
+      ) : null}
+      {editing ? (
+        <KindDialog
+          title="Rename exam type"
+          submitLabel="Save"
+          nameLabel="Exam type"
+          initial={editing.label}
+          onClose={() => setEditing(null)}
+          onSubmit={async (label) => {
+            await api(`/api/v1/exam-types/${editing.key}`, { method: "PATCH", body: JSON.stringify({ label }) });
+            notify(`Saved ${label.trim()}.`);
+            setEditing(null);
+            await load();
+          }}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function KindDialog({
+  title,
+  submitLabel,
+  nameLabel,
+  initial = "",
+  onClose,
+  onSubmit,
+}: {
+  title: string;
+  submitLabel: string;
+  nameLabel: string;
+  initial?: string;
+  onClose: () => void;
+  onSubmit: (label: string) => Promise<void>;
+}) {
+  const [label, setLabel] = useState(initial);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await onSubmit(label);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save.");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <StudentDialog title={title} onClose={onClose} dirty={label.trim() !== initial.trim()}>
+      <form onSubmit={save}>
+        <label>Name
+          <input value={label} aria-label={nameLabel} onChange={(event) => setLabel(event.target.value)} />
+        </label>
+        {error ? <p className="error" role="alert">{error}</p> : null}
+        <div className="dialog-actions">
+          <button type="button" className="quiet" onClick={onClose}>Cancel</button>
+          <button type="submit" disabled={saving || !label.trim()}>{submitLabel}</button>
+        </div>
+      </form>
+    </StudentDialog>
   );
 }
 

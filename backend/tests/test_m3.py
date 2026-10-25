@@ -8,7 +8,7 @@ from openpyxl import Workbook
 
 from app.importing.parse import parse_workbook
 from app.main import create_app
-from tests.test_m2 import bootstrap
+from tests.test_m2 import bootstrap, sync_db
 
 
 @pytest.fixture
@@ -94,6 +94,39 @@ def test_accounting_import_commits_drafts_and_publishes_dated_sheet(client):
     students = client.get("/api/v1/students").json()["items"]
     assert any(item["display_name"] == "RISHA FATHIMA" for item in students)
     assert any(item["student_code"] == "IAM-000001" for item in students)
+    removed = client.delete(f"/api/v1/imports/{uploaded.json()['id']}")
+    assert removed.status_code == 422
+    remaining = {item["id"] for item in client.get("/api/v1/imports").json()["items"]}
+    assert uploaded.json()["id"] in remaining
+    assert again.json()["id"] in remaining
+    assert client.get(f"/api/v1/marksheets/{brs['id']}").status_code == 200
+    assert any(item["display_name"] == "RISHA FATHIMA" for item in client.get("/api/v1/students").json()["items"])
+
+
+def test_uncommitted_import_delete_removes_the_workbook_file(client):
+    bootstrap(client)
+    book = Workbook()
+    book.active["A1"] = "Name"
+    buffer = BytesIO()
+    book.save(buffer)
+    uploaded = client.post(
+        "/api/v1/imports",
+        files={"file": ("notes.xlsx", buffer.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    import_id = uploaded.json()["id"]
+    database = sync_db(client)
+    job = database.import_jobs.find_one({"_id": import_id})
+    stored = database.files.find_one({"_id": job["file_id"]})
+    path = Path(stored["path"])
+    assert path.is_file()
+    removed = client.delete(f"/api/v1/imports/{import_id}")
+    assert removed.status_code == 200, removed.text
+    assert client.get(f"/api/v1/imports/{import_id}").status_code == 404
+    assert client.get("/api/v1/imports").json()["items"] == []
+    assert database.files.find_one({"_id": job["file_id"]}) is None
+    assert not path.exists()
+    assert client.delete(f"/api/v1/imports/{import_id}").status_code == 404
 
 
 def _resolve(preview: dict) -> dict:

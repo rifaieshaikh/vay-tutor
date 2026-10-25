@@ -46,13 +46,11 @@ def test_branch_course_and_subject_details(client):
     assert saved.status_code == 200, saved.text
     renamed = client.patch(f"/api/v1/catalog/branch/{branch_id}", json={"name": "North hall"})
     assert renamed.status_code == 200, renamed.text
-    archived = client.patch(f"/api/v1/catalog/branch/{branch_id}", json={"archived": True})
-    assert archived.status_code == 200, archived.text
     profile = client.get(f"/api/v1/branches/{branch_id}")
     assert profile.status_code == 200, profile.text
     body = profile.json()
     assert body["name"] == "North hall"
-    assert body["archived"] is True
+    assert body["archived"] is False
     assert body["street"] == "Near the bridge"
     assert body["place"] == "Tirur"
     assert body["pin"] == "676101"
@@ -96,6 +94,13 @@ def test_branch_course_and_subject_details(client):
     morning = client.post(f"/api/v1/branches/{branch_id}/batches", json={"course_id": course_id, "name": "Morning batch"})
     assert morning.status_code == 200, morning.text
     assert database.batches.find_one({"_id": morning.json()["id"]})["session_key"] == "morning batch"
+    archived = client.patch(f"/api/v1/catalog/branch/{branch_id}", json={"archived": True})
+    assert archived.status_code == 200, archived.text
+    blocked = client.post("/api/v1/courses", json={"name": "Archive check"})
+    assert blocked.status_code == 200, blocked.text
+    refused = client.post(f"/api/v1/branches/{branch_id}/courses", json={"course_id": blocked.json()["id"]})
+    assert refused.status_code == 422
+    assert refused.json()["error"]["code"] == "catalog.archived"
 
     coded = client.patch("/api/v1/institute", json={"name": "IAM", "code": "OTHER"})
     assert coded.status_code == 422
@@ -125,6 +130,23 @@ def test_branch_course_and_subject_details(client):
     updated = database.subjects.find_one({"_id": subject_id})["units"][0]
     assert updated["name"] == "Bank reconciliation statement"
     assert updated["previous_name"] == "Bank reconciliation"
+    changed_kind = client.patch(
+        f"/api/v1/subjects/{subject_id}/items/{chapter.json()['id']}",
+        json={"name": "Bank reconciliation statement", "kind": "part"},
+    )
+    assert changed_kind.status_code == 200, changed_kind.text
+    assert changed_kind.json()["kind"] == "part"
+    moved = database.subjects.find_one({"_id": subject_id})["units"][0]
+    assert moved["id"] == chapter.json()["id"]
+    assert moved["kind"] == "part"
+    became_chapter = client.patch(
+        f"/api/v1/subjects/{subject_id}/items/{paper.json()['id']}",
+        json={"name": "Paper 1", "kind": "chapter"},
+    )
+    assert became_chapter.status_code == 200, became_chapter.text
+    assert database.papers.count_documents({"_id": paper.json()["id"]}) == 0
+    chapter_from_paper = next(item for item in database.subjects.find_one({"_id": subject_id})["units"] if item["id"] == paper.json()["id"])
+    assert chapter_from_paper["kind"] == "chapter"
 
     created_course = client.post("/api/v1/courses", json={"name": "Intermediate", "notes": "Second level"})
     assert created_course.status_code == 200, created_course.text
@@ -161,4 +183,50 @@ def test_branch_course_and_subject_details(client):
     catalog = client.get("/api/v1/catalog").json()
     listed = next(item for item in catalog["subjects"] if item["id"] == subject_id)
     assert listed["units"][0]["name"] == "Bank reconciliation statement"
-    assert listed["units"][0]["kind"] == "chapter"
+    assert listed["units"][0]["kind"] == "part"
+
+
+def test_changing_an_item_kind_updates_a_single_exam_and_refuses_a_shared_one(client):
+    bootstrap(client)
+    database = sync_db(client)
+    course_id = client.post("/api/v1/courses", json={"name": "Foundation"}).json()["id"]
+    subject_id = client.post(f"/api/v1/courses/{course_id}/subjects", json={"name": "Accounting"}).json()["id"]
+    first = client.post(f"/api/v1/subjects/{subject_id}/items", json={"name": "Journal", "kind": "chapter"})
+    second = client.post(f"/api/v1/subjects/{subject_id}/items", json={"name": "Ledger", "kind": "chapter"})
+    single = client.post(f"/api/v1/subjects/{subject_id}/items", json={"name": "Cash", "kind": "chapter"})
+    branch_id = client.post("/api/v1/branches", json={"name": "North"}).json()["id"]
+    client.post(f"/api/v1/branches/{branch_id}/courses", json={"course_id": course_id})
+    batch_id = client.post(f"/api/v1/branches/{branch_id}/batches", json={"course_id": course_id, "name": "Morning"}).json()["id"]
+    shared = client.post("/api/v1/exams", json={
+        "title": "Two chapters",
+        "exam_date": "2026-10-01",
+        "maximum": 20,
+        "subject_id": subject_id,
+        "scope": {"kind": "chapter", "item_ids": [first.json()["id"], second.json()["id"]]},
+        "batch_ids": [batch_id],
+    })
+    assert shared.status_code == 200, shared.text
+    refused = client.patch(
+        f"/api/v1/subjects/{subject_id}/items/{first.json()['id']}",
+        json={"name": "Journal", "kind": "part"},
+    )
+    assert refused.status_code == 409
+    assert refused.json()["error"]["code"] == "catalog.kind"
+    alone = client.post("/api/v1/exams", json={
+        "title": "One chapter",
+        "exam_date": "2026-10-02",
+        "maximum": 20,
+        "subject_id": subject_id,
+        "scope": {"kind": "chapter", "item_ids": [single.json()["id"]]},
+        "batch_ids": [batch_id],
+    })
+    assert alone.status_code == 200, alone.text
+    moved = client.patch(
+        f"/api/v1/subjects/{subject_id}/items/{single.json()['id']}",
+        json={"name": "Cash", "kind": "part"},
+    )
+    assert moved.status_code == 200, moved.text
+    exam = database.exams.find_one({"_id": alone.json()["id"]})
+    assert exam["scope"]["kind"] == "part"
+    assert exam["exam_type"] == "part"
+    assert exam["paper_id"] == ""

@@ -4,7 +4,9 @@ import { api, Session } from "../api";
 import { notify } from "../notify";
 import { studentRecordHref } from "../students";
 import { Band, BandMark, bandFor, bandTone } from "../bands";
-import { Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
+import { periodLabel } from "../context";
+import { Option, applyScopeChange, optionFits, scopeOptions } from "../filters";
+import { StudentDialog } from "../ui";
 
 type Performance = {
   percentage: number | null;
@@ -41,6 +43,8 @@ type Result = {
   band_place?: string | null;
   rank: number | null;
   batch_rank: number | null;
+  top_score: number | null;
+  batch_top_score: number | null;
   exam_date: string | null;
   attempt: string;
   marksheet_id?: string | null;
@@ -77,7 +81,8 @@ type Card = {
 type ExportJob = { format: "pdf" | "xlsx"; state: "queued" | "running" | "ready" | "failed"; fileId?: string | null; filename?: string | null; error?: string };
 
 const REPORT_FILTERS = ["branch_id", "course_id", "batch_id", "subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"] as const;
-const PAGE_FILTERS = ["q", "subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"] as const;
+const DIALOG_FILTERS = ["branch_id", "course_id", "period", "batch_id", "subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"] as const;
+const PAGE_FILTERS = ["q", ...DIALOG_FILTERS] as const;
 const ACADEMIC_FIELDS = [
   ["subject_id", "Subject", "subject"],
   ["paper_id", "Paper", "paper"],
@@ -86,6 +91,7 @@ const FILTER_LABELS: Record<string, string> = {
   q: "Student",
   branch_id: "Branch",
   course_id: "Course",
+  period: "Period",
   batch_id: "Batch",
   subject_id: "Subject",
   paper_id: "Paper",
@@ -119,6 +125,11 @@ function formatDate(value: string | null) {
 
 function formatPercent(value: number | null) {
   return value == null ? "—" : value.toFixed(2);
+}
+
+function formatMark(score: number | null, maximum: number | null) {
+  if (score == null) return "—";
+  return `${score} of ${maximum ?? "—"}`;
 }
 
 function progressFileStem(name: string, code: string, batch: string) {
@@ -211,7 +222,7 @@ function studentsReturn(value: string | null) {
 }
 
 function readApplied(params: URLSearchParams) {
-  return Object.fromEntries(["q", "page", ...REPORT_FILTERS].map((key) => [key, params.get(key) || ""]));
+  return Object.fromEntries(["q", "page", ...DIALOG_FILTERS].map((key) => [key, params.get(key) || ""]));
 }
 
 function periodError(from: string, to: string) {
@@ -287,9 +298,38 @@ function ReportFilters({
   onApply: () => void;
   onReset: () => void;
 }) {
+  const scope = scopeOptions(draft, options);
   return (
     <form className="report-filters" onSubmit={(event: FormEvent) => { event.preventDefault(); onApply(); }}>
       <div className="form-grid">
+        <label>
+          Branch
+          <select aria-label="Branch" value={draft.branch_id || ""} onChange={(event) => onChange("branch_id", event.target.value)}>
+            <option value="">All authorized</option>
+            {(options.branch || []).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+          </select>
+        </label>
+        <label>
+          Course
+          <select aria-label="Course" value={draft.course_id || ""} onChange={(event) => onChange("course_id", event.target.value)}>
+            <option value="">All authorized</option>
+            {scope.courses.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+          </select>
+        </label>
+        <label>
+          Period
+          <select aria-label="Period" value={draft.period || ""} onChange={(event) => onChange("period", event.target.value)}>
+            <option value="">All authorized</option>
+            {scope.periodChoices.map((key) => <option key={key} value={key}>{periodLabel(key)}</option>)}
+          </select>
+        </label>
+        <label>
+          Batch
+          <select aria-label="Batch" value={draft.batch_id || ""} onChange={(event) => onChange("batch_id", event.target.value)}>
+            <option value="">All authorized</option>
+            {scope.batches.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+          </select>
+        </label>
         {ACADEMIC_FIELDS.map(([key, label, dimension]) => (
           <label key={key}>
             {label}
@@ -498,6 +538,7 @@ export function CardsPage({ session }: { session: Session }) {
   function labelFor(key: string, value: string) {
     if (key === "attempt") return value === "retest" ? "Retest" : "Original";
     if (key === "exam_date_from" || key === "exam_date_to") return formatDate(value);
+    if (key === "period") return periodLabel(value);
     const dimension = DIMENSIONS[key];
     return (dimension && optionLabel(dimension, value)) || value;
   }
@@ -507,11 +548,8 @@ export function CardsPage({ session }: { session: Session }) {
   }
 
   function editDraft(key: string, value: string) {
-    const merged = { ...draft, [key]: value };
-    const fitted = clearIncompatible(merged, options, key);
-    const opened = value ? { filters: fitted.filters, cleared: [] as string[] } : clearDescendants(fitted.filters, key);
-    const cleared = [...fitted.cleared, ...opened.cleared];
-    setDraft(value ? fitted.filters : opened.filters);
+    const { filters: next, cleared } = applyScopeChange(draft, options, key, value);
+    setDraft(next);
     setRangeError("");
     const labels = cleared.map((field) => FILTER_LABELS[field] || field).join(", ");
     if (labels) notify(value ? `${labels} cleared because it does not belong with that choice.` : `${labels} cleared because All authorized includes each of them.`);
@@ -548,7 +586,7 @@ export function CardsPage({ session }: { session: Session }) {
     }
     const next = new URLSearchParams(params);
     next.delete("page");
-    for (const key of ["subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"]) {
+    for (const key of DIALOG_FILTERS) {
       next.delete(key);
       if (draft[key]) next.set(key, draft[key]);
     }
@@ -559,7 +597,7 @@ export function CardsPage({ session }: { session: Session }) {
   function resetDraft() {
     setDraft((current) => {
       const next = { ...current };
-      for (const key of ["subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"]) next[key] = "";
+      for (const key of DIALOG_FILTERS) next[key] = "";
       return next;
     });
     setRangeError("");
@@ -589,13 +627,14 @@ export function CardsPage({ session }: { session: Session }) {
   }
 
   function removeFilter(key: string) {
-    const opened = clearDescendants({ ...applied, [key]: "" }, key);
+    const opened = applyScopeChange(applied, options, key, "");
     const next = new URLSearchParams(params);
     next.delete("page");
     for (const field of PAGE_FILTERS) {
       if (opened.filters[field]) next.set(field, opened.filters[field]);
       else next.delete(field);
     }
+    if (key === "q") setQuery("");
     write(next);
   }
 
@@ -651,8 +690,8 @@ export function CardsPage({ session }: { session: Session }) {
   }
 
   const active = PAGE_FILTERS.filter((key) => applied[key]);
-  const draftComparable = Object.fromEntries(["q", ...REPORT_FILTERS].map((key) => [key, draft[key] || ""]));
-  const appliedComparable = Object.fromEntries(["q", ...REPORT_FILTERS].map((key) => [key, applied[key] || ""]));
+  const draftComparable = Object.fromEntries(["q", ...DIALOG_FILTERS].map((key) => [key, draft[key] || ""]));
+  const appliedComparable = Object.fromEntries(["q", ...DIALOG_FILTERS].map((key) => [key, applied[key] || ""]));
   const dirty = JSON.stringify(draftComparable) !== JSON.stringify(appliedComparable);
   const canPdf = session.actions.includes("export.pdf");
   const canSheet = session.actions.includes("export.xlsx");
@@ -662,11 +701,11 @@ export function CardsPage({ session }: { session: Session }) {
   const filterButton = (
     <div className="icon-actions">
       {active.length ? <button type="button" className="secondary" onClick={resetFilters}>Clear</button> : null}
-      <button type="button" className="secondary" onClick={openFilters}>More filters{active.filter((key) => key !== "q").length ? ` (${active.filter((key) => key !== "q").length})` : ""}</button>
+      <button type="button" className="secondary" onClick={openFilters}>Filters{active.filter((key) => key !== "q").length ? ` (${active.filter((key) => key !== "q").length})` : ""}</button>
     </div>
   );
   const filters = filtersOpen ? (
-    <Dialog title="Report filters" onClose={closeFilters}>
+    <StudentDialog title="Filters" onClose={closeFilters}>
       <ReportFilters
         draft={draft}
         options={options}
@@ -676,7 +715,7 @@ export function CardsPage({ session }: { session: Session }) {
         onApply={applyDraft}
         onReset={resetDraft}
       />
-    </Dialog>
+    </StudentDialog>
   ) : null;
   const appliedFilters = (
     <>
@@ -798,7 +837,7 @@ export function CardsPage({ session }: { session: Session }) {
               <div><span>Missing</span><strong>{performance?.missing ?? 0}</strong><small>No mark entered</small></div>
               <div><span>Absent</span><strong>{performance?.absent ?? 0}</strong><small>Marked absent</small></div>
             </div>
-            {shown.partial ? <p className="meta">{shown.coverage_note || "Authorized subjects only."} Rank stays hidden where this card does not include the whole cohort.</p> : null}
+            {shown.partial ? <p className="meta">{shown.coverage_note || "Authorized subjects only."} Rank and the top mark stay hidden where this card does not include the whole cohort.</p> : null}
             <nav className="page-tabs academic-panels" aria-label="Progress card">
               {([["subjects", "Subjects"], ["exams", "Exams"], ["attention", "Needs attention"]] as const).map(([id, label]) => (
                 <button key={id} type="button" aria-selected={panel === id} onClick={() => setPanel(id)}>{label}</button>
@@ -893,6 +932,7 @@ export function CardsPage({ session }: { session: Session }) {
                       <th>Results</th>
                       <th>Band</th>
                       <th>Rank</th>
+                      <th>Top mark</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -909,6 +949,7 @@ export function CardsPage({ session }: { session: Session }) {
                         <td className="nowrap">{result.score ?? "—"} of {result.maximum ?? "—"}</td>
                         <td>{result.band ? <BandMark band={result.band} name={result.band_name} place={result.band_place} /> : result.status}</td>
                         <td>{result.rank ?? "—"}{result.batch_rank != null ? ` · batch ${result.batch_rank}` : ""}</td>
+                        <td className="nowrap">{formatMark(result.top_score, result.maximum)}{result.batch_top_score != null ? ` · batch ${formatMark(result.batch_top_score, result.maximum)}` : ""}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -972,7 +1013,7 @@ export function CardsPage({ session }: { session: Session }) {
           <div><span>Incomplete results</span><strong>{summary.missing + summary.absent}</strong><small>{summary.missing} missing · {summary.absent} absent</small></div>
         </div>
       ) : null}
-      {!loading && total === 0 ? <p>{active.length ? "No students match these filters. Clear them to see the full list." : (params.get("branch_id") || params.get("course_id") || params.get("batch_id") || params.get("period") ? "No students match this context." : "No students yet.")}</p> : null}
+      {!loading && total === 0 ? <p>{active.length ? "No students match these filters. Clear them to see the full list." : "No students yet."}</p> : null}
       {students.length > 0 ? (
         <div className="table-wrap">
           <table className="people-table">

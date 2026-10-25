@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 
 from bson import ObjectId
-from fastapi import APIRouter, File, Header, Request, UploadFile
+from fastapi import APIRouter, File, Form, Header, Request, UploadFile
 from fastapi.responses import Response
 from openpyxl import load_workbook
 from pydantic import BaseModel, ConfigDict
@@ -16,9 +16,16 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from app.acl import allows
-from app.db import allocate_student_code
+from app.db import allocate_enrollment_code, allocate_student_code
 from app.deps import current_user, db, write_audit
-from app.enrollment import enrollment_document, name_conflicts, name_document, require_open_batch
+from app.enrollment import (
+    assign_enrollment_code,
+    batch_is_closed,
+    enrollment_document,
+    name_conflicts,
+    name_document,
+    require_open_batch,
+)
 from app.errors import AppError
 from app.security import name_key, phone_key
 
@@ -317,6 +324,7 @@ class ImportPlanBody(BaseModel):
     date_format: str = ""
     formulas: dict[str, dict] = {}
     decisions: list[ImportDecisionBody] = []
+    identity_mode: str = "manual"
 
 
 class ImportCommitBody(BaseModel):
@@ -1737,6 +1745,40 @@ async def commit_enquiries(request: Request, body: EnquiryCommit) -> dict:
     return {"created": len(created), "ids": created}
 
 
+async def _import_scope(request: Request, user: dict, branch_id: str, course_id: str) -> None:
+    branch = await db(request).branches.find_one({"_id": branch_id, "institute_id": user["institute_id"]})
+    course = await db(request).courses.find_one({"_id": course_id, "institute_id": user["institute_id"]})
+    offering = await db(request).offerings.find_one(
+        {"institute_id": user["institute_id"], "branch_id": branch_id, "course_id": course_id}
+    )
+    if branch is None or course is None or offering is None:
+        raise AppError(422, "import.scope", "Choose a branch and a course that branch offers.")
+
+
+def _import_summary(row: dict) -> dict:
+    created = (row.get("result") or {}).get("created") or []
+    return {
+        "id": row["_id"],
+        "filename": row.get("filename") or "",
+        "status": row.get("status") or "open",
+        "created_at": row["created_at"].isoformat() if row.get("created_at") is not None else None,
+        "branch_id": row.get("branch_id") or "",
+        "course_id": row.get("course_id") or "",
+        "batch_id": row.get("batch_id") or "",
+        "created_count": len(created) if isinstance(created, list) else 0,
+    }
+
+
+@router.get("/enquiry-imports")
+async def list_enquiry_imports(request: Request) -> dict:
+    user = await current_user(request)
+    _reader(user)
+    rows = await db(request).enquiry_imports.find(
+        {"institute_id": user["institute_id"]}, {"content": 0}
+    ).sort("created_at", -1).to_list(200)
+    return {"items": [_import_summary(row) for row in rows]}
+
+
 @router.get("/enquiry-imports/template")
 async def enquiry_import_template(request: Request) -> Response:
     from app.admissions.enquiry_import import template_workbook
@@ -1751,13 +1793,40 @@ async def enquiry_import_template(request: Request) -> Response:
 
 
 @router.post("/enquiry-imports")
-async def create_enquiry_import(request: Request, file: UploadFile = File(...)) -> dict:
+async def create_enquiry_import(
+    request: Request,
+    file: UploadFile = File(...),
+    branch_id: str = Form(...),
+    course_id: str = Form(...),
+) -> dict:
     from app.admissions.enquiry_import import store_upload
 
     user = await current_user(request)
     _writer(user)
+    await _import_scope(request, user, branch_id, course_id)
     data = await file.read()
-    return await store_upload(request, user, file.filename or "import", data)
+    return await store_upload(request, user, file.filename or "import", data, branch_id, course_id)
+
+
+@router.delete("/enquiry-imports/{operation_id}")
+async def delete_enquiry_import(request: Request, operation_id: str) -> dict:
+    from app.admissions.enquiry_import import _operation
+
+    user = await current_user(request)
+    _writer(user)
+    row = await _operation(request, user, operation_id)
+    if row.get("status") == "committed":
+        raise AppError(422, "import.committed", "A saved import cannot be deleted.")
+    await db(request).enquiry_imports.delete_one({"_id": row["_id"], "institute_id": user["institute_id"]})
+    await write_audit(
+        request,
+        user,
+        "enquiry.import.delete",
+        {"filename": row.get("filename") or ""},
+        None,
+        {"institute_id": user["institute_id"]},
+    )
+    return {"id": row["_id"]}
 
 
 @router.get("/enquiry-imports/{operation_id}")
@@ -1828,6 +1897,16 @@ async def use_enquiry_mapping(request: Request, operation_id: str, body: Mapping
     return await apply_mapping(request, user, operation_id, body.mapping_id)
 
 
+@router.get("/admission-imports")
+async def list_admission_imports(request: Request) -> dict:
+    user = await current_user(request)
+    _reader(user)
+    rows = await db(request).admission_imports.find(
+        {"institute_id": user["institute_id"]}, {"content": 0}
+    ).sort("created_at", -1).to_list(200)
+    return {"items": [_import_summary(row) for row in rows]}
+
+
 @router.get("/admission-imports/template")
 async def admission_import_template(request: Request) -> Response:
     from app.admissions.admission_import import template_workbook
@@ -1842,12 +1921,43 @@ async def admission_import_template(request: Request) -> Response:
 
 
 @router.post("/admission-imports")
-async def create_admission_import(request: Request, file: UploadFile = File(...)) -> dict:
+async def create_admission_import(
+    request: Request,
+    file: UploadFile = File(...),
+    branch_id: str = Form(...),
+    course_id: str = Form(...),
+    batch_id: str = Form(...),
+) -> dict:
     from app.admissions.admission_import import store_upload
 
     user = await current_user(request)
     _writer(user)
-    return await store_upload(request, user, file.filename or "import", await file.read())
+    await _import_scope(request, user, branch_id, course_id)
+    await _eligible_batch(request, user, {"course_id": course_id}, branch_id, batch_id)
+    return await store_upload(
+        request, user, file.filename or "import", await file.read(), branch_id, course_id, batch_id
+    )
+
+
+@router.delete("/admission-imports/{operation_id}")
+async def delete_admission_import(request: Request, operation_id: str) -> dict:
+    from app.admissions.admission_import import _operation
+
+    user = await current_user(request)
+    _writer(user)
+    row = await _operation(request, user, operation_id)
+    if row.get("status") == "committed":
+        raise AppError(422, "import.committed", "A saved import cannot be deleted.")
+    await db(request).admission_imports.delete_one({"_id": row["_id"], "institute_id": user["institute_id"]})
+    await write_audit(
+        request,
+        user,
+        "admission.import.delete",
+        {"filename": row.get("filename") or ""},
+        None,
+        {"institute_id": user["institute_id"]},
+    )
+    return {"id": row["_id"]}
 
 
 @router.get("/admission-imports/{operation_id}")
@@ -2437,87 +2547,98 @@ async def _commit_student(
     student_id: str | None,
     admission_id: str,
     decision: str,
+    session=None,
+    announce: bool = True,
 ) -> dict:
     institute_id = user["institute_id"]
     profile = _profile_from_admission(admission)
     records = admission.get("academic_records") or []
     business = admission.get("business_answers") or []
-    created = student_id is None
+
+    async def enroll(active) -> dict:
+        created_now = student_id is None
+        current_id = student_id
+        if created_now:
+            code = await allocate_student_code(db(request), active, "IAM")
+            current_id = str(ObjectId())
+            document = {
+                "_id": current_id,
+                "institute_id": institute_id,
+                "student_code": code,
+                "display_name": admission.get("name") or "",
+                "name_key": admission.get("name_key") or name_key(admission.get("name") or ""),
+                "edit_version": 0,
+                "academic_records": records,
+                "course_profiles": [{"course_id": admission.get("course_id"), "answers": answers}] if answers else [],
+                "business_answers": business,
+                **{key: value for key, value in profile.items() if value},
+                **{key: value for key, value in _mirror_legacy(records).items() if value},
+            }
+            if profile.get("phone"):
+                document["phone_key"] = phone_key(profile["phone"])
+            await db(request).students.insert_one(document, session=active)
+        else:
+            student = await db(request).students.find_one({"_id": current_id}, session=active)
+            if student is None:
+                raise AppError(404, "not_found", "That record was not found.")
+        enrollment_id = await _ensure_enrollment(
+            request, active, institute_id, current_id, batch, admission.get("name_key") or ""
+        )
+        await db(request).admissions.update_one(
+            {"_id": admission_id},
+            {
+                "$set": {
+                    "status": "converted",
+                    "student_id": current_id,
+                    "enrollment_id": enrollment_id,
+                    "branch_id": batch.get("branch_id"),
+                    "batch_id": batch["_id"],
+                    "updated_at": _now(),
+                    "match_decision": decision or "create",
+                    "match_student_id": "" if created_now else current_id,
+                },
+                "$push": {
+                    "events": _event(
+                        "enrolled",
+                        f"Enrolled in {batch.get('name') or 'the batch'}.",
+                        user.get("name") or "",
+                    )
+                },
+            },
+            session=active,
+        )
+        return {"id": current_id, "created": created_now, "enrollment_id": enrollment_id}
+
     try:
-        async with await request.app.state.client.start_session() as session:
-            async with session.start_transaction():
-                if created:
-                    code = await allocate_student_code(db(request), session, "IAM")
-                    student_id = str(ObjectId())
-                    document = {
-                        "_id": student_id,
-                        "institute_id": institute_id,
-                        "student_code": code,
-                        "display_name": admission.get("name") or "",
-                        "name_key": admission.get("name_key") or name_key(admission.get("name") or ""),
-                        "edit_version": 0,
-                        "academic_records": records,
-                        "course_profiles": [{"course_id": admission.get("course_id"), "answers": answers}]
-                        if answers
-                        else [],
-                        "business_answers": business,
-                        **{key: value for key, value in profile.items() if value},
-                        **{key: value for key, value in _mirror_legacy(records).items() if value},
-                    }
-                    if profile.get("phone"):
-                        document["phone_key"] = phone_key(profile["phone"])
-                    await db(request).students.insert_one(document, session=session)
-                else:
-                    student = await db(request).students.find_one({"_id": student_id}, session=session)
-                    if student is None:
-                        raise AppError(404, "not_found", "That record was not found.")
-                enrollment_id = await _ensure_enrollment(
-                    request, session, institute_id, student_id, batch, admission.get("name_key") or ""
-                )
-                await db(request).admissions.update_one(
-                    {"_id": admission_id},
-                    {
-                        "$set": {
-                            "status": "converted",
-                            "student_id": student_id,
-                            "enrollment_id": enrollment_id,
-                            "branch_id": batch.get("branch_id"),
-                            "batch_id": batch["_id"],
-                            "updated_at": _now(),
-                            "match_decision": decision or "create",
-                        },
-                        "$push": {
-                            "events": _event(
-                                "enrolled",
-                                f"Enrolled in {batch.get('name') or 'the batch'}.",
-                                user.get("name") or "",
-                            )
-                        },
-                    },
-                    session=session,
-                )
+        if session is not None:
+            result = await enroll(session)
+        else:
+            async with await request.app.state.client.start_session() as owned:
+                async with owned.start_transaction():
+                    result = await enroll(owned)
     except DuplicateKeyError as exc:
         raise AppError(
             409,
             "student.identity",
             "Another student in that batch already uses this name. Add the course to that student instead.",
         ) from exc
-    from app.business import write_business
+    if announce:
+        from app.business import write_business
 
-    await write_business(
-        db(request),
-        user,
-        action="Enrolled a student",
-        record=admission.get("name") or "",
-        href=f"/students/{student_id}",
-        permission="student.lookup",
-        collection="students",
-        record_id=student_id,
-        course_id=admission.get("course_id") or "",
-        branch_id=batch.get("branch_id") or "",
-        batch_id=batch["_id"],
-    )
-    return {"id": student_id, "created": created, "enrollment_id": enrollment_id}
+        await write_business(
+            db(request),
+            user,
+            action="Enrolled a student",
+            record=admission.get("name") or "",
+            href=f"/students/{result['id']}",
+            permission="student.lookup",
+            collection="students",
+            record_id=result["id"],
+            course_id=admission.get("course_id") or "",
+            branch_id=batch.get("branch_id") or "",
+            batch_id=batch["_id"],
+        )
+    return result
 
 
 def _profile_from_admission(admission: dict) -> dict:
@@ -2544,6 +2665,8 @@ async def _ensure_enrollment(
     batch_id = batch["_id"]
     already = await db(request).enrollments.find_one({"student_id": student_id, "batch_id": batch_id}, session=session)
     if already:
+        if not already.get("enrollment_code"):
+            await assign_enrollment_code(db(request), already, session)
         return already["_id"]
     require_open_batch(batch)
     if key and await name_conflicts(db(request), batch_id, [key], student_id, session):
@@ -2561,6 +2684,7 @@ async def _ensure_enrollment(
             branch_id=batch.get("branch_id"),
             course_id=batch.get("course_id"),
             batch_id=batch_id,
+            enrollment_code=await allocate_enrollment_code(db(request), session),
         ),
         session=session,
     )
@@ -2753,7 +2877,7 @@ async def _eligible_batch_choices(request: Request, user: dict, row: dict) -> li
                 "name": batch.get("name") or "",
                 "started_on": batch.get("started_on") or "",
                 "ended_on": batch.get("ended_on") or "",
-                "open": not batch.get("ended_on"),
+                "open": not batch_is_closed(batch),
             }
         )
     choices.sort(key=lambda item: (item["branch_name"].casefold(), item["name"].casefold()))
@@ -2793,7 +2917,7 @@ async def _selection_context(request: Request, row: dict) -> dict:
         if batch:
             batch_name = batch.get("name") or ""
             batch_open = (
-                not batch.get("ended_on")
+                not batch_is_closed(batch)
                 and batch.get("branch_id") == branch_id
                 and batch.get("course_id") == (row.get("course_id") or "")
             )
@@ -3335,7 +3459,7 @@ async def _list_people(
             batch = batches.get(row.get("batch_id") or "")
             batch_open = bool(
                 batch
-                and not batch.get("ended_on")
+                and not batch_is_closed(batch)
                 and batch.get("branch_id") == (row.get("branch_id") or "")
                 and batch.get("course_id") == course_key
             )

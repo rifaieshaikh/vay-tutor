@@ -4,6 +4,7 @@ import { api, ApiError } from "../api";
 import { notify } from "../notify";
 import { safeBatchWorkspace } from "../students";
 import { Icon, StudentDialog } from "../ui";
+import { kindLabel, useCurriculumKinds } from "../academics/kinds";
 
 type UserGrant = { role: string; scope: Record<string, string | null>; unit_ids?: string[] };
 type Grant = { id: string; role: string; actions: string[]; scope: Record<string, string | null>; unit_ids?: string[]; consequence: string };
@@ -123,7 +124,7 @@ export function TeachersPage() {
               <tr>
                 <th>Name</th>
                 <th>Account</th>
-                <th>Email</th>
+                <th>Username</th>
                 <th>Courses</th>
                 <th>Status</th>
                 <th>Actions</th>
@@ -157,7 +158,7 @@ export function TeachersPage() {
         <StudentDialog title="Filters" onClose={() => setFiltersOpen(false)}>
           <form className="form-grid" onSubmit={(event) => { event.preventDefault(); const next = new URLSearchParams(); if (draftQuery.trim()) next.set("q", draftQuery.trim()); setParams(next); setFiltersOpen(false); }}>
             <label className="span-2">Search
-              <input value={draftQuery} aria-label="Search" placeholder="Name or email" onChange={(event) => setDraftQuery(event.target.value)} />
+              <input value={draftQuery} aria-label="Search" placeholder="Name or username" onChange={(event) => setDraftQuery(event.target.value)} />
             </label>
             <div className="dialog-actions span-2">
               <button type="button" className="quiet" onClick={() => setDraftQuery("")}>Reset</button>
@@ -344,6 +345,7 @@ function CourseAssignment({
   const [acknowledge, setAcknowledge] = useState(false);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const kinds = useCurriculumKinds();
   const choices = catalog.courses.filter((item) => !item.archived && (item.id === courseId || !taken.includes(item.id)));
   const subjects = catalog.subjects.filter((item) => item.course_id === course && !item.archived).sort((left, right) => left.name.localeCompare(right.name));
   const ready = Boolean(course && Object.keys(included).length);
@@ -444,7 +446,7 @@ function CourseAssignment({
                   ))}
                   {units.map((unit) => (
                     <button key={unit.id} type="button" className={pick.units.includes(unit.id) ? "permission is-selected" : "permission"} aria-pressed={pick.units.includes(unit.id)} onClick={() => togglePart(subject.id, "units", unit.id)}>
-                      {unit.name} · {unit.kind === "module" ? "Module" : "Chapter"}
+                      {unit.name} · {kindLabel(kinds, unit.kind)}
                     </button>
                   ))}
                 </div>
@@ -470,7 +472,7 @@ function TeacherForm({ onClose, onSaved }: { onClose: () => void; onSaved: (teac
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const account = kind === "app";
-  const ready = Boolean(name.trim() && (!account || (email.trim() && password.length >= 10)));
+  const ready = Boolean(name.trim() && (!account || (email.trim() && password)));
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -503,11 +505,11 @@ function TeacherForm({ onClose, onSaved }: { onClose: () => void; onSaved: (teac
         </label>
         {account ? (
           <>
-            <label>Email
-              <input type="email" value={email} aria-label="Email" onChange={(event) => setEmail(event.target.value)} />
+            <label>Username
+              <input type="text" value={email} aria-label="Username" onChange={(event) => setEmail(event.target.value)} />
             </label>
             <label>Password
-              <input type="password" value={password} minLength={10} aria-label="Password" onChange={(event) => setPassword(event.target.value)} />
+              <input type="password" value={password} aria-label="Password" onChange={(event) => setPassword(event.target.value)} />
             </label>
           </>
         ) : null}

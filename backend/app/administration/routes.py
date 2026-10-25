@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
+from app.academics.curriculum import DEFAULT_CURRICULUM_KINDS, DEFAULT_EXAM_TYPES
 from app.accounts import (
     _checked_actions,
     _ensure_admin_remains,
@@ -48,6 +49,7 @@ from app.security import (
     name_key,
     new_token,
     new_totp_secret,
+    password_error,
     recovery_codes,
     totp_uri,
     verify_password,
@@ -60,8 +62,8 @@ class BootstrapBody(BaseModel):
     institute_name: str = Field(min_length=1)
     institute_code: str = Field(min_length=1)
     admin_name: str = Field(min_length=1)
-    admin_email: str = Field(min_length=3)
-    admin_password: str = Field(min_length=10)
+    admin_email: str = Field(min_length=1)
+    admin_password: str = Field(min_length=1)
 
 
 class LoginBody(BaseModel):
@@ -78,12 +80,12 @@ class ChallengeBody(BaseModel):
 class RecoveryBody(BaseModel):
     email: str
     recovery_code: str
-    new_password: str = Field(min_length=10)
+    new_password: str = Field(min_length=1)
 
 
 class PasswordBody(BaseModel):
     current_password: str
-    new_password: str = Field(min_length=10)
+    new_password: str = Field(min_length=1)
 
 
 class FactoryResetBody(BaseModel):
@@ -92,8 +94,8 @@ class FactoryResetBody(BaseModel):
 
 class UserBody(BaseModel):
     name: str = Field(min_length=1)
-    email: str = Field(min_length=3)
-    password: str = Field(min_length=10)
+    email: str = Field(min_length=1)
+    password: str = Field(min_length=1)
     role: str
     scope: dict[str, Any] = Field(default_factory=dict)
     acknowledge_scope: bool = False
@@ -183,6 +185,9 @@ async def bootstrap(request: Request, body: BootstrapBody):
 
     if await db(request).institutes.count_documents({}):
         raise AppError(409, "bootstrap.closed", "This server already has an institute.")
+    problem = password_error(body.admin_password)
+    if problem:
+        raise AppError(422, "auth.password", problem, field="admin_password")
     institute_id = new_id()
     user_id = new_id()
     codes = recovery_codes()
@@ -196,6 +201,8 @@ async def bootstrap(request: Request, body: BootstrapBody):
                         "name": body.institute_name.strip(),
                         "code": body.institute_code.strip(),
                         "timezone": "Asia/Kolkata",
+                        "curriculum_kinds": [dict(item) for item in DEFAULT_CURRICULUM_KINDS],
+                        "exam_types": [dict(item) for item in DEFAULT_EXAM_TYPES],
                     },
                     session=session,
                 )
@@ -278,18 +285,34 @@ class InstituteTimezone(BaseModel):
 
 
 @router.patch("/institute")
-async def update_institute_timezone(request: Request, body: InstituteTimezone) -> dict:
+async def update_institute_timezone(request: Request) -> dict:
+    from pydantic import ValidationError
+
+    from app.academics.catalog import PlaceBody, save_institute
     from app.clock import require_timezone
 
-    user = await current_user(request)
-    require(user, "grant.manage", institute_resource(user))
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise AppError(422, "catalog.profile", "That field cannot be changed here.")
+    if "timezone" in payload:
+        try:
+            body = InstituteTimezone.model_validate(payload)
+        except ValidationError as exc:
+            raise AppError(422, "institute.timezone", "Choose a known timezone.", field="timezone") from exc
+        user = await current_user(request)
+        require(user, "grant.manage", institute_resource(user))
+        try:
+            zone = require_timezone(body.timezone)
+        except ValueError:
+            raise AppError(422, "institute.timezone", "Choose a known timezone.", field="timezone") from None
+        await db(request).institutes.update_one({"_id": user["institute_id"]}, {"$set": {"timezone": zone}})
+        await write_audit(request, user, "institute.timezone", None, {"timezone": zone}, institute_resource(user))
+        return await public_institute(request, user["institute_id"])
     try:
-        zone = require_timezone(body.timezone)
-    except ValueError:
-        raise AppError(422, "institute.timezone", "Choose a known timezone.", field="timezone") from None
-    await db(request).institutes.update_one({"_id": user["institute_id"]}, {"$set": {"timezone": zone}})
-    await write_audit(request, user, "institute.timezone", None, {"timezone": zone}, institute_resource(user))
-    return await public_institute(request, user["institute_id"])
+        place = PlaceBody.model_validate(payload)
+    except ValidationError as exc:
+        raise AppError(422, "catalog.profile", "That field cannot be changed here.") from exc
+    return await save_institute(request, place)
 
 
 @router.post("/auth/login")
@@ -306,7 +329,7 @@ async def login(request: Request, body: LoginBody):
     user = await db(request).users.find_one({"email_key": email_key, "active": True})
     if user is None or not verify_password(body.password, user["password_hash"]):
         await db(request).login_attempts.insert_one({"email_key": email_key, "at": _now()})
-        raise AppError(401, "auth.invalid", "The email or password is not correct.")
+        raise AppError(401, "auth.invalid", "The username or password is not correct.")
     grants = await grants_for(request, user["_id"])
     needs_totp = settings(request).deployment_mode == "cloud" and allows(
         grants, "grant.manage", {"institute_id": user["institute_id"]}
@@ -430,7 +453,10 @@ async def session(request: Request) -> dict:
 async def change_password(request: Request, body: PasswordBody) -> dict:
     user = await current_user(request)
     if not verify_password(body.current_password, user["password_hash"]):
-        raise AppError(401, "auth.invalid", "The email or password is not correct.")
+        raise AppError(401, "auth.invalid", "The username or password is not correct.")
+    problem = password_error(body.new_password)
+    if problem:
+        raise AppError(422, "auth.password", problem, field="new_password")
     await db(request).users.update_one(
         {"_id": user["_id"]}, {"$set": {"password_hash": hash_password(body.new_password)}}
     )
@@ -445,7 +471,10 @@ async def redeem(request: Request, body: RecoveryBody):
     user = await db(request).users.find_one({"email_key": name_key(body.email), "active": True})
     code_hash = hash_token(body.recovery_code.strip().upper())
     if user is None or code_hash not in user.get("recovery_hashes", []):
-        raise AppError(401, "auth.invalid", "The email or password is not correct.")
+        raise AppError(401, "auth.invalid", "The username or password is not correct.")
+    problem = password_error(body.new_password)
+    if problem:
+        raise AppError(422, "auth.password", problem, field="new_password")
     remaining = [item for item in user["recovery_hashes"] if item != code_hash]
     await db(request).users.update_one(
         {"_id": user["_id"]},
@@ -532,6 +561,9 @@ async def list_users(request: Request) -> dict:
 async def create_user(request: Request, body: UserBody) -> dict:
     actor = await current_user(request)
     require(actor, "user.manage", institute_resource(actor))
+    problem = password_error(body.password)
+    if problem:
+        raise AppError(422, "auth.password", problem, field="password")
     role = await _role(request, actor["institute_id"], body.role)
     scope = clean_scope(body.scope, actor["institute_id"])
     consequence = _guard_delegate(actor, scope, _role_actions(role), body.acknowledge_scope)
@@ -552,7 +584,7 @@ async def create_user(request: Request, body: UserBody) -> dict:
             }
         )
     except DuplicateKeyError:
-        raise AppError(409, "user.exists", "A user with that email already exists.") from None
+        raise AppError(409, "user.exists", "A user with that username already exists.") from None
     grant = {
         "_id": new_id(),
         "institute_id": actor["institute_id"],

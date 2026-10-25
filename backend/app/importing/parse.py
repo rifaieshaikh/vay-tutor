@@ -31,7 +31,7 @@ _BATCH_RE = re.compile(
     r"\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\b[\s.\-/]*(\d{2,4})",
     re.IGNORECASE,
 )
-_MARK_RE = re.compile(r"MARK\s*\(\s*(\d+)\s*\)", re.IGNORECASE)
+_MARK_RE = re.compile(r"(?<![A-Za-z])MARKS?(?:\s*\(\s*(\d+)\s*\))?$", re.IGNORECASE)
 _PAPER_RE = re.compile(r"PAPER\s*-?\s*(\d+)\s*-\s*(.+)", re.IGNORECASE)
 _LEGEND = ("more than 60", "between 40", "less than 40", "safe zone", "fifty-fifty", "danger zone", "learn, grow")
 
@@ -53,12 +53,24 @@ def workbook_rows(data: bytes) -> dict[str, list[dict]]:
     """Every non-empty row, with the role the opening lines play."""
     try:
         workbook = load_workbook(BytesIO(data), data_only=False, read_only=False)
+        cached = load_workbook(BytesIO(data), data_only=True, read_only=False)
     except Exception as exc:
         raise ValueError(f"The workbook could not be read: {exc}") from exc
     found = {}
     for sheet_name in workbook.sheetnames:
-        found[sheet_name] = _source_rows(_grid(workbook[sheet_name]))
+        grid = _grid(workbook[sheet_name])
+        shown = _grid(cached[sheet_name]) if sheet_name in cached.sheetnames else []
+        for row_index, row in enumerate(grid):
+            if row_index >= len(shown):
+                break
+            for col_index, value in enumerate(row):
+                if isinstance(value, str) and value.startswith("=") and col_index < len(shown[row_index]):
+                    replacement = shown[row_index][col_index]
+                    if replacement is not None:
+                        row[col_index] = replacement
+        found[sheet_name] = _source_rows(grid)
     workbook.close()
+    cached.close()
     return found
 
 
@@ -176,8 +188,10 @@ def _cell_text(value) -> str:
         return value.date().isoformat()
     if isinstance(value, date):
         return value.isoformat()
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return f"{round(value, 4):.4f}".rstrip("0").rstrip(".")
     return str(value).strip()
 
 
@@ -190,8 +204,8 @@ def _grid(worksheet) -> list[list]:
 
 def _header_row(rows: list[list]) -> int | None:
     for index, row in enumerate(rows):
-        texts = [str(cell).strip().upper() for cell in row if isinstance(cell, str)]
-        if "NAME" in texts and any(_MARK_RE.search(text) for text in texts):
+        texts = [str(cell).strip() for cell in row if isinstance(cell, str) and str(cell).strip()]
+        if any(text.upper() == "NAME" for text in texts) and any(_MARK_RE.search(text) for text in texts):
             return index
     return None
 
@@ -247,18 +261,24 @@ def _score_groups(rows: list[list], header_index: int | None) -> list[dict]:
     if header_index is None:
         return []
     header = rows[header_index]
+    name_column = next(
+        (column for column, cell in enumerate(header) if isinstance(cell, str) and cell.strip().upper() == "NAME"),
+        None,
+    )
+    if name_column is None:
+        return []
     groups = []
     for column, cell in enumerate(header):
-        if not isinstance(cell, str):
+        if not isinstance(cell, str) or column == name_column:
             continue
-        match = _MARK_RE.search(cell)
+        match = _MARK_RE.search(cell.strip())
         if not match:
             continue
-        maximum = int(match.group(1))
+        maximum = int(match.group(1)) if match.group(1) else None
         rank_column = column + 2 if column + 2 < len(header) else None
         students = []
         for offset, row in enumerate(rows[header_index + 1 :], start=header_index + 2):
-            name = row[1] if len(row) > 1 else None
+            name = row[name_column] if name_column < len(row) else None
             if not isinstance(name, str) or not name.strip():
                 continue
             if _is_legend(name):
@@ -285,9 +305,9 @@ def _is_legend(name: str) -> bool:
     return any(phrase in lowered for phrase in _LEGEND)
 
 
-def _student(name: str, raw, source_rank, row_number: int, column: int, maximum: int) -> dict:
+def _student(name: str, raw, source_rank, row_number: int, column: int, maximum: int | None) -> dict:
     status, score = _mark(raw, maximum)
-    percentage = (score / maximum * 100) if status == "scored" else None
+    percentage = (score / maximum * 100) if status == "scored" and maximum else None
     return {
         "row": row_number,
         "column": column,
@@ -303,15 +323,15 @@ def _student(name: str, raw, source_rank, row_number: int, column: int, maximum:
     }
 
 
-def _mark(raw, maximum: int) -> tuple[str, float | None]:
+def _mark(raw, maximum: int | None) -> tuple[str, float | None]:
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return "missing", None
     if isinstance(raw, str) and raw.strip().upper() in {"A", "AB"}:
         return "absent", None
     if isinstance(raw, str):
         return "invalid", None
-    if isinstance(raw, (int, float)):
-        if raw < 0 or raw > maximum:
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        if raw < 0 or (maximum is not None and raw > maximum):
             return "invalid", float(raw)
         return "scored", float(raw)
     return "invalid", None

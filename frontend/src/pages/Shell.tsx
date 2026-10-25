@@ -1,7 +1,7 @@
 import { ReactNode, useEffect, useRef } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
-import { ContextBar, contextSearch, showsContext } from "../context";
+import { contextSearch } from "../context";
 import { PrimaryNav, QuickNav } from "../navigation";
 import { Breadcrumbs, pageOrientation, useRecordTitle } from "../orientation";
 
@@ -52,7 +52,6 @@ export function Shell({
         <PrimaryNav session={session} search={search} headerRef={headerRef} mainRef={mainRef} menuRef={menuRef} />
         <main ref={mainRef}>
           <Breadcrumbs />
-          {showsContext(pathname) ? <ContextBar /> : null}
           {children}
         </main>
       </div>

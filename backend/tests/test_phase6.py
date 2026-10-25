@@ -113,7 +113,7 @@ def test_connected_records_survive_retry_and_a_rejected_enrollment(client):
         json={"course_id": course_id, "name": "Closed 2027"},
     )
     closed_id = closed.json()["id"]
-    database.batches.update_one({"_id": closed_id}, {"$set": {"ended_on": "2027-06-01"}})
+    database.batches.update_one({"_id": closed_id}, {"$set": {"closed": True}})
     rejected = client.post(
         f"/api/v1/students/{student_id}/enrollments",
         json={"branch_id": branch_id, "course_id": course_id, "batch_id": closed_id},

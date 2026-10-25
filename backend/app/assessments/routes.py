@@ -6,6 +6,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from io import BytesIO
+from pathlib import Path
 
 from bson import ObjectId
 from fastapi import APIRouter, File, Request, UploadFile
@@ -14,7 +15,7 @@ from openpyxl import Workbook
 from pydantic import BaseModel, Field
 
 from app.acl import allows
-from app.deps import current_user, db
+from app.deps import current_user, db, write_audit
 from app.errors import AppError
 from app.importing.commit import commit_import, known_sessions
 from app.importing.corrections import parse_correction_file
@@ -79,6 +80,24 @@ class ResultCreate(BaseModel):
     score: float | None = None
 
 
+class GridMark(BaseModel):
+    enrollment_code: str
+    score: str = ""
+
+
+class MarksheetGrid(BaseModel):
+    title: str = Field(min_length=1)
+    branch_id: str
+    course_id: str
+    batch_id: str
+    subject_id: str
+    paper_id: str
+    exam_type: str = "unit"
+    maximum: float = Field(gt=0)
+    exam_date: str | None = None
+    rows: list[GridMark]
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -96,7 +115,13 @@ async def upload_import(request: Request, file: UploadFile = File(...)) -> dict:
         raise AppError(422, "import.too_large", "The workbook is larger than 25 MB.")
     digest = hashlib.sha256(data).hexdigest()
     existing = await db(request).import_jobs.find_one(
-        {"institute_id": user["institute_id"], "sha256": digest, "state": {"$nin": ["committed", "cancelled"]}}
+        {
+            "institute_id": user["institute_id"],
+            "sha256": digest,
+            "state": {"$nin": ["committed", "cancelled"]},
+            "exam_id": {"$exists": False},
+            "bundle": {"$ne": True},
+        }
     )
     if existing:
         return {"id": existing["_id"], "state": existing["state"], "duplicate": True}
@@ -167,8 +192,24 @@ async def get_import(request: Request, import_id: str) -> dict:
     job = await _job(request, user, import_id)
     known = await known_sessions(db(request), user["institute_id"])
     plan = apply_decisions(job["parsed"], job.get("decisions") or {}, known)
-    plan["totals"].update(await _plan_totals(db(request), user["institute_id"], plan, known))
-    await annotate_plan(db(request), user["institute_id"], plan)
+    context = None
+    if job.get("bundle"):
+        from app.importing.bundle_plan import annotate_bundle_plan, bundle_context
+
+        await annotate_bundle_plan(db(request), plan, job)
+        context = await bundle_context(db(request), job)
+    elif job.get("exam_id"):
+        from app.importing.exam_plan import annotate_exam_plan
+
+        exam = await db(request).exams.find_one({"_id": job["exam_id"], "institute_id": user["institute_id"]})
+        if exam:
+            await annotate_exam_plan(db(request), plan, exam)
+        else:
+            plan["totals"].update(await _plan_totals(db(request), user["institute_id"], plan, known))
+            await annotate_plan(db(request), user["institute_id"], plan)
+    else:
+        plan["totals"].update(await _plan_totals(db(request), user["institute_id"], plan, known))
+        await annotate_plan(db(request), user["institute_id"], plan)
     stored_rows = _stored_rows(request, job)
     return {
         "id": job["_id"],
@@ -181,6 +222,9 @@ async def get_import(request: Request, import_id: str) -> dict:
         "outcomes": job.get("outcomes") or [],
         "summary": job.get("summary"),
         "ready": plan["ready"],
+        "exam_id": job.get("exam_id") or "",
+        "bundle": bool(job.get("bundle")),
+        "context": context,
     }
 
 
@@ -201,14 +245,22 @@ async def patch_import(request: Request, import_id: str, body: DecisionBody) -> 
         corrections = {**(current.get("corrections") or {}), **(choice.get("corrections") or {})}
         names = {**(current.get("names") or {}), **(choice.get("names") or {})}
         added = {**(current.get("added") or {}), **(choice.get("added") or {})}
+        row_batch_ids = {**(current.get("row_batch_ids") or {}), **(choice.get("row_batch_ids") or {})}
         drop_rows = list(dict.fromkeys([*(current.get("drop_rows") or []), *(choice.get("drop_rows") or [])]))
+        previous_exam = current.get("exam") or {}
         current.update(choice)
+        if isinstance(choice.get("exam"), dict):
+            current["exam"] = {**previous_exam, **choice["exam"]}
+            if isinstance(choice["exam"].get("scope"), dict):
+                current["exam"]["scope"] = choice["exam"]["scope"]
         if groups:
             current["groups"] = groups
         if levels:
             current["levels"] = levels
         if row_batches:
             current["row_batches"] = row_batches
+        if row_batch_ids:
+            current["row_batch_ids"] = row_batch_ids
         if corrections:
             current["corrections"] = corrections
         if names:
@@ -220,6 +272,11 @@ async def patch_import(request: Request, import_id: str, body: DecisionBody) -> 
         decisions["sheets"][sheet_id] = current
     known = await known_sessions(db(request), user["institute_id"])
     plan = apply_decisions(job["parsed"], decisions, known)
+    job["decisions"] = decisions
+    if job.get("bundle"):
+        from app.importing.bundle_plan import annotate_bundle_plan
+
+        await annotate_bundle_plan(db(request), plan, job)
     state = "ready" if plan["ready"] else "needs_resolution"
     await db(request).import_jobs.update_one({"_id": job["_id"]}, {"$set": {"decisions": decisions, "state": state}})
     return {"id": job["_id"], "state": state, "ready": plan["ready"], "blockers": plan["blockers"]}
@@ -460,6 +517,44 @@ async def cancel_import(request: Request, import_id: str) -> dict:
     return {"id": job["_id"], "state": "cancelled"}
 
 
+@router.delete("/imports/{import_id}")
+async def delete_import(request: Request, import_id: str) -> dict:
+    user = await current_user(request)
+    job = await _job(request, user, import_id)
+    if not any("marksheet.upload" in grant["actions"] for grant in user["grants"]):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    if job["state"] == "committed":
+        raise AppError(422, "import.committed", "A saved import cannot be deleted.")
+    await db(request).import_jobs.delete_one({"_id": job["_id"], "institute_id": user["institute_id"]})
+    if job.get("file_id"):
+        stored = await db(request).files.find_one({"_id": job["file_id"], "institute_id": user["institute_id"]})
+        if stored:
+            _remove_stored_file(request, stored.get("path"))
+            await db(request).files.delete_one({"_id": stored["_id"]})
+    await write_audit(
+        request,
+        user,
+        "import.delete",
+        {"filename": job.get("filename") or ""},
+        None,
+        {"institute_id": user["institute_id"]},
+    )
+    return {"id": job["_id"]}
+
+
+def _remove_stored_file(request: Request, raw: str | None) -> None:
+    if not raw:
+        return
+    root = request.app.state.settings.data_dir.resolve()
+    path = Path(raw)
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return
+    if resolved.is_relative_to(root) and resolved.is_file():
+        resolved.unlink()
+
+
 def _import_allowed(user: dict, batch: dict) -> bool:
     resource = {
         "institute_id": user["institute_id"],
@@ -472,7 +567,7 @@ def _import_allowed(user: dict, batch: dict) -> bool:
 
 @router.get("/imports")
 async def list_imports(
-    request: Request, state: str = "", branch_id: str = "", course_id: str = "", batch_id: str = ""
+    request: Request, state: str = "", branch_id: str = "", course_id: str = "", batch_id: str = "", exam_id: str = ""
 ) -> dict:
     user = await current_user(request)
     if not any(
@@ -482,6 +577,8 @@ async def list_imports(
     query: dict = {"institute_id": user["institute_id"]}
     if state:
         query["state"] = state
+    if exam_id:
+        query["exam_id"] = exam_id
     narrowed = bool(branch_id or course_id or batch_id or state == "failed")
     allowed = await _import_batch_ids(request, user, branch_id, course_id, batch_id) if narrowed else set()
     items = []
@@ -498,6 +595,9 @@ async def list_imports(
                 "batch_ids": list(job.get("batch_ids") or []),
                 "outcomes": job.get("outcomes") or [],
                 "summary": job.get("summary"),
+                "marksheet_id": job.get("marksheet_id") or "",
+                "source": job.get("source") or "workbook",
+                "bundle": bool(job.get("bundle")),
             }
         )
     return {"items": items, "total": len(items)}
@@ -640,6 +740,81 @@ async def create_marksheet(request: Request, body: MarksheetCreate) -> dict:
         }
     )
     return {"id": sheet_id, "status": "draft"}
+
+
+@router.post("/marksheets/grid")
+async def save_marksheet_grid(request: Request, body: MarksheetGrid) -> dict:
+    """Save a pasted roster. Each row is matched by enrollment number, not by name."""
+    filled = [row for row in body.rows if row.score.strip()]
+    if not filled:
+        raise AppError(422, "marksheet.grid", "Enter a score, or type absent, for at least one student.")
+    database = db(request)
+    codes = [row.enrollment_code.strip() for row in filled]
+    if any(not code for code in codes):
+        raise AppError(422, "marksheet.grid", "Each pasted row needs an enrollment number.")
+    if len(codes) != len(set(codes)):
+        raise AppError(422, "marksheet.grid", "An enrollment number is repeated in the pasted rows.")
+    enrollments = await database.enrollments.find(
+        {
+            "institute_id": (await current_user(request))["institute_id"],
+            "batch_id": body.batch_id,
+            "enrollment_code": {"$in": codes},
+        }
+    ).to_list(length=len(codes))
+    by_code = {item.get("enrollment_code"): item for item in enrollments}
+    missing = [code for code in codes if code not in by_code]
+    if missing:
+        shown = ", ".join(missing[:8])
+        raise AppError(422, "marksheet.grid", f"These enrollment numbers are not in this batch: {shown}.")
+    prepared = []
+    for row in filled:
+        raw = row.score.strip()
+        enrollment = by_code[row.enrollment_code.strip()]
+        if raw.casefold() in {"a", "absent"}:
+            prepared.append((enrollment["student_id"], "absent", None))
+            continue
+        try:
+            score = float(raw)
+        except ValueError as exc:
+            raise AppError(
+                422, "import.invalid_mark", f"{row.enrollment_code.strip()} needs a score or absent."
+            ) from exc
+        if score < 0 or score > body.maximum:
+            raise AppError(422, "import.invalid_mark", f"{row.enrollment_code.strip()} is outside 0 through the maximum.")
+        prepared.append((enrollment["student_id"], "scored", score))
+    created = await create_marksheet(
+        request,
+        MarksheetCreate(
+            title=body.title,
+            branch_id=body.branch_id,
+            course_id=body.course_id,
+            batch_id=body.batch_id,
+            subject_id=body.subject_id,
+            paper_id=body.paper_id,
+            exam_type=body.exam_type,
+            maximum=body.maximum,
+            exam_date=body.exam_date,
+        ),
+    )
+    for student_id, status, score in prepared:
+        await add_result(request, created["id"], ResultCreate(student_id=student_id, status=status, score=score))
+    user = await current_user(request)
+    await database.import_jobs.insert_one(
+        {
+            "_id": str(ObjectId()),
+            "institute_id": user["institute_id"],
+            "actor_id": user["_id"],
+            "filename": body.title.strip(),
+            "source": "grid",
+            "marksheet_id": created["id"],
+            "state": "committed",
+            "batch_ids": [body.batch_id],
+            "outcomes": [{"name": body.title.strip(), "status": "committed"}],
+            "summary": {"counts": {"results": {"insert": len(prepared), "update": 0}}},
+            "created_at": _now(),
+        }
+    )
+    return {"id": created["id"], "saved": len(prepared)}
 
 
 @router.post("/marksheets/{marksheet_id}/results")
@@ -1026,6 +1201,9 @@ def _public_sheet(sheet: dict, rows: list | None = None) -> dict:
         "attempt": sheet["attempt"],
         "exam_type": sheet["exam_type"],
         "planned": sheet.get("planned"),
+        "exam": sheet.get("exam"),
+        "similar_exams": sheet.get("similar_exams") or [],
+        "matched_exam": sheet.get("matched_exam"),
         "groups": [
             {
                 "id": group["id"],

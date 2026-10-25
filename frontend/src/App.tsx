@@ -10,7 +10,8 @@ import { FormsPage } from "./admissions/questions";
 import { BatchPage } from "./academics/batch";
 import { BranchPage } from "./academics/branch";
 import { BatchesPage, CoursePage, CoursesPage, InstitutePage } from "./academics/catalog";
-import { ImportPage } from "./assessments/import";
+import { BundleImportPage } from "./assessments/bundleImport";
+import { ExamRegisterPage, ExamRegistersPage } from "./assessments/ecr";
 import { MarksheetPage, MarksheetsPage } from "./assessments/marksheets";
 import { LoginPage } from "./pages/Login";
 import { OverviewPage } from "./pages/Overview";
@@ -67,7 +68,11 @@ export function App() {
     <Shell session={session} onChange={refresh}>
       <Routes>
         <Route path="/" element={<OverviewPage />} />
-        <Route path="/import" element={can("marksheet.upload") || can("marksheet.view") ? <ImportPage canUpload={can("marksheet.upload")} /> : <Navigate to="/" replace />} />
+        <Route path="/import" element={<Navigate to="/ecr" replace />} />
+        <Route path="/ecr" element={can("marksheet.view") ? <ExamRegistersPage canImport={can("marksheet.upload")} /> : <Navigate to="/" replace />} />
+        <Route path="/ecr/import" element={can("marksheet.upload") ? <BundleImportPage /> : <Navigate to="/ecr" replace />} />
+        <Route path="/ecr/exams/:examId/import" element={<Navigate to="/ecr/import" replace />} />
+        <Route path="/ecr/:batchId" element={can("marksheet.view") ? <ExamRegisterPage canAdd={can("marksheet.upload")} /> : <Navigate to="/" replace />} />
         <Route path="/marksheets" element={can("marksheet.view") ? <MarksheetsPage canAdd={can("marksheet.upload")} /> : <Navigate to="/" replace />} />
         <Route path="/marksheets/:marksheetId" element={can("marksheet.view") ? <MarksheetPage canSetBands={can("marksheet.edit_draft") || can("marksheet.correct")} /> : <Navigate to="/" replace />} />
         <Route path="/cards" element={can("progress_card.view") ? <CardsPage session={session} /> : <Navigate to="/" replace />} />

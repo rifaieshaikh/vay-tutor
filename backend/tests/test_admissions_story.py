@@ -295,8 +295,28 @@ def test_mapped_import_creates_applications_once(client):
         json={"branch_id": _branch_id, "batch_id": _batch_id, "decision": "create"},
     )
     assert enrolled.status_code == 200, enrolled.text
+    missing_batch = client.post(
+        "/api/v1/admission-imports",
+        data={"branch_id": _branch_id, "course_id": course_id},
+        files={"file": ("applications.csv", b"Applicant,Mobile,Course\nAnu,09870000001,CA Fdn\n", "text/csv")},
+    )
+    assert missing_batch.status_code == 422
+    closed = client.post(
+        f"/api/v1/branches/{_branch_id}/batches",
+        json={"course_id": course_id, "name": "Closed intake", "started_on": "2026-01-01", "ended_on": "2026-02-01"},
+    )
+    assert closed.status_code == 200, closed.text
+    marked = client.patch(f"/api/v1/catalog/batch/{closed.json()['id']}", json={"closed": True})
+    assert marked.status_code == 200, marked.text
+    refused_batch = client.post(
+        "/api/v1/admission-imports",
+        data={"branch_id": _branch_id, "course_id": course_id, "batch_id": closed.json()["id"]},
+        files={"file": ("applications.csv", b"Applicant,Mobile,Course\nAnu,09870000001,CA Fdn\n", "text/csv")},
+    )
+    assert refused_batch.status_code == 422
     uploaded = client.post(
         "/api/v1/admission-imports",
+        data={"branch_id": _branch_id, "course_id": course_id, "batch_id": _batch_id},
         files={"file": ("applications.csv", "Applicant,Mobile,Course\nAnu,09870000001,CA Fdn\nMeera,9000000001,CA Fdn\n".encode(), "text/csv")},
     )
     assert uploaded.status_code == 200, uploaded.text
@@ -353,7 +373,109 @@ def test_mapped_import_creates_applications_once(client):
     created = client.get(f"/api/v1/admissions/{committed.json()['result']['created'][0]['id']}").json()
     assert created["status"] == "open"
     assert created["student_id"] in {None, ""}
+    assert created["branch_id"] == _branch_id
+    assert created["batch_id"] == _batch_id
+    identified = client.post(
+        f"/api/v1/admissions/{created['id']}/identity",
+        json={"decision": "create", "expected_updated_at": created["updated_at"]},
+    )
+    assert identified.status_code == 200, identified.text
+    ready = client.get(f"/api/v1/admissions/{created['id']}").json()
+    assert ready["readiness"] == "ready"
+    assert ready["student_id"] in {None, ""}
     meera = next(item for item in committed.json()["result"]["created"] if item["name"] == "Meera")
     linked = client.get(f"/api/v1/admissions/{meera['id']}").json()
     assert linked["match_decision"] == "create"
     assert client.get(f"/api/v1/students/{enrolled.json()['id']}/enrollments").json()["email"] == "meera@example.com"
+    removed = client.delete(f"/api/v1/admission-imports/{operation_id}")
+    assert removed.status_code == 422
+    assert client.get("/api/v1/admission-imports").json()["items"][0]["id"] == operation_id
+    assert client.get(f"/api/v1/admissions/{created['id']}").json()["status"] == "open"
+
+
+def test_automatic_import_matches_name_and_phone(client):
+    bootstrap(client)
+    branch_id, course_id, batch_id = _context(client)
+    existing = client.post(
+        "/api/v1/admissions",
+        json={"name": "Meera", "phone": "9000000001", "course_id": course_id, "email": "meera@example.com"},
+    )
+    assert existing.status_code == 200, existing.text
+    enrolled = client.post(
+        f"/api/v1/admissions/{existing.json()['id']}/convert",
+        json={"branch_id": branch_id, "batch_id": batch_id, "decision": "create"},
+        headers={"Idempotency-Key": "enroll-meera-auto"},
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    uploaded = client.post(
+        "/api/v1/admission-imports",
+        data={"branch_id": branch_id, "course_id": course_id, "batch_id": batch_id},
+        files={
+            "file": (
+                "applications.csv",
+                b"Applicant,Mobile,Course,Email\nAnu,9000000011,CA Fdn,anu@example.com\nMeera,9000000001,CA Fdn,other@example.com\nMeera,9000000099,CA Fdn,third@example.com\n",
+                "text/csv",
+            )
+        },
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    operation_id = uploaded.json()["id"]
+    mappings = [
+        {"column_id": "0:0", "target": "name"},
+        {"column_id": "0:1", "target": "phone"},
+        {"column_id": "0:2", "target": "course"},
+        {"column_id": "0:3", "target": "email"},
+    ]
+    planned = client.put(
+        f"/api/v1/admission-imports/{operation_id}",
+        json={
+            "revision": uploaded.json()["revision"],
+            "sources": [{"sheet": "CSV", "header_row": 1}],
+            "mappings": mappings,
+            "courses": {"CA Fdn": course_id},
+            "identity_mode": "automatic",
+        },
+    )
+    assert planned.status_code == 200, planned.text
+    rows = {item["values"]["phone"]: item for item in planned.json()["rows"]}
+    assert rows["9000000011"]["status"] == "valid"
+    assert rows["9000000011"]["values"]["match_decision"] == "create"
+    assert rows["9000000001"]["status"] == "valid"
+    assert rows["9000000001"]["values"]["match_decision"] == "attach"
+    assert rows["9000000001"]["student_id"] == enrolled.json()["id"]
+    assert rows["9000000099"]["status"] == "blocked"
+    anu = rows["9000000011"]
+    corrected = client.put(
+        f"/api/v1/admission-imports/{operation_id}",
+        json={
+            "revision": planned.json()["revision"],
+            "sources": [{"sheet": "CSV", "header_row": 1}],
+            "mappings": mappings,
+            "courses": {"CA Fdn": course_id},
+            "identity_mode": "automatic",
+            "decisions": [
+                {"key": anu["key"], "action": "create", "values": {"email": "anu.corrected@example.com"}},
+                {"key": rows["9000000099"]["key"], "action": "skip"},
+            ],
+        },
+    )
+    assert corrected.status_code == 200, corrected.text
+    assert corrected.json()["counts"]["blocked"] == 0
+    committed = client.post(
+        f"/api/v1/admission-imports/{operation_id}/commit",
+        json={"revision": corrected.json()["revision"], "idempotency_key": "adm-auto-1"},
+    )
+    assert committed.status_code == 200, committed.text
+    created = {item["name"]: item for item in committed.json()["result"]["created"]}
+    assert created["Anu"]["student_created"] is True
+    assert created["Meera"]["student_created"] is False
+    assert created["Meera"]["student_id"] == enrolled.json()["id"]
+    anu_application = client.get(f"/api/v1/admissions/{created['Anu']['id']}").json()
+    assert anu_application["status"] == "converted"
+    assert anu_application["lifecycle"] == "enrolled"
+    anu_student = client.get(f"/api/v1/students/{created['Anu']['student_id']}/enrollments").json()
+    assert anu_student["email"] == "anu.corrected@example.com"
+    assert len(anu_student["enrollments"]) == 1
+    meera_student = client.get(f"/api/v1/students/{enrolled.json()['id']}/enrollments").json()
+    assert meera_student["email"] == "meera@example.com"
+    assert len(meera_student["enrollments"]) == 1

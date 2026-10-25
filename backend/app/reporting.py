@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from io import BytesIO
 
 from openpyxl import Workbook
@@ -57,7 +58,14 @@ def row_policy(row: dict, policy: dict | None) -> dict | None:
     return policy
 
 
-def present(row: dict, policy: dict, rank: int | None, batch_rank: int | None) -> dict:
+def present(
+    row: dict,
+    policy: dict,
+    rank: int | None,
+    batch_rank: int | None,
+    top_score=None,
+    batch_top_score=None,
+) -> dict:
     exact = percentage(row.get("score"), row.get("maximum")) if row.get("status") == "scored" else None
     detail = band_detail(exact, row_policy(row, policy)) if row.get("status") == "scored" else {"band": None, "band_name": None, "band_place": None}
     return {
@@ -75,6 +83,8 @@ def present(row: dict, policy: dict, rank: int | None, batch_rank: int | None) -
         "rank": rank,
         "batch_rank": batch_rank,
         "rank_label": "Cohort rank" if rank is not None else None,
+        "top_score": top_score,
+        "batch_top_score": batch_top_score,
         "exam_date": row.get("exam_date"),
         "title": row.get("title"),
         "exam_type": row.get("exam_type"),
@@ -119,6 +129,30 @@ def ranks_for(row: dict, siblings: list[dict]) -> tuple[int | None, int | None]:
     combined = cohort.get(row["id"])
     per_batch = batch.get(row["id"]) if len({item.get("batch_id") for item in siblings}) > 1 else None
     return combined, per_batch
+
+
+def _highest_score(rows: list[dict]):
+    chosen = None
+    best = None
+    for item in rows:
+        if item.get("status") != "scored" or item.get("score") is None:
+            continue
+        value = Decimal(str(item["score"]))
+        if best is None or value > best:
+            best = value
+            chosen = item
+    return None if chosen is None else chosen.get("score")
+
+
+def tops_for(siblings: list[dict], batch_id: str | None):
+    """Highest scored mark on the exam, and within one batch when the exam is shared."""
+    exam = _highest_score(siblings)
+    if exam is None:
+        return None, None
+    batch = None
+    if len({item.get("batch_id") for item in siblings}) > 1:
+        batch = _highest_score([item for item in siblings if item.get("batch_id") == batch_id])
+    return exam, batch
 
 
 def matches(row: dict, filters: dict) -> bool:
@@ -450,6 +484,22 @@ def _rank_text(row: dict) -> str:
     return str(rank if rank is not None else batch_rank)
 
 
+def _top_text(row: dict) -> str:
+    top = row.get("top_score")
+    batch = row.get("batch_top_score")
+    if top is None and batch is None:
+        return "-"
+    maximum = row.get("maximum")
+    text = _mark_pair(top, maximum) if top is not None else "-"
+    if batch is not None:
+        text = f"{text} | batch {_mark_pair(batch, maximum)}"
+    return text
+
+
+def _mark_pair(score, maximum) -> str:
+    return f"{_plain_number(score)} of {_plain_number(maximum)}"
+
+
 def _context_name(mapping: dict, rows: list[dict], scope: dict, field: str) -> str:
     if scope.get(field):
         return mapping.get(scope[field]) or ""
@@ -493,8 +543,11 @@ async def progress_document(
         item = dict(row)
         group = by_sheet.get(row.get("marksheet_id") or row.get("id"), [row])
         rank, batch_rank = ranks_for(item, group)
+        top_score, batch_top_score = tops_for(group, item.get("batch_id"))
         item["rank"] = rank
         item["batch_rank"] = batch_rank
+        item["top_score"] = top_score
+        item["batch_top_score"] = batch_top_score
         prepared.append(item)
 
     student_ids = list({row.get("student_id") for row in prepared if row.get("student_id")})
@@ -609,7 +662,7 @@ def _student_block(person: dict, rows: list[dict], identity_rows: list[dict], na
     exams = []
     corrections = []
     for row in rows:
-        shown = present(row, policy, row.get("rank"), row.get("batch_rank"))
+        shown = present(row, policy, row.get("rank"), row.get("batch_rank"), row.get("top_score"), row.get("batch_top_score"))
         mark = _mark_text(shown)
         if row.get("previous_score") is not None:
             mark = f"{mark} (previous {_plain_number(row.get('previous_score'))})"
@@ -634,6 +687,7 @@ def _student_block(person: dict, rows: list[dict], identity_rows: list[dict], na
                     mark,
                     shown.get("band_name") or _status_label(shown.get("status")),
                     _rank_text(shown),
+                    _top_text(shown),
                 ],
                 "percentage": shown.get("percentage"),
                 "place": shown.get("band_place"),
@@ -708,8 +762,8 @@ _WHITE = (1, 1, 1)
 _ZEBRA = (0.957, 0.969, 0.965)
 _SUBJECT_HEADERS = ["Subject", "Paper", "Performance", "Results", "Band"]
 _SUBJECT_WIDTHS = [150, 110, 85, 80, 90]
-_EXAM_HEADERS = ["Date", "Assessment", "Performance", "Results", "Band", "Rank"]
-_EXAM_WIDTHS = [78, 155, 72, 78, 72, 60]
+_EXAM_HEADERS = ["Date", "Assessment", "Performance", "Results", "Band", "Rank", "Top mark"]
+_EXAM_WIDTHS = [68, 125, 64, 70, 60, 48, 80]
 _RETEST_HEADERS = ["Assessment", "Original", "Latest", "Change", "Basis"]
 _RETEST_WIDTHS = [155, 80, 80, 70, 130]
 _ATTENTION_HEADERS = ["Assessment", "Performance", "Results", "Band"]
@@ -992,7 +1046,7 @@ class _PdfCard:
         self.y = top - height
 
     def _align_x(self, x: float, width: float, text: str, header: str) -> float:
-        if header not in {"Performance", "Results", "Rank", "Change", "Original", "Latest"}:
+        if header not in {"Performance", "Results", "Rank", "Top mark", "Change", "Original", "Latest"}:
             return x + 4
         used = len(text) * 4.5
         return max(x + 4, x + width - used - 6)
@@ -1092,7 +1146,7 @@ _NAME_FONT = Font(bold=True, color="1C2430", name="Calibri", size=16)
 
 
 def _sheet_page(sheet, report: dict, landscape: bool = False):
-    for index, width in enumerate([24, 22, 18, 16, 18, 36], start=1):
+    for index, width in enumerate([24, 22, 18, 16, 18, 16, 18], start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     sheet.page_setup.orientation = "landscape" if landscape else "portrait"
     sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
@@ -1117,7 +1171,7 @@ def _sheet_page(sheet, report: dict, landscape: bool = False):
 
 def _write_student_sheet(sheet, row: int, student: dict, named: bool) -> int:
     if named and student.get("name"):
-        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
         sheet.row_dimensions[row].height = 22
         row = _write_row(sheet, row, [student.get("name") or "Student"], font=_NAME_FONT)
     facts = [
@@ -1178,7 +1232,7 @@ def _write_student_sheet(sheet, row: int, student: dict, named: bool) -> int:
 def _data_sheet(book, report: dict, title: str, headers: list[str], rows: list[list]):
     sheet = book.create_sheet(title[:31])
     _sheet_page(sheet, report, landscape=len(headers) > 5)
-    widths = [22, 16, 16, 28, 16, 16, 16, 14]
+    widths = [22, 16, 16, 28, 16, 16, 16, 14, 16]
     for index, width in enumerate(widths[: max(len(headers), 1)], start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     _write_row(sheet, 1, headers, font=_HEADER_FONT, fill=_HEADER_FILL, border=_THIN)
@@ -1198,10 +1252,10 @@ def _workbook(report: dict) -> bytes:
     sheet.title = "Progress card"
     _sheet_page(sheet, report)
     sheet.row_dimensions[1].height = 28
-    sheet.merge_cells("A1:F1")
+    sheet.merge_cells("A1:G1")
     row = _write_row(sheet, 1, [report.get("title") or "Progress card"], font=_TITLE_FONT)
     if report.get("institute"):
-        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+        sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
         row = _write_row(sheet, row, [report["institute"]], font=Font(bold=True, name="Calibri", size=12, color="143F3D"))
     row = _write_row(sheet, row, [f"Generated {report.get('generated') or '-'}"], font=_LABEL_FONT)
     if report.get("period"):

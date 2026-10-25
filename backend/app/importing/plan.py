@@ -184,23 +184,24 @@ def _apply_group(
                 }
             )
         seen[item["name_key"]] = item["row"]
-        if item["status"] == "invalid":
+        maximum = group.get("maximum")
+        if item["status"] == "invalid" and maximum is not None:
             blockers.append(
                 {
                     "code": "import.invalid_mark",
                     "sheet_id": sheet["id"],
                     "row": item["row"],
                     "column": item["column"],
-                    "message": f"{item['display_name']} on {sheet['name']} row {item['row']} is outside 0 to {group['maximum']}.",
+                    "message": f"{item['display_name']} on {sheet['name']} row {item['row']} is outside 0 to {maximum}.",
                 }
             )
-        if item["status"] == "scored" and item.get("score") is not None and (item["score"] < 0 or item["score"] > group["maximum"]):
+        if item["status"] == "scored" and item.get("score") is not None and maximum is not None and (item["score"] < 0 or item["score"] > maximum):
             blockers.append(
                 {
                     "code": "import.invalid_mark",
                     "sheet_id": sheet["id"],
                     "row": item["row"],
-                    "message": f"{item['display_name']} on {sheet['name']} row {item['row']} is outside 0 to {group['maximum']}.",
+                    "message": f"{item['display_name']} on {sheet['name']} row {item['row']} is outside 0 to {maximum}.",
                 }
             )
         if interpretation != "skip_duplicate" and len(sessions) > 1 and not item["batch_session"]:

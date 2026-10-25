@@ -258,7 +258,7 @@ export function AccessPage() {
             <thead>
               <tr>
                 <th>Name</th>
-                <th>Email</th>
+                <th>Username</th>
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
@@ -284,7 +284,7 @@ export function AccessPage() {
         <StudentDialog title="Filters" onClose={() => setFiltersOpen(false)}>
           <form className="form-grid" onSubmit={applyFilters}>
             <label className="span-2">Search
-              <input value={draftQuery} aria-label="Search" placeholder="Name or email" onChange={(event) => setDraftQuery(event.target.value)} />
+              <input value={draftQuery} aria-label="Search" placeholder="Name or username" onChange={(event) => setDraftQuery(event.target.value)} />
             </label>
             <label className="span-2">Status
               <select value={draftStatus} aria-label="Status" onChange={(event) => setDraftStatus(event.target.value)}>
@@ -503,7 +503,7 @@ function UserForm({ roles, options, onClose, onSaved }: { roles: Role[]; options
   const [acknowledge, setAcknowledge] = useState(false);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const ready = Boolean(name.trim() && email.trim() && password.length >= 10);
+  const ready = Boolean(name.trim() && email.trim() && password);
 
   function choose(key: string, value: string) {
     setScope(clearIncompatible({ ...scope, [key]: value }, options, key).filters);
@@ -538,11 +538,11 @@ function UserForm({ roles, options, onClose, onSaved }: { roles: Role[]; options
         <label>Name
           <input value={name} aria-label="Name" onChange={(event) => setName(event.target.value)} />
         </label>
-        <label>Email
-          <input type="email" value={email} aria-label="Email" onChange={(event) => setEmail(event.target.value)} />
+        <label>Username
+          <input type="text" value={email} aria-label="Username" onChange={(event) => setEmail(event.target.value)} />
         </label>
         <label className="span-2">Password
-          <input type="password" value={password} minLength={10} aria-label="Password" onChange={(event) => setPassword(event.target.value)} />
+          <input type="password" value={password} aria-label="Password" onChange={(event) => setPassword(event.target.value)} />
         </label>
         <label className="span-2">Role
           <select value={role} aria-label="Role" onChange={(event) => { setRole(event.target.value); setAcknowledge(false); }}>

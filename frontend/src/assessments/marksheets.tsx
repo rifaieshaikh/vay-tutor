@@ -2,10 +2,11 @@ import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { notify } from "../notify";
-import { CONTEXT_FIELDS, Option, clearIncompatible, optionFits } from "../filters";
+import { CONTEXT_FIELDS, Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
 import { Band, BandFields, bandsPayload, bandsReady, draftsFrom } from "../bands";
 import { useUnsaved } from "../guard";
 import { Icon, moveTab, StudentDialog } from "../ui";
+import { FilterActions, ListToolbar, Pager } from "../academics/lists";
 
 type Marksheet = {
   id: string;
@@ -19,6 +20,7 @@ type Marksheet = {
   exam_date: string | null;
   exam_type: string | null;
   source_file: string | null;
+  exam_id?: string;
   source_sheet: string | null;
   file_id: string | null;
   maximum: number | null;
@@ -42,9 +44,13 @@ type Result = {
 type Detail = Marksheet & { attempt_kind?: string; available_students?: Person[]; results: Result[]; bands?: Band[] | null };
 type Draft = { score: string; status: string };
 
-const FILTER_KEYS = ["q", "status", "exam_type", "branch_id", "course_id", "batch_id", "period", "subject_id", "paper_id", "exam_date_from", "exam_date_to", "sort", "page"];
-const ADVANCED_KEYS = ["exam_type", "paper_id", "exam_date_from", "exam_date_to"];
-const PAGE_FILTERS = ["q", "status", "subject_id", ...ADVANCED_KEYS];
+const FILTER_KEYS = ["q", "status", "exam_type", "branch_id", "course_id", "batch_id", "subject_id", "paper_id", "exam_date_from", "exam_date_to", "sort", "page"];
+const DIALOG_KEYS = ["branch_id", "course_id", "batch_id", "status", "subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to"] as const;
+const SORT_OPTIONS = [
+  ["title", "Assessment"],
+  ["exam_date", "Exam date"],
+  ["status", "Status"],
+] as const;
 const STATUS_OPTIONS = [
   { id: "draft", label: "Draft" },
   { id: "submitted", label: "Submitted" },
@@ -69,6 +75,11 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 
 function readFilters(params: URLSearchParams) {
   return Object.fromEntries(FILTER_KEYS.map((key) => [key, params.get(key) || ""]));
+}
+
+function dateRangeError(from: string, to: string) {
+  if (from && to && from > to) return "The start date must be on or before the end date.";
+  return "";
 }
 
 function formatDate(value: string | null) {
@@ -166,7 +177,8 @@ function storedScore(value: string) {
 export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
-  const [panel, setPanel] = useState<"choose" | "add" | "filters" | null>(null);
+  const [panel, setPanel] = useState<"choose" | "add" | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [draftSheet, setDraftSheet] = useState<Record<string, string>>({ attempt: "original", exam_type: "unit" });
   const filters = readFilters(params);
   const [items, setItems] = useState<Marksheet[]>([]);
@@ -177,13 +189,15 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
   const [optionsError, setOptionsError] = useState("");
   const [optionsAttempt, setOptionsAttempt] = useState(0);
   const [draftQuery, setDraftQuery] = useState(filters.q);
-  const [advancedDraft, setAdvancedDraft] = useState<Record<string, string>>({});
+  const [filterDraft, setFilterDraft] = useState<Record<string, string>>({});
+  const [dateError, setDateError] = useState("");
   const [loading, setLoading] = useState(true);
 
   function write(next: Record<string, string>) {
     const query = new URLSearchParams();
     Object.entries(next).forEach(([key, value]) => {
-      if (value) query.set(key, value);
+      if (!value || key === "period" || (key === "page" && value === "1")) return;
+      query.set(key, value);
     });
     setParams(query);
   }
@@ -207,16 +221,70 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
 
   useEffect(() => {
     load().catch((reasonText: Error) => setError(reasonText.message));
+  }, [params]);
+
+  useEffect(() => {
+    let cancelled = false;
     Promise.all(
       ["branch", "course", "batch", "subject", "paper", "exam_type"].map(async (dimension) => {
         const page = await api<{ items: Option[] }>(`/api/v1/context/options?dimension=${dimension}`);
         return [dimension, page.items] as const;
       }),
     ).then((pairs) => {
+      if (cancelled) return;
       setOptions(Object.fromEntries(pairs));
       setOptionsError("");
-    }).catch((reason: Error) => setOptionsError(reason.message || "The filter choices could not be loaded."));
-  }, [params, optionsAttempt]);
+    }).catch((reason: Error) => {
+      if (!cancelled) setOptionsError(reason.message || "The filter choices could not be loaded.");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [optionsAttempt]);
+
+  useEffect(() => {
+    const next = new URLSearchParams(params);
+    let changed = false;
+    if (next.has("period")) {
+      next.delete("period");
+      changed = true;
+    }
+    if (options.branch) {
+      const scope = () => ({
+        branch_id: next.get("branch_id") || "",
+        course_id: next.get("course_id") || "",
+        subject_id: next.get("subject_id") || "",
+      });
+      if (next.get("branch_id") && !(options.branch || []).some((item) => item.id === next.get("branch_id"))) {
+        next.delete("branch_id");
+        next.delete("course_id");
+        next.delete("batch_id");
+        changed = true;
+      }
+      if (next.get("course_id") && !(options.course || []).some((item) => item.id === next.get("course_id") && optionFits(item, scope()))) {
+        next.delete("course_id");
+        next.delete("batch_id");
+        changed = true;
+      }
+      const batch = (options.batch || []).find((item) => item.id === next.get("batch_id"));
+      if (next.get("batch_id") && (!batch || !optionFits(batch, scope()))) {
+        next.delete("batch_id");
+        changed = true;
+      }
+      const subject = (options.subject || []).find((item) => item.id === next.get("subject_id"));
+      if (options.subject && next.get("subject_id") && (!subject || !optionFits(subject, scope()))) {
+        next.delete("subject_id");
+        next.delete("paper_id");
+        changed = true;
+      }
+      const paper = (options.paper || []).find((item) => item.id === next.get("paper_id"));
+      if (options.paper && next.get("paper_id") && (!paper || !optionFits(paper, scope()))) {
+        next.delete("paper_id");
+        changed = true;
+      }
+    }
+    if (changed) setParams(next, { replace: true });
+  }, [options, params, setParams]);
 
   useEffect(() => {
     if (loading) return;
@@ -238,32 +306,49 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
     return () => window.clearTimeout(handle);
   }, [draftQuery]);
 
-  function openAdvanced() {
-    setAdvancedDraft(Object.fromEntries(ADVANCED_KEYS.map((key) => [key, filters[key] || ""])));
-    setPanel("filters");
+  function openFilters() {
+    setFilterDraft(Object.fromEntries(DIALOG_KEYS.map((key) => [key, filters[key] || ""])));
+    setDateError("");
+    setFiltersOpen(true);
   }
 
-  function editAdvanced(key: string, value: string) {
-    setAdvancedDraft((current) => {
-      const merged = { ...filters, ...current, [key]: value };
-      const { filters: next } = clearIncompatible(merged, options, key);
-      return Object.fromEntries(ADVANCED_KEYS.map((field) => [field, next[field] || ""]));
+  function editDraft(key: string, value: string) {
+    setDateError("");
+    setFilterDraft((current) => {
+      const merged = { ...current, [key]: value };
+      if (key === "branch_id") {
+        merged.course_id = "";
+        merged.batch_id = "";
+      }
+      if (key === "course_id") merged.batch_id = "";
+      let next = clearIncompatible(merged, options, key).filters;
+      if (!value && key === "subject_id") next = clearDescendants(next, key).filters;
+      return Object.fromEntries(DIALOG_KEYS.map((field) => [field, next[field] || ""]));
     });
   }
 
-  function applyAdvanced() {
-    write({ ...filters, ...advancedDraft, page: "1" });
-    setPanel(null);
-  }
-
-  function resetAdvanced() {
-    setAdvancedDraft(Object.fromEntries(ADVANCED_KEYS.map((key) => [key, ""])));
+  function applyFilters(event: FormEvent) {
+    event.preventDefault();
+    const problem = dateRangeError(filterDraft.exam_date_from || "", filterDraft.exam_date_to || "");
+    if (problem) {
+      setDateError(problem);
+      return;
+    }
+    const next: Record<string, string> = { ...filters, page: "1" };
+    for (const key of DIALOG_KEYS) next[key] = filterDraft[key] || "";
+    write(next);
+    setFiltersOpen(false);
   }
 
   function choose(key: string, value: string) {
     const merged = { ...filters, [key]: value, page: "1" };
-    const { filters: next, cleared } = clearIncompatible(merged, options, key);
-    if (cleared.length) notify(`${cleared.map((field) => LABELS[field]).join(", ")} cleared because it does not belong with that choice.`);
+    if (key === "branch_id") {
+      merged.course_id = "";
+      merged.batch_id = "";
+    }
+    if (key === "course_id") merged.batch_id = "";
+    let next = clearIncompatible(merged, options, key).filters;
+    if (!value && key === "subject_id") next = clearDescendants(next, key).filters;
     write(next);
   }
 
@@ -288,23 +373,17 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
     return [optionLabel("subject", sheet.subject_id), optionLabel("paper", sheet.paper_id), batches.join(", ")].filter(Boolean).join(" · ");
   }
 
-  const active = PAGE_FILTERS.filter((key) => filters[key]).map((key) => [key, filters[key]] as const);
-  function clearPageFilters() {
-    write({
-      branch_id: filters.branch_id,
-      course_id: filters.course_id,
-      batch_id: filters.batch_id,
-      period: filters.period,
-      sort: filters.sort,
-    });
+  const chipKeys = ["q", ...DIALOG_KEYS].filter((key) => filters[key]);
+  function clearFilters() {
     setDraftQuery("");
+    write({ sort: filters.sort });
   }
-  const advancedCount = ADVANCED_KEYS.filter((key) => filters[key]).length;
   const page = Number(filters.page) || 1;
   const rangeFrom = total === 0 ? 0 : (page - 1) * 8 + 1;
   const rangeTo = Math.min(total, (page - 1) * 8 + items.length);
   const kept = new URLSearchParams(params);
   kept.delete("open");
+  kept.delete("period");
   const listQuery = kept.toString();
   if (params.get("open")) {
     return <Navigate to={`/marksheets/${params.get("open")}${listQuery ? `?${listQuery}` : ""}`} replace />;
@@ -322,69 +401,81 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
         ) : null}
       </div>
       <p className="page-lead">A draft stays off progress cards until it is published.</p>
-      <div className="toolbar common">
-        <label>
-          Search
-          <input value={draftQuery} onChange={(event) => setDraftQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); choose("q", draftQuery.trim()); } }} placeholder="Assessment or student" />
-        </label>
-        <label>
-          Status
-          <select value={filters.status} onChange={(event) => choose("status", event.target.value)}>
-            <option value="">All</option>
-            {STATUS_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-          </select>
-        </label>
-        <label>
-          Subject
-          <select value={filters.subject_id} onChange={(event) => choose("subject_id", event.target.value)}>
-            <option value="">All</option>
-            {(options.subject || []).filter((option) => optionFits(option, filters)).map((option) => (
-              <option key={option.id} value={option.id}>{option.label}</option>
-            ))}
-          </select>
-        </label>
-        <button type="button" className="secondary" onClick={openAdvanced}>More filters{advancedCount ? ` (${advancedCount})` : ""}</button>
-      </div>
       {optionsError ? <p className="error" role="alert">{optionsError} <button type="button" className="quiet" onClick={() => setOptionsAttempt((value) => value + 1)}>Try again</button></p> : null}
-      <p className="filter-row">
-        {active.map(([key, value]) => (
-          <button key={key} type="button" className="chip-button" onClick={() => choose(key, "")}>{LABELS[key]}: {labelFor(key, value)}</button>
-        ))}
-        {active.length ? (
-          <div className="icon-actions">
-            <button type="button" className="quiet" onClick={clearPageFilters}>Clear</button>
-          </div>
-        ) : null}
-        <span>{total} marksheet{total === 1 ? "" : "s"}</span>
-      </p>
-      {panel === "filters" ? (
-        <Dialog title="Filter marksheets" onClose={() => setPanel(null)}>
-          <div className="form-grid">
-            <label>
-              Paper
-              <select value={advancedDraft.paper_id || ""} onChange={(event) => editAdvanced("paper_id", event.target.value)}>
-                <option value="">All</option>
-                {(options.paper || []).filter((option) => optionFits(option, { ...filters, ...advancedDraft })).map((option) => (
-                  <option key={option.id} value={option.id}>{option.label}</option>
-                ))}
+      <ListToolbar
+        searchLabel="Search marksheets"
+        placeholder="Assessment or student"
+        query={draftQuery}
+        onQuery={setDraftQuery}
+        onSearch={() => choose("q", draftQuery.trim())}
+        sort={filters.sort || "title"}
+        sortOptions={SORT_OPTIONS}
+        onSort={(value) => choose("sort", value === "title" ? "" : value)}
+        onOpenFilters={openFilters}
+        summary={loading ? "Loading marksheets…" : error ? "Marksheets could not be loaded." : total === 0 ? "0 marksheets" : `${rangeFrom}–${rangeTo} of ${total}`}
+        chips={chipKeys.map((key) => ({ key, label: key === "q" ? `Search: ${filters[key]}` : `${LABELS[key]}: ${labelFor(key, filters[key])}` }))}
+        onRemove={(key) => {
+          if (key === "q") setDraftQuery("");
+          choose(key, "");
+        }}
+        onClear={clearFilters}
+        filtered={chipKeys.length > 0}
+      />
+      {filtersOpen ? (
+        <StudentDialog title="Filters" onClose={() => setFiltersOpen(false)}>
+          <form className="form-grid" onSubmit={applyFilters}>
+            <label>Branch
+              <select aria-label="Branch" value={filterDraft.branch_id || ""} onChange={(event) => editDraft("branch_id", event.target.value)}>
+                <option value="">Any branch</option>
+                {(options.branch || []).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
               </select>
             </label>
-            <label>
-              Exam type
-              <select value={advancedDraft.exam_type || ""} onChange={(event) => editAdvanced("exam_type", event.target.value)}>
-                <option value="">All</option>
+            <label>Course
+              <select aria-label="Course" value={filterDraft.course_id || ""} onChange={(event) => editDraft("course_id", event.target.value)}>
+                <option value="">Any course</option>
+                {(options.course || []).filter((option) => optionFits(option, filterDraft)).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select>
+            </label>
+            <label>Batch
+              <select aria-label="Batch" value={filterDraft.batch_id || ""} onChange={(event) => editDraft("batch_id", event.target.value)}>
+                <option value="">Any batch</option>
+                {(options.batch || []).filter((option) => optionFits(option, filterDraft)).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select>
+            </label>
+            <label>Status
+              <select aria-label="Status" value={filterDraft.status || ""} onChange={(event) => editDraft("status", event.target.value)}>
+                <option value="">Any status</option>
+                {STATUS_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select>
+            </label>
+            <label>Subject
+              <select aria-label="Subject" value={filterDraft.subject_id || ""} onChange={(event) => editDraft("subject_id", event.target.value)}>
+                <option value="">Any subject</option>
+                {(options.subject || []).filter((option) => optionFits(option, filterDraft)).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select>
+            </label>
+            <label>Paper
+              <select aria-label="Paper" value={filterDraft.paper_id || ""} onChange={(event) => editDraft("paper_id", event.target.value)}>
+                <option value="">Any paper</option>
+                {(options.paper || []).filter((option) => optionFits(option, filterDraft)).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select>
+            </label>
+            <label>Exam type
+              <select aria-label="Exam type" value={filterDraft.exam_type || ""} onChange={(event) => editDraft("exam_type", event.target.value)}>
+                <option value="">Any exam type</option>
                 {(options.exam_type || []).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
               </select>
             </label>
-            <label>From<input type="date" value={advancedDraft.exam_date_from || ""} onChange={(event) => editAdvanced("exam_date_from", event.target.value)} /></label>
-            <label>To<input type="date" value={advancedDraft.exam_date_to || ""} onChange={(event) => editAdvanced("exam_date_to", event.target.value)} /></label>
-          </div>
-          <div className="dialog-actions">
-            <button type="button" className="quiet" onClick={() => setPanel(null)}>Cancel</button>
-            <button type="button" className="secondary" onClick={resetAdvanced}>Reset</button>
-            <button type="button" onClick={applyAdvanced}>Apply</button>
-          </div>
-        </Dialog>
+            <label>Exam from
+              <input aria-label="Exam from" type="date" value={filterDraft.exam_date_from || ""} onChange={(event) => editDraft("exam_date_from", event.target.value)} />
+            </label>
+            <label>Exam to
+              <input aria-label="Exam to" type="date" value={filterDraft.exam_date_to || ""} onChange={(event) => editDraft("exam_date_to", event.target.value)} />
+            </label>
+            {dateError ? <p className="error span-2" role="alert">{dateError}</p> : null}
+            <FilterActions onReset={() => { setFilterDraft({}); setDateError(""); }} onClose={() => setFiltersOpen(false)} />
+          </form>
+        </StudentDialog>
       ) : null}
       {panel === "choose" ? (
         <Dialog title="Add a marksheet" onClose={() => setPanel(null)}>
@@ -393,16 +484,9 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
               <strong>Enter here</strong>
               <span>Create a draft, then add students who are already enrolled.</span>
             </button>
-            <button type="button" className="choice" onClick={() => {
-              const context = new URLSearchParams();
-              for (const key of ["branch_id", "course_id", "batch_id", "period"]) {
-                if (filters[key]) context.set(key, filters[key]);
-              }
-              const search = context.toString();
-              navigate(search ? `/import?new=1&${search}` : "/import?new=1");
-            }}>
-              <strong>Import a workbook</strong>
-              <span>Upload an Excel marklist and correct it before it is saved.</span>
+            <button type="button" className="choice" onClick={() => navigate("/ecr")}>
+              <strong>Upload from ECR</strong>
+              <span>Record the exam on the batch register, then upload its marklist.</span>
             </button>
           </div>
         </Dialog>
@@ -480,8 +564,7 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
         </Dialog>
       ) : null}
       {error && panel !== "add" ? <p className="error" role="alert">{error}</p> : null}
-      {loading && items.length === 0 ? <p role="status">Loading marksheets…</p> : null}
-      {!loading && items.length === 0 ? <p>{active.length ? "No marksheets match these filters. Clear them to see the full list." : "No marksheets yet."}</p> : null}
+      {!loading && items.length === 0 ? <p>{chipKeys.length ? "No marksheets match these filters. Clear them to see the full list." : "No marksheets yet."}</p> : null}
       {items.length > 0 ? (
         <div className="table-wrap">
           <table className="register">
@@ -489,7 +572,7 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
             <thead>
               <tr>
                 <th aria-sort={(filters.sort || "title") === "title" ? "ascending" : "none"}>
-                  <button type="button" className="sort" onClick={() => choose("sort", "title")}>Assessment</button>
+                  <button type="button" className="sort" onClick={() => choose("sort", "")}>Assessment</button>
                 </th>
                 <th>Branch and course</th>
                 <th>Subject, paper, batch</th>
@@ -532,11 +615,7 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
           </table>
         </div>
       ) : null}
-      <p className="pager">
-        <button type="button" className="quiet" disabled={page <= 1} onClick={() => write({ ...filters, page: String(page - 1) })}>Previous</button>
-        <span>{rangeFrom}–{rangeTo} of {total}</span>
-        <button type="button" className="quiet" disabled={page >= pages} onClick={() => write({ ...filters, page: String(page + 1) })}>Next</button>
-      </p>
+      <Pager from={rangeFrom} to={rangeTo} total={total} page={page} pages={pages} onPage={(nextPage) => write({ ...filters, page: nextPage <= 1 ? "" : String(nextPage) })} />
     </section>
   );
 }
@@ -848,6 +927,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
           <p className="page-lead">{detail.status === "draft" ? "Enter the scores, then publish. A draft stays off progress cards." : detail.status === "submitted" ? "Publish when the scores are ready." : detail.status === "published" ? "These scores are on progress cards. Withdraw them to correct a published sheet." : "Correct the scores before publishing again."}</p>
         </div>
         <div className="actions">
+          {!editing && detail.exam_id ? <Link to={`/ecr/import?branch_id=${detail.branch_id || ""}&course_id=${detail.course_id || ""}&batch_id=${detail.batch_ids?.[0] || ""}`}>Import</Link> : null}
           {!editing && canAddStudent ? (
             <button type="button" onClick={() => setPanel("student")}>Add a student</button>
           ) : null}

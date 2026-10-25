@@ -23,6 +23,13 @@ def phone_key(value: str) -> str:
 
 
 _PBKDF2_ROUNDS = 120_000
+MIN_PASSWORD_LENGTH = 8
+
+
+def password_error(password: str) -> str:
+    if len(password) < MIN_PASSWORD_LENGTH:
+        return f"Use at least {MIN_PASSWORD_LENGTH} characters."
+    return ""
 
 
 def hash_password(password: str) -> str:

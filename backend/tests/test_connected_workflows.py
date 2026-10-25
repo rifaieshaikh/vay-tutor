@@ -199,7 +199,7 @@ def test_a_prospect_stays_one_student_through_transfer_and_published_results(cli
     )
     assert closed_batch.status_code == 200, closed_batch.text
     closed_id = closed_batch.json()["id"]
-    database.batches.update_one({"_id": closed_id}, {"$set": {"ended_on": "2027-06-01"}})
+    database.batches.update_one({"_id": closed_id}, {"$set": {"closed": True}})
     closed = client.post(
         f"/api/v1/students/{student_id}/enrollments",
         json={"branch_id": branch_id, "course_id": course_id, "batch_id": closed_id},

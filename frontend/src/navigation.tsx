@@ -5,7 +5,7 @@ import { Session } from "./api";
 
 type IconName =
   | "dashboard" | "enquiry" | "admission" | "students" | "institute" | "course" | "batch"
-  | "teacher" | "import" | "marksheet" | "card" | "views" | "access" | "audit" | "settings" | "forms"
+  | "teacher" | "import" | "marksheet" | "ecr" | "card" | "views" | "access" | "audit" | "settings" | "forms"
   | "collapse" | "expand";
 
 type Item = { to: string; label: string; action: string; end?: boolean; icon: IconName };
@@ -41,7 +41,7 @@ const GROUPS: Group[] = [
     label: "Assessments",
     icon: "marksheet",
     items: [
-      { to: "/import", label: "Import Marklist", action: "marksheet.upload", end: true, icon: "import" },
+      { to: "/ecr", label: "ECR", action: "marksheet.view", icon: "ecr" },
       { to: "/marksheets", label: "Marksheets", action: "marksheet.view", icon: "marksheet" },
     ],
   },
@@ -174,6 +174,7 @@ function NavIcon({ name }: { name: IconName }) {
     teacher: <><circle cx="12" cy="8" r="3" /><path d="M5 19c1.2-2.8 3.4-4 7-4s5.8 1.2 7 4" /></>,
     import: <><path d="M12 4v10" /><path d="M8 10l4 4 4-4" /><path d="M5 18h14" /></>,
     marksheet: <><rect x="4" y="4" width="16" height="16" rx="1.5" /><path d="M4 9h16M4 14h16M9 4v16M15 9v11" /></>,
+    ecr: <><path d="M7 4h8l3 3v13H7z" /><path d="M15 4v3h3M9 11h6M9 15h6" /></>,
     card: <><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="8" cy="12" r="2" /><path d="M12 11h6M12 14h4" /></>,
     views: <><path d="M4 19V10M10 19V5M16 19v-7M22 19H2" /></>,
     access: <><circle cx="8" cy="12" r="3" /><path d="M11 12h9l-2 2 2 2h-3" /></>,

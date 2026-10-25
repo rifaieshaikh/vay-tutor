@@ -103,6 +103,20 @@ def load_grid(filename: str, data: bytes, delimiter: str = "") -> dict:
     raise AppError(422, "import.file_type", "Upload an .xlsx workbook or a CSV file.")
 
 
+def sheet_preview(sheet: dict) -> list[list[str]]:
+    preview = []
+    for row in sheet.get("rows") or []:
+        line = []
+        for cell in row:
+            cell = cell or {}
+            text = str(cell.get("text") or "")
+            if not text and cell.get("formula"):
+                text = str(cell.get("cached") or "")
+            line.append(text)
+        preview.append(line)
+    return preview
+
+
 def column_view(grid: dict, sources: list[dict], aliases: dict | None = None) -> list[dict]:
     chosen = _selected(grid, sources)
     lookup = HEADER_ALIASES if aliases is None else aliases
@@ -888,6 +902,8 @@ async def present_operation(request, user, row: dict) -> dict:
         "expires_at": row.get("expires_at").isoformat() if row.get("expires_at") is not None else "",
         "expired": expired,
         "status": row.get("status") or "open",
+        "branch_id": row.get("branch_id") or "",
+        "course_id": row.get("course_id") or "",
         "limits": {"bytes": LIMIT_BYTES, "rows": LIMIT_ROWS, "sheets": LIMIT_SHEETS},
         "result": row.get("result"),
         "phase": "source",
@@ -915,6 +931,7 @@ async def present_operation(request, user, row: dict) -> dict:
             "name": sheet["name"],
             "index": sheet["index"],
             "row_count": len(sheet["rows"]),
+            "cells": sheet_preview(sheet),
             "selected": any(source.get("sheet") == sheet["name"] for source in plan.get("sources") or []),
             "header_row": next(
                 (
@@ -980,7 +997,7 @@ async def present_operation(request, user, row: dict) -> dict:
     return base
 
 
-async def store_upload(request, user, filename: str, data: bytes) -> dict:
+async def store_upload(request, user, filename: str, data: bytes, branch_id: str, course_id: str) -> dict:
     from bson import ObjectId
     from bson.binary import Binary
 
@@ -997,7 +1014,9 @@ async def store_upload(request, user, filename: str, data: bytes) -> dict:
         "format": grid["format"],
         "delimiter": grid.get("delimiter") or "",
         "detected_delimiter": grid.get("detected_delimiter") or "",
-        "plan": {},
+        "branch_id": branch_id,
+        "course_id": course_id,
+        "plan": {"defaults": {"course_id": course_id, "interest": "", "mode": "blanks"}},
         "revision": 1,
         "status": "open",
         "result": None,

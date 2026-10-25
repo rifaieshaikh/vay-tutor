@@ -10,7 +10,7 @@ from app.accounts import _guard_delegate, _role, _role_actions, bump_session
 from app.acl import allows, clean_scope, describe_scope
 from app.deps import current_user, db, grants_for, institute_resource, new_id, public_grant, require, write_audit
 from app.errors import AppError
-from app.security import hash_password, name_key
+from app.security import hash_password, name_key, password_error
 
 router = APIRouter(prefix="/api/v1")
 
@@ -146,8 +146,11 @@ async def create_teacher(request: Request, body: TeacherBody) -> dict:
     user_id = None
     if body.app_user:
         email = body.email.strip()
-        if not email or len(body.password) < 10:
-            raise AppError(422, "teacher.account", "Enter an email and a password of at least 10 characters.")
+        if not email or not body.password:
+            raise AppError(422, "teacher.account", "Enter a username and a password.")
+        problem = password_error(body.password)
+        if problem:
+            raise AppError(422, "auth.password", problem, field="password")
         user_id = new_id()
         try:
             await db(request).users.insert_one({
@@ -163,7 +166,7 @@ async def create_teacher(request: Request, body: TeacherBody) -> dict:
                 "session_version": 1,
             })
         except DuplicateKeyError:
-            raise AppError(409, "user.exists", "A user with that email already exists.") from None
+            raise AppError(409, "user.exists", "A user with that username already exists.") from None
         await write_audit(
             request, actor, "user.create", None, {"user_id": user_id, "role": "teacher"}, institute_resource(actor)
         )

@@ -3,6 +3,7 @@ from __future__ import annotations
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import ReturnDocument
 
+from app.academics.curriculum import seed_curriculum_kinds, seed_exam_types
 from app.config import Settings
 
 
@@ -38,6 +39,9 @@ async def ensure_schema(db: AsyncIOMotorDatabase) -> None:
     await db.form_questions.create_index([("institute_id", 1), ("order", 1)])
     await db.students.create_index([("institute_id", 1), ("name_key", 1)])
     await db.business_events.create_index([("institute_id", 1), ("at", -1)])
+    await db.exams.create_index([("institute_id", 1), ("batch_ids", 1)])
+    await seed_curriculum_kinds(db)
+    await seed_exam_types(db)
     current = await db.schema_meta.find_one({"_id": "schema"})
     if current and current.get("version", 0) >= 1:
         return
@@ -49,11 +53,19 @@ async def ensure_schema(db: AsyncIOMotorDatabase) -> None:
     await db.branches.create_index([("institute_id", 1), ("name_key", 1)], unique=True)
     await db.courses.create_index([("institute_id", 1), ("name_key", 1)], unique=True)
     await db.offerings.create_index([("branch_id", 1), ("course_id", 1)], unique=True)
-    await db.batches.create_index([("offering_id", 1), ("session_key", 1)], unique=True)
+    indexes = await db.batches.index_information()
+    if "offering_id_1_session_key_1" in indexes:
+        await db.batches.drop_index("offering_id_1_session_key_1")
+    await db.batches.create_index([("offering_id", 1), ("name_key", 1)], unique=True)
     await db.subjects.create_index([("course_id", 1), ("name_key", 1)], unique=True)
     await db.papers.create_index([("subject_id", 1), ("number", 1)], unique=True)
     await db.students.create_index("student_code", unique=True)
     await db.enrollments.create_index([("student_id", 1), ("batch_id", 1)], unique=True)
+    await db.enrollments.create_index(
+        [("institute_id", 1), ("enrollment_code", 1)],
+        unique=True,
+        partialFilterExpression={"enrollment_code": {"$type": "string"}},
+    )
     await db.enrollment_names.create_index([("batch_id", 1), ("name_key", 1)], unique=True)
     await db.results.create_index(
         [("marksheet_id", 1), ("enrollment_id", 1), ("revision", 1)],
@@ -67,6 +79,7 @@ async def ensure_schema(db: AsyncIOMotorDatabase) -> None:
     await db.files.create_index([("institute_id", 1), ("sha256", 1)])
     await db.audit_events.create_index([("institute_id", 1), ("at", -1)])
     await db.counters.update_one({"_id": "student_code"}, {"$setOnInsert": {"value": 0}}, upsert=True)
+    await db.counters.update_one({"_id": "enrollment_code"}, {"$setOnInsert": {"value": 0}}, upsert=True)
     await db.schema_meta.update_one(
         {"_id": "schema"}, {"$set": {"version": 1}}, upsert=True
     )
@@ -80,3 +93,14 @@ async def allocate_student_code(db: AsyncIOMotorDatabase, session, prefix: str =
         session=session,
     )
     return f"{prefix}-{counter['value']:06d}"
+
+
+async def allocate_enrollment_code(db: AsyncIOMotorDatabase, session=None) -> str:
+    counter = await db.counters.find_one_and_update(
+        {"_id": "enrollment_code"},
+        {"$inc": {"value": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+        session=session,
+    )
+    return f"ENR-{counter['value']:06d}"

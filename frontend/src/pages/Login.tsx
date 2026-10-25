@@ -108,8 +108,8 @@ export function LoginPage({ onReady }: { onReady: () => Promise<void> }) {
         <form onSubmit={redeem}>
           <p>A recovery code replaces the password and signs you in. Ask an administrator if you do not have one.</p>
           <label>
-            Email
-            <input name="email" type="email" autoComplete="username" required />
+            Username
+            <input name="email" type="text" autoComplete="username" required />
           </label>
           <label>
             Recovery code
@@ -117,7 +117,7 @@ export function LoginPage({ onReady }: { onReady: () => Promise<void> }) {
           </label>
           <label>
             New password
-            <input name="new_password" type="password" autoComplete="new-password" minLength={10} required />
+            <input name="new_password" type="password" autoComplete="new-password" required />
           </label>
           {error ? <p className="error" role="alert">{error}</p> : null}
           <div className="dialog-actions">
@@ -128,8 +128,8 @@ export function LoginPage({ onReady }: { onReady: () => Promise<void> }) {
       ) : (
         <form onSubmit={submit}>
           <label>
-            Email
-            <input name="email" type="email" autoComplete="username" required autoFocus />
+            Username
+            <input name="email" type="text" autoComplete="username" required autoFocus />
           </label>
           <label>
             Password
