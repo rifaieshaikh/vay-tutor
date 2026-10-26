@@ -12,4 +12,7 @@ __pycache__/
 node_modules/
 frontend/dist/
 desktop/release/
+desktop/host/resources/
+desktop/host/release/
+desktop/host/.cache/
 *.log

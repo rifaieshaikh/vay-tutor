@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from app.academics.catalog import router as catalog_router
 from app.academics.curriculum import router as curriculum_router
@@ -72,6 +74,42 @@ async def lifespan(app: FastAPI):
     client.close()
 
 
+def mount_frontend(app: FastAPI, directory: Path) -> None:
+    """Serve the built institute UI from the same origin as the API."""
+    root = directory.resolve()
+
+    def page(full_path: str):
+        if full_path == "api" or full_path.startswith("api/"):
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"code": "not_found", "message": "That record was not found."}},
+            )
+        candidate = (root / full_path).resolve() if full_path else root / "index.html"
+        inside = candidate == root or root in candidate.parents
+        if inside and candidate.is_file():
+            return FileResponse(candidate)
+        if full_path and Path(full_path).suffix:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"code": "not_found", "message": "That record was not found."}},
+            )
+        index = root / "index.html"
+        if index.is_file():
+            return FileResponse(index)
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": "That record was not found."}},
+        )
+
+    @app.get("/", include_in_schema=False)
+    async def frontend_index():
+        return page("")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def frontend_page(full_path: str):
+        return page(full_path)
+
+
 def create_app() -> FastAPI:
     settings = load_settings()
     app = FastAPI(title="Vay Tutor", version=settings.server_version, lifespan=lifespan)
@@ -122,6 +160,9 @@ def create_app() -> FastAPI:
         response.headers["X-Request-Id"] = request.state.request_id
         return response
 
+    static_dir = os.environ.get("STATIC_DIR")
+    if static_dir:
+        mount_frontend(app, Path(static_dir))
     logging.getLogger().addFilter(_RedactFilter())
     return app
 

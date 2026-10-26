@@ -1,0 +1,54 @@
+{
+  "name": "vay-tutor-host",
+  "private": true,
+  "version": "0.2.0",
+  "description": "Full installation. MongoDB, the API, and the institute UI on this computer.",
+  "author": "Vay Tutor",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test src/supervisor.test.js",
+    "dist": "electron-builder --win --x64"
+  },
+  "dependencies": {
+    "selfsigned": "2.4.1"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "com.vaytutor.host",
+    "productName": "Vay Tutor",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/main.js",
+      "src/supervisor.js",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "resources/mongo", "to": "mongo" },
+      { "from": "resources/python", "to": "python" },
+      { "from": "resources/backend", "to": "backend" },
+      { "from": "resources/frontend", "to": "frontend" },
+      { "from": "resources/redist", "to": "redist" },
+      { "from": "build/start-supervisor.cmd", "to": "start-supervisor.cmd" }
+    ],
+    "asar": true,
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "../build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "VayTutor-Setup-${version}.${ext}",
+      "include": "build/installer.nsh"
+    }
+  }
+}

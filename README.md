@@ -51,6 +51,22 @@ The workflow attaches two artifacts:
 | `vay-tutor-client-only-windows` | Windows 11, NSIS installer |
 | `vay-tutor-client-only-macos` | macOS, disk image |
 
+## Full installation
+
+One computer uses this installation. It includes MongoDB Community, the API, and the institute UI. MongoDB listens on `127.0.0.1:27017` as replica set `rs0`. The institute is served at `https://127.0.0.1:8443`, and on this computer’s other addresses at port 8443, so the client-only installation on another computer can connect. Records, the database, and the certificate stay in `C:\ProgramData\Vay Tutor`. Removing the program leaves that folder in place.
+
+The installed program is named Vay Tutor. A sign-in task starts it again at the next Windows sign-in. Closing the window leaves MongoDB and the API running. The certificate other computers need is `C:\ProgramData\Vay Tutor\vay-tutor.cer`, and the addresses are written to `connect.txt` in that same folder. Install that certificate on each client computer before connecting. MongoDB Community’s license is included beside `mongod.exe`. Redistribution of MongoDB Community has to be confirmed by the release owner.
+
+Build both Windows installers from a checkout:
+
+```bash
+cd desktop && npm ci && CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --x64
+node desktop/scripts/stage-full.js
+cd desktop/host && npm ci && CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --x64
+```
+
+The client installer is `desktop/release/VayTutorClient-Setup-0.2.0.exe`. The full installer is `desktop/host/release/VayTutor-Setup-0.2.0.exe`. The workflow also publishes it as `vay-tutor-full-windows`. The installers are unsigned, so Windows SmartScreen asks for confirmation.
+
 ## Where to change a workflow
 
 Each domain owns its pages and its HTTP routes. Shared request checks live in `backend/app/deps.py`. Enrollment shape and name conflicts live in `backend/app/enrollment.py` and are used by admission, manual enrollment, transfer, and import.
