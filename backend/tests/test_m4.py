@@ -605,6 +605,48 @@ def test_report_filters_reach_the_list_card_and_export(client):
     assert b"Exam type unit" in contents
     assert b"Attempt Original" in contents
 
+    database.enrollments.insert_one({
+        "_id": str(ObjectId()),
+        "institute_id": institute_id,
+        "student_id": first,
+        "branch_id": branch,
+        "course_id": course,
+        "batch_id": other_batch,
+    })
+    january_sheet = client.post(
+        "/api/v1/marksheets",
+        json={
+            "title": "January test",
+            "branch_id": branch,
+            "course_id": course,
+            "batch_id": other_batch,
+            "subject_id": subject,
+            "paper_id": paper,
+            "exam_type": "unit",
+            "maximum": 20,
+            "exam_date": "2027-01-08",
+            "attempt": "original",
+        },
+    )
+    assert january_sheet.status_code == 200, january_sheet.text
+    january_id = january_sheet.json()["id"]
+    assert client.post(f"/api/v1/marksheets/{january_id}/results", json={"student_id": first, "status": "scored", "score": 10}).status_code == 200
+    assert client.post(f"/api/v1/marksheets/{january_id}/publish").status_code == 200
+    combined = client.get(f"/api/v1/students/{first}/card")
+    assert combined.json()["empty_reason"] == "enrollment"
+    assert combined.json()["results"] == []
+    september_card = client.get(f"/api/v1/students/{first}/card", params={"batch_id": batch})
+    assert september_card.json()["result_count"] == 1
+    assert september_card.json()["performance"]["percentage"] == 90
+    january_card = client.get(f"/api/v1/students/{first}/card", params={"batch_id": other_batch})
+    assert january_card.json()["result_count"] == 1
+    assert january_card.json()["performance"]["percentage"] == 50
+    listed = client.get("/api/v1/students", params={"page": 1, "q": "SHANHA"})
+    shanha = next(item for item in listed.json()["items"] if item["id"] == first)
+    by_batch = {item["batch_id"]: item for item in shanha["enrollments"]}
+    assert by_batch[batch]["performance"]["percentage"] == 90
+    assert by_batch[other_batch]["performance"]["percentage"] == 50
+
 
 def _result(institute, **fields):
     row = {

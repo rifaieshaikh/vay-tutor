@@ -27,6 +27,8 @@ type Student = {
   create_student?: boolean;
   batch_id?: string;
   batch_choices?: Choice[];
+  roster?: boolean;
+  student_id?: string;
 };
 type Group = { id: string; maximum: number | null; interpretation: string; students: Student[] };
 type ExamFields = {
@@ -49,6 +51,9 @@ type Sheet = {
   similar_exams: Similar[];
   matched_exam: (Similar & { status?: string }) | null;
   groups: Group[];
+  selected_batch_ids?: string[];
+  cover_roster?: boolean;
+  roster_reason?: string;
 };
 type Blocker = { code: string; message: string; sheet_id?: string; row?: number };
 type HistoryItem = {
@@ -69,7 +74,7 @@ type Preview = {
   blockers: Blocker[];
   totals: { updates?: number; planned?: { results?: Record<string, number>; students?: Record<string, number>; enrollments?: Record<string, number> } };
   outcomes: { name: string; status: string; exam_id?: string; created?: boolean }[];
-  context: { batches: Choice[]; subjects: Subject[] } | null;
+  context: { batches: Choice[]; subjects: Subject[]; branch_id?: string; course_id?: string } | null;
 };
 
 type Draft = {
@@ -83,9 +88,12 @@ type Draft = {
   itemIds: string[];
   useExamId: string;
   keepGroup: string;
+  batchIds: string[];
+  coverRoster: boolean;
+  rosterReason: string;
 };
 
-const STEPS = ["Batches", "Exams", "Marks", "Confirm", "Results"];
+const STEPS = ["File", "Marks", "Confirm", "Results"];
 const STATUS_LABEL: Record<string, string> = {
   needs_resolution: "Needs review",
   ready: "Ready",
@@ -104,7 +112,6 @@ export function BundleImportPage() {
   const [batches, setBatches] = useState<BatchRow[]>([]);
   const [branchId, setBranchId] = useState("");
   const [courseId, setCourseId] = useState("");
-  const [batchIds, setBatchIds] = useState<string[]>([]);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [marks, setMarks] = useState<Record<string, { name: string; score: string; batchId: string; reason: string }>>({});
@@ -136,9 +143,11 @@ export function BundleImportPage() {
     const batch = params.get("batch_id") || "";
     if (!branch && !course && !batch) return;
     seeded.current = true;
-    if (branch) setBranchId(branch);
-    if (course) setCourseId(course);
-    if (batch) setBatchIds([batch]);
+    const row = batch ? batches.find((item) => item.id === batch) : undefined;
+    if (row && !branch) setBranchId(row.branch_id);
+    else if (branch) setBranchId(branch);
+    if (row && !course) setCourseId(row.course_id);
+    else if (course) setCourseId(course);
   }, [batches, params]);
 
   const branches = useMemo(() => unique(batches.map((item) => ({ id: item.branch_id, name: item.branch_name }))), [batches]);
@@ -152,6 +161,8 @@ export function BundleImportPage() {
 
   function remember(next: Preview, replace = false) {
     setPreview(next);
+    if (next.context?.branch_id) setBranchId(next.context.branch_id);
+    if (next.context?.course_id) setCourseId(next.context.course_id);
     setDrafts((current) => {
       const merged = replace ? {} : { ...current };
       for (const sheet of next.sheets) {
@@ -169,6 +180,11 @@ export function BundleImportPage() {
           itemIds: exam?.scope.item_ids || [],
           useExamId: exam?.use_exam_id || "",
           keepGroup: active?.id || sheet.groups[0]?.id || "",
+          batchIds: sheet.selected_batch_ids?.length
+            ? sheet.selected_batch_ids
+            : (!replace && params.get("batch_id") ? [params.get("batch_id") || ""].filter(Boolean) : []),
+          coverRoster: Boolean(sheet.cover_roster),
+          rosterReason: sheet.roster_reason || "",
         };
       }
       return merged;
@@ -190,7 +206,7 @@ export function BundleImportPage() {
       const loaded = await api<Preview>(`/api/v1/imports/${id}`);
       remember(loaded, true);
       setMarks({});
-      setStep(loaded.state === "committed" ? 4 : 1);
+      setStep(loaded.state === "committed" ? 3 : 1);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "That import could not be opened.");
     } finally {
@@ -275,13 +291,14 @@ export function BundleImportPage() {
     event.preventDefault();
     const input = event.currentTarget.elements.namedItem("file") as HTMLInputElement;
     const file = input.files?.[0];
-    if (!file || !branchId || !courseId || batchIds.length === 0) return;
+    if (!file || !branchId || !courseId) return;
     setPending(true);
     setError("");
     const body = new FormData();
     body.append("branch_id", branchId);
     body.append("course_id", courseId);
-    body.append("batch_ids", batchIds.join(","));
+    const linkedBatch = params.get("batch_id") || "";
+    if (linkedBatch) body.append("batch_ids", linkedBatch);
     body.append("file", file);
     try {
       const created = await api<{ id: string }>("/api/v1/exams/import", { method: "POST", body });
@@ -290,6 +307,24 @@ export function BundleImportPage() {
       setStep(1);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Upload failed.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function saveSheet(target: Sheet, nextDraft: Draft) {
+    if (!preview) return;
+    setDrafts((current) => ({ ...current, [target.id]: nextDraft }));
+    setPending(true);
+    setError("");
+    try {
+      await api(`/api/v1/imports/${preview.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ sheets: { [target.id]: sheetPayload(target, nextDraft, marks) } }),
+      });
+      remember(await api<Preview>(`/api/v1/imports/${preview.id}`));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The sheet was not saved.");
     } finally {
       setPending(false);
     }
@@ -317,6 +352,23 @@ export function BundleImportPage() {
     }
   }
 
+  async function removeRow(target: Sheet, student: Student) {
+    if (!preview) return;
+    setPending(true);
+    setError("");
+    try {
+      await api(`/api/v1/imports/${preview.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ sheets: { [target.id]: { drop_rows: [student.row] } } }),
+      });
+      remember(await api<Preview>(`/api/v1/imports/${preview.id}`));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "That row was not removed.");
+    } finally {
+      setPending(false);
+    }
+  }
+
   async function commit() {
     if (!preview) return;
     setPending(true);
@@ -328,7 +380,7 @@ export function BundleImportPage() {
       });
       remember(await api<Preview>(`/api/v1/imports/${preview.id}`));
       refreshHistory();
-      setStep(4);
+      setStep(3);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The marks were not saved.");
     } finally {
@@ -346,7 +398,7 @@ export function BundleImportPage() {
         <div>
           <p className="eyebrow">Assessments</p>
           <h1>Import exams</h1>
-          <p className="page-lead">Each sheet becomes an exam for the batches you choose. Names and marks can be edited before they are saved.</p>
+          <p className="page-lead">Each sheet becomes an exam. Set its batches and exam details with the marks. A sheet can mark every current student who is missing from it as absent.</p>
         </div>
         <div className="actions"><Link className="button" to="/ecr">Back to ECR</Link></div>
       </div>
@@ -364,56 +416,53 @@ export function BundleImportPage() {
         <>
         <form className="form-grid" onSubmit={upload}>
           <label>Branch
-            <select aria-label="Branch" value={branchId} onChange={(event) => { setBranchId(event.target.value); setCourseId(""); setBatchIds([]); }}>
+            <select aria-label="Branch" value={branchId} onChange={(event) => { setBranchId(event.target.value); setCourseId(""); }}>
               <option value="">Choose a branch</option>
               {branches.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
           <label>Course
-            <select aria-label="Course" value={courseId} onChange={(event) => { setCourseId(event.target.value); setBatchIds([]); }}>
+            <select aria-label="Course" value={courseId} onChange={(event) => setCourseId(event.target.value)}>
               <option value="">Choose a course</option>
               {courses.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
-          <div className="span-2">
-            <p className="meta">Current batches</p>
-            {currentBatches.length === 0 ? <p>Choose a branch and course to see its current batches.</p> : (
-              <div className="permission-picks">
-                {currentBatches.map((item) => (
-                  <button key={item.id} type="button" className={batchIds.includes(item.id) ? "permission is-selected" : "permission"} aria-pressed={batchIds.includes(item.id)} onClick={() => setBatchIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])}>
-                    {item.name}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
           <label className="span-2">Workbook
             <input name="file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" aria-label="Workbook" onChange={(event) => setFileName(event.target.files?.[0]?.name || "")} />
           </label>
           <div className="dialog-actions span-2">
-            <button type="submit" disabled={pending || !branchId || !courseId || batchIds.length === 0 || !fileName}>Continue</button>
+            <button type="submit" disabled={pending || !branchId || !courseId || !fileName}>Continue</button>
           </div>
         </form>
         <ImportHistory items={history} pending={pending} onOpen={openHistory} onDelete={removeHistory} />
         </>
       ) : null}
-      {step === 1 && preview ? (
+      {step === 1 && preview && sheet && draft ? (
         <div className="stack">
-          {preview.sheets.map((item) => {
-            const row = drafts[item.id];
-            if (!row) return null;
+          <div className="sheet-tabs" role="tablist" aria-label="Sheets">
+            {preview.sheets.map((item) => (
+              <button key={item.id} type="button" role="tab" aria-selected={item.id === sheet.id} onClick={() => setSheetId(item.id)}>{item.name}</button>
+            ))}
+          </div>
+          {(() => {
+            const row = draft;
+            const item = sheet;
             const subject = subjects.find((entry) => entry.id === row.subjectId);
             const items = !subject || row.kind === "subject" ? [] : row.kind === "paper" ? subject.papers : subject.units.filter((unit) => unit.kind === row.kind);
+            const saveCovered = (next: Draft) => {
+              updateDraft(setDrafts, item.id, next);
+              if (next.coverRoster) void saveSheet(item, next);
+            };
             return (
-              <fieldset key={item.id} className="form-grid">
+              <fieldset className="form-grid">
                 <legend>{item.name}</legend>
                 <label className="span-2">
-                  <input type="checkbox" checked={row.included} onChange={(event) => updateDraft(setDrafts, item.id, { included: event.target.checked })} /> Include this sheet
+                  <input type="checkbox" checked={row.included} onChange={(event) => void saveSheet(item, { ...row, included: event.target.checked })} /> Include this sheet
                 </label>
                 {row.included ? (
                   <>
                     <label>Exam type
-                      <select aria-label={`Exam type for ${item.name}`} value={row.examType} onChange={(event) => updateDraft(setDrafts, item.id, { examType: event.target.value, useExamId: "" })}>
+                      <select aria-label={`Exam type for ${item.name}`} value={row.examType} onChange={(event) => void saveSheet(item, { ...row, examType: event.target.value, useExamId: "" })}>
                         <option value="">Choose an exam type</option>
                         {activeTypes.map((entry) => <option key={entry.key} value={entry.key}>{entry.label}</option>)}
                       </select>
@@ -460,14 +509,32 @@ export function BundleImportPage() {
                         </label>
                       </div>
                     ) : null}
+                    <div className="span-2">
+                      <p className="meta">Batches for this sheet</p>
+                      {currentBatches.length === 0 ? <p>This course has no current batches.</p> : (
+                        <div className="permission-picks">
+                          {currentBatches.map((batch) => (
+                            <button key={batch.id} type="button" className={row.batchIds.includes(batch.id) ? "permission is-selected" : "permission"} aria-pressed={row.batchIds.includes(batch.id)} disabled={pending} onClick={() => {
+                              const batchIds = row.batchIds.includes(batch.id) ? row.batchIds.filter((id) => id !== batch.id) : [...row.batchIds, batch.id];
+                              void saveSheet(item, { ...row, batchIds });
+                            }}>
+                              {batch.name}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <label className="span-2">
+                      <input type="checkbox" checked={row.coverRoster} onChange={(event) => void saveSheet(item, { ...row, coverRoster: event.target.checked })} /> Apply to every current student. Anyone missing from this sheet is marked absent.
+                    </label>
                     <label>Exam name
-                      <input aria-label={`Exam name for ${item.name}`} value={row.title} onChange={(event) => updateDraft(setDrafts, item.id, { title: event.target.value, useExamId: "" })} />
+                      <input aria-label={`Exam name for ${item.name}`} value={row.title} onChange={(event) => updateDraft(setDrafts, item.id, { title: event.target.value, useExamId: "" })} onBlur={(event) => saveCovered({ ...row, title: event.target.value, useExamId: "" })} />
                     </label>
                     <label>Maximum
-                      <input inputMode="decimal" aria-label={`Maximum for ${item.name}`} value={row.maximum} onChange={(event) => updateDraft(setDrafts, item.id, { maximum: event.target.value, useExamId: "" })} />
+                      <input inputMode="decimal" aria-label={`Maximum for ${item.name}`} value={row.maximum} onChange={(event) => updateDraft(setDrafts, item.id, { maximum: event.target.value, useExamId: "" })} onBlur={(event) => saveCovered({ ...row, maximum: event.target.value, useExamId: "" })} />
                     </label>
                     <label>Exam date
-                      <input type="date" aria-label={`Exam date for ${item.name}`} value={row.date} onChange={(event) => updateDraft(setDrafts, item.id, { date: event.target.value, useExamId: "" })} />
+                      <input type="date" aria-label={`Exam date for ${item.name}`} value={row.date} onChange={(event) => updateDraft(setDrafts, item.id, { date: event.target.value, useExamId: "" })} onBlur={(event) => saveCovered({ ...row, date: event.target.value, useExamId: "" })} />
                     </label>
                     {item.groups.length > 1 ? (
                       <label>Mark column
@@ -480,56 +547,55 @@ export function BundleImportPage() {
                     {item.similar_exams.map((similar) => (
                       <p key={similar.id} className="span-2">
                         {similar.title} on {similar.exam_date} is out of {similar.maximum} ({similar.status || "draft"}).
-                        <button type="button" onClick={() => updateDraft(setDrafts, item.id, { title: similar.title, date: similar.exam_date, maximum: String(similar.maximum), subjectId: similar.subject_id, examType: similar.exam_kind || "", kind: similar.scope.kind, itemIds: similar.scope.item_ids, useExamId: similar.id })}>Update this exam</button>
+                        <button type="button" onClick={() => void saveSheet(item, { ...row, title: similar.title, date: similar.exam_date, maximum: String(similar.maximum), subjectId: similar.subject_id, examType: similar.exam_kind || "", kind: similar.scope.kind, itemIds: similar.scope.item_ids, useExamId: similar.id })}>Update this exam</button>
                       </p>
                     ))}
+                    {row.coverRoster && item.matched_exam?.status === "published" ? (
+                      <label className="span-2">Reason for students missing from this sheet
+                        <input aria-label={`Reason for absent students on ${item.name}`} value={row.rosterReason} onChange={(event) => updateDraft(setDrafts, item.id, { rosterReason: event.target.value })} onBlur={(event) => void saveSheet(item, { ...row, rosterReason: event.target.value })} />
+                      </label>
+                    ) : null}
                   </>
                 ) : null}
               </fieldset>
             );
-          })}
+          })()}
+          {draft.included ? (
+            <MarkTable
+              sheet={sheet}
+              marks={marks}
+              keepGroup={draft.keepGroup}
+              onRemove={(student) => void removeRow(sheet, student)}
+              onChange={(student, value) => {
+                const key = student.roster && student.student_id ? `roster:${sheet.id}:${student.student_id}` : `${sheet.id}:${student.row}`;
+                setMarks((current) => {
+                  const previous = current[key];
+                  return {
+                    ...current,
+                    [key]: {
+                      name: value.name ?? previous?.name ?? student.display_name,
+                      score: value.score ?? previous?.score ?? shownScore(student),
+                      batchId: value.batchId ?? previous?.batchId ?? student.batch_id ?? "",
+                      reason: value.reason ?? previous?.reason ?? "",
+                    },
+                  };
+                });
+              }}
+            />
+          ) : <p>This sheet is left out.</p>}
           <div className="dialog-actions">
             <button type="button" disabled={pending} onClick={() => saveDrafts(2)}>Continue</button>
           </div>
-          <BlockerList blockers={preview.blockers} />
+          <BlockerList blockers={preview.blockers.filter((entry) => !entry.sheet_id || entry.sheet_id === sheet.id)} />
         </div>
       ) : null}
-      {step === 2 && preview && sheet && draft ? (
-        <div className="stack">
-          <div className="sheet-tabs">
-            {preview.sheets.filter((item) => drafts[item.id]?.included).map((item) => (
-              <button key={item.id} type="button" aria-current={item.id === sheet.id ? "page" : undefined} onClick={() => setSheetId(item.id)}>{item.name}</button>
-            ))}
-          </div>
-          <MarkTable
-            sheet={sheet}
-            marks={marks}
-            onChange={(student, value) => {
-              const key = `${sheet.id}:${student.row}`;
-              setMarks((current) => {
-                const previous = current[key];
-                return {
-                  ...current,
-                  [key]: {
-                    name: value.name ?? previous?.name ?? student.display_name,
-                    score: value.score ?? previous?.score ?? shownScore(student),
-                    batchId: value.batchId ?? previous?.batchId ?? student.batch_id ?? "",
-                    reason: value.reason ?? previous?.reason ?? "",
-                  },
-                };
-              });
-            }}
-          />
-          <div className="dialog-actions">
-            <button type="button" disabled={pending} onClick={() => saveDrafts(3)}>Continue</button>
-          </div>
-          <BlockerList blockers={preview.blockers.filter((item) => !item.sheet_id || item.sheet_id === sheet.id)} />
-        </div>
-      ) : null}
-      {step === 3 && preview ? (
+      {step === 2 && preview ? (
         <div className="stack">
           <p>{preview.filename}</p>
           <Counts totals={preview.totals} />
+          {preview.sheets.some((item) => item.included && item.cover_roster) ? (
+            <p>Students who are not on a sheet that applies to everyone are marked absent. A saved score for someone left off that sheet is replaced.</p>
+          ) : null}
           {(preview.totals.updates || 0) > 0 ? (
             <label>
               <input type="checkbox" checked={confirmUpdates} onChange={(event) => setConfirmUpdates(event.target.checked)} /> Confirm updates to marks already saved
@@ -541,7 +607,7 @@ export function BundleImportPage() {
           </div>
         </div>
       ) : null}
-      {step === 4 && preview ? (
+      {step === 3 && preview ? (
         <div className="stack">
           <p>The workbook is saved. Publish a marklist from Marksheets when it is ready.</p>
           <ul>
@@ -559,44 +625,86 @@ export function BundleImportPage() {
 function MarkTable({
   sheet,
   marks,
+  keepGroup,
   onChange,
+  onRemove,
 }: {
   sheet: Sheet;
   marks: Record<string, { name: string; score: string; batchId: string; reason: string }>;
+  keepGroup: string;
   onChange: (student: Student, value: Partial<{ name: string; score: string; batchId: string; reason: string }>) => void;
+  onRemove: (student: Student) => void;
 }) {
-  const group = sheet.groups.find((item) => item.interpretation !== "skip_duplicate") || sheet.groups[0];
+  const group = sheet.groups.find((item) => item.id === keepGroup) || sheet.groups.find((item) => item.interpretation !== "skip_duplicate") || sheet.groups[0];
   if (!group) return <p>{sheet.name} has no mark table.</p>;
   const published = sheet.matched_exam?.status === "published";
+  const listed = group.students.filter((student) => !student.roster);
+  const missing = group.students.filter((student) => student.roster);
   return (
-    <table>
-      <thead>
-        <tr><th>Name</th><th>Mark</th><th>Batch</th><th>Match</th>{published ? <th>Reason</th> : null}</tr>
-      </thead>
-      <tbody>
-        {group.students.map((student) => {
-          const key = `${sheet.id}:${student.row}`;
-          const edited = marks[key];
-          const choices = student.batch_choices || [];
-          return (
-            <tr key={student.row}>
-              <td><input aria-label={`Name on row ${student.row}`} value={edited?.name ?? student.display_name} onChange={(event) => onChange(student, { name: event.target.value })} /></td>
-              <td><input aria-label={`Mark on row ${student.row}`} value={edited?.score ?? shownScore(student)} onChange={(event) => onChange(student, { score: event.target.value })} /></td>
-              <td>
-                {choices.length > 1 ? (
-                  <select aria-label={`Batch for row ${student.row}`} value={edited?.batchId || student.batch_id || ""} onChange={(event) => onChange(student, { batchId: event.target.value })}>
-                    <option value="">Choose a batch</option>
-                    {choices.map((choice) => <option key={choice.id} value={choice.id}>{choice.name}</option>)}
-                  </select>
-                ) : (choices[0]?.name || "")}
-              </td>
-              <td>{matchLabel(student)}</td>
-              {published ? <td><input aria-label={`Reason for row ${student.row}`} value={edited?.reason || ""} onChange={(event) => onChange(student, { reason: event.target.value })} /></td> : null}
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Mark</th><th>Batch</th><th>Match</th>{published ? <th>Reason</th> : null}<th></th></tr>
+        </thead>
+        <tbody>
+          {listed.map((student) => {
+            const key = `${sheet.id}:${student.row}`;
+            const edited = marks[key];
+            const choices = student.batch_choices || [];
+            return (
+              <tr key={student.row}>
+                <td><input aria-label={`Name on row ${student.row}`} value={edited?.name ?? student.display_name} onChange={(event) => onChange(student, { name: event.target.value })} /></td>
+                <td><input aria-label={`Mark on row ${student.row}`} value={edited?.score ?? shownScore(student)} onChange={(event) => onChange(student, { score: event.target.value })} /></td>
+                <td>
+                  {choices.length > 1 ? (
+                    <select aria-label={`Batch for row ${student.row}`} value={edited?.batchId || student.batch_id || ""} onChange={(event) => onChange(student, { batchId: event.target.value })}>
+                      <option value="">Choose a batch</option>
+                      {choices.map((choice) => <option key={choice.id} value={choice.id}>{choice.name}</option>)}
+                    </select>
+                  ) : (choices[0]?.name || "")}
+                </td>
+                <td>{matchLabel(student)}</td>
+                {published ? <td><input aria-label={`Reason for row ${student.row}`} value={edited?.reason || ""} onChange={(event) => onChange(student, { reason: event.target.value })} /></td> : null}
+                <td><button type="button" className="text-button" aria-label={`Remove ${student.display_name || `row ${student.row}`}`} onClick={() => onRemove(student)}>Remove</button></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {sheet.cover_roster && missing.length === 0 ? <p>Every current student in the selected batches is on this sheet.</p> : null}
+      {missing.length > 0 ? (
+        <>
+          <p className="meta">Not on the sheet. These students are marked absent.</p>
+          <table>
+            <thead>
+              <tr><th>Name</th><th>Mark</th><th>Batch</th><th>Match</th></tr>
+            </thead>
+            <tbody>
+              {missing.map((student) => {
+                const key = `roster:${sheet.id}:${student.student_id}`;
+                const edited = marks[key];
+                const choices = student.batch_choices || [];
+                return (
+                  <tr key={student.student_id || student.row}>
+                    <td>{student.display_name}</td>
+                    <td><input aria-label={`Mark for ${student.display_name}`} value={edited?.score ?? shownScore(student)} onChange={(event) => onChange(student, { score: event.target.value.trim() === "" ? "AB" : event.target.value })} /></td>
+                    <td>
+                      {choices.length > 1 ? (
+                        <select aria-label={`Batch for ${student.display_name}`} value={edited?.batchId || student.batch_id || ""} onChange={(event) => onChange(student, { batchId: event.target.value })}>
+                          <option value="">Choose a batch</option>
+                          {choices.map((choice) => <option key={choice.id} value={choice.id}>{choice.name}</option>)}
+                        </select>
+                      ) : (choices[0]?.name || "")}
+                    </td>
+                    <td>{matchLabel(student)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </>
+      ) : null}
+    </>
   );
 }
 
@@ -606,6 +714,13 @@ function BlockerList({ blockers }: { blockers: Blocker[] }) {
 }
 
 function matchLabel(student: Student) {
+  if (student.roster) {
+    if (student.match === "choose") return "Choose a batch";
+    if (student.status === "scored") return "Will score";
+    if (student.change === "update") return "Will mark absent";
+    if (student.change === "unchanged") return "Already absent";
+    return "Absent";
+  }
   if (student.match === "ambiguous") return "More than one student";
   if (student.match === "choose") return "Choose a batch";
   if (student.match === "enroll" && student.create_student) return "New student, will enroll";
@@ -643,7 +758,21 @@ function sheetPayload(sheet: Sheet, draft: Draft, marks: Record<string, { name: 
   const names: Record<string, string> = {};
   const corrections: Record<string, { score?: string; status?: string; action: string; reason?: string }> = {};
   const rowBatchIds: Record<string, string> = {};
+  const rosterMarks: Record<string, { score: string; status: string; batch_id: string; reason: string }> = {};
   for (const student of group?.students || []) {
+    if (student.roster && student.student_id) {
+      const edited = marks[`roster:${sheet.id}:${student.student_id}`];
+      if (!edited) continue;
+      const token = edited.score.trim();
+      const absent = token === "" || token.toUpperCase() === "AB" || token.toUpperCase() === "A";
+      rosterMarks[student.student_id] = {
+        score: absent ? "" : token,
+        status: absent ? "absent" : "scored",
+        batch_id: edited.batchId || "",
+        reason: edited.reason || "",
+      };
+      continue;
+    }
     const edited = marks[`${sheet.id}:${student.row}`];
     if (!edited) continue;
     if (edited.name && edited.name !== student.display_name) names[String(student.row)] = edited.name;
@@ -663,6 +792,10 @@ function sheetPayload(sheet: Sheet, draft: Draft, marks: Record<string, { name: 
   ]));
   return {
     included: draft.included,
+    batch_ids: draft.batchIds,
+    cover_roster: draft.coverRoster,
+    roster_reason: draft.rosterReason,
+    roster_marks: rosterMarks,
     use_exam_id: draft.useExamId,
     exam: {
       title: draft.title,

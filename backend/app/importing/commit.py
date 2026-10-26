@@ -228,17 +228,26 @@ async def _apply_published_corrections(db, client, actor: dict, changes: list, l
         }
         if not allows(actor.get("grants") or [], "marksheet.correct", resource):
             raise AppError(403, "auth.forbidden", "You do not have permission to correct a published marksheet.")
-        reason = "; ".join(dict.fromkeys(row["reason"] for row in rows))
-        await correct_marksheet(
+        updates = [row for row in rows if not row.get("insert")]
+        inserts = [row for row in rows if row.get("insert")]
+        reason = "; ".join(dict.fromkeys(row["reason"] for row in rows if row.get("reason")))
+        corrected = await correct_marksheet(
             db,
             client,
             actor,
             sheet,
             reason,
-            [{"result_id": row["result_id"], "score": row["score"], "status": row["status"]} for row in rows],
+            [{"result_id": row["result_id"], "score": row["score"], "status": row["status"]} for row in updates],
             sheet.get("edit_version", 0),
         )
-        for row in rows:
+        for row in inserts:
+            document = dict(row["document"])
+            document["_id"] = str(ObjectId())
+            document["revision"] = corrected["revision"]
+            document["active"] = True
+            await db.results.insert_one(document)
+            _note(ledger, "results", "insert", document["_id"])
+        for row in updates:
             _note(ledger, "results", "update", row["result_id"])
 
 
@@ -743,6 +752,7 @@ async def commit_bundle_import(db, client, job: dict, actor: dict, confirm_updat
             "Confirm the preview before changing existing draft results.",
             updates=plan["totals"]["updates"],
         )
+    await _require_bundle_batches(db, actor, plan)
     ledger = _ledger()
     outcomes = []
     by_sheet = []
@@ -787,6 +797,7 @@ async def commit_bundle_import(db, client, job: dict, actor: dict, confirm_updat
         raise AppError(409, "import.conflict", "Another import saved this record first. Open the preview again.") from exc
     await _apply_published_corrections(db, client, actor, queued, ledger)
     summary = {"counts": _from_ledger(ledger), "by_sheet": by_sheet}
+    saved_batches = _bundle_batch_ids(plan)
     await db.import_jobs.update_one(
         {"_id": job["_id"]},
         {"$set": {
@@ -795,9 +806,10 @@ async def commit_bundle_import(db, client, job: dict, actor: dict, confirm_updat
             "outcomes": outcomes,
             "summary": summary,
             "committed_at": _now(),
+            "batch_ids": saved_batches,
         }},
     )
-    await _record_import(db, actor, job, set(job.get("batch_ids") or []), "Imported exam marklists", "/ecr")
+    await _record_import(db, actor, job, set(saved_batches), "Imported exam marklists", "/ecr")
     await db.audit_events.insert_one({
         "_id": str(ObjectId()),
         "institute_id": actor["institute_id"],
@@ -809,19 +821,88 @@ async def commit_bundle_import(db, client, job: dict, actor: dict, confirm_updat
     return {"state": "committed", "outcomes": outcomes, "summary": summary}
 
 
+def _bundle_batch_ids(plan: dict) -> list[str]:
+    found: list[str] = []
+    for sheet in plan["sheets"]:
+        if not sheet.get("included"):
+            continue
+        for batch_id in sheet.get("selected_batch_ids") or []:
+            if batch_id not in found:
+                found.append(batch_id)
+    return found
+
+
+async def _require_bundle_batches(db, actor: dict, plan: dict) -> None:
+    from app.acl import allows
+
+    batch_ids = _bundle_batch_ids(plan)
+    stored = {
+        item["_id"]: item
+        for item in await db.batches.find(
+            {"_id": {"$in": batch_ids}, "institute_id": actor["institute_id"]}
+        ).to_list(length=len(batch_ids) or 1)
+    }
+    for sheet in plan["sheets"]:
+        if not sheet.get("included"):
+            continue
+        for batch_id in sheet.get("selected_batch_ids") or []:
+            batch = stored.get(batch_id)
+            if batch is None:
+                raise AppError(422, "exam.batch", f"Choose a batch for {sheet['name']}.")
+            resource = {
+                "institute_id": actor["institute_id"],
+                "branch_id": batch.get("branch_id"),
+                "course_id": batch.get("course_id"),
+                "batch_id": batch["_id"],
+                "subject_id": None,
+                "paper_id": None,
+            }
+            if not allows(actor.get("grants") or [], "marksheet.upload", resource, False):
+                raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+
+
 async def _bundle_exam(db, session, job: dict, actor: dict, sheet: dict, ledger: dict) -> tuple[dict, dict, bool]:
     fields = sheet["exam"]
     matched = sheet.get("matched_exam") or {}
+    batch_ids = list(sheet.get("selected_batch_ids") or [])
+    if not batch_ids:
+        raise AppError(422, "exam.batch", f"Choose a batch for {sheet['name']}.")
     if matched.get("id"):
         exam = await db.exams.find_one({"_id": matched["id"], "institute_id": actor["institute_id"]}, session=session)
         marksheet = await db.marksheets.find_one({"_id": exam["marksheet_id"]}, session=session)
+        if sorted(exam.get("batch_ids") or []) != sorted(batch_ids):
+            await db.exams.update_one({"_id": exam["_id"]}, {"$set": {"batch_ids": batch_ids}}, session=session)
+            await db.marksheets.update_one(
+                {"_id": marksheet["_id"]},
+                {"$set": {"batch_ids": batch_ids, "cohort_key": "|".join(batch_ids)}},
+                session=session,
+            )
+            if exam.get("assessment_id"):
+                await db.assessments.update_one(
+                    {"_id": exam["assessment_id"]},
+                    {"$set": {"batch_ids": batch_ids}},
+                    session=session,
+                )
+            exam["batch_ids"] = batch_ids
+            marksheet["batch_ids"] = batch_ids
+        chosen_kind = fields.get("exam_kind") or ""
+        if chosen_kind and chosen_kind != (exam.get("exam_kind") or ""):
+            await db.exams.update_one({"_id": exam["_id"]}, {"$set": {"exam_kind": chosen_kind}}, session=session)
+            await db.marksheets.update_one({"_id": marksheet["_id"]}, {"$set": {"exam_kind": chosen_kind}}, session=session)
+            if exam.get("assessment_id"):
+                await db.assessments.update_one(
+                    {"_id": exam["assessment_id"]},
+                    {"$set": {"exam_kind": chosen_kind}},
+                    session=session,
+                )
+            exam["exam_kind"] = chosen_kind
+            marksheet["exam_kind"] = chosen_kind
         _note(ledger, "academic", "unchanged", marksheet["_id"])
         return exam, marksheet, False
     exam_id = str(ObjectId())
     assessment_id = str(ObjectId())
     attempt_id = str(ObjectId())
     sheet_id = str(ObjectId())
-    batch_ids = list(job.get("batch_ids") or [])
     branch = await db.batches.find_one({"_id": batch_ids[0]}, session=session) if batch_ids else {}
     scope = fields.get("scope") or {"kind": "subject", "item_ids": []}
     maximum = float(fields["maximum"])
@@ -954,6 +1035,15 @@ async def _commit_bundle_scores(db, session, job, actor, exam, marksheet, sheet,
                 "reason": student.get("correction_reason") or "Imported correction",
             })
             continue
+        if published and change == "insert" and student.get("published_insert"):
+            batch = await db.batches.find_one({"_id": student.get("batch_id")}, session=session)
+            queued.append({
+                "marksheet_id": marksheet["_id"],
+                "insert": True,
+                "reason": student.get("correction_reason") or "Marked absent",
+                "document": _bundle_result_document(actor, job, exam, marksheet, sheet, student, person, enrollment, batch, revision),
+            })
+            continue
         if existing and change == "update":
             await db.results.update_one(
                 {"_id": existing["_id"]},
@@ -973,41 +1063,50 @@ async def _commit_bundle_scores(db, session, job, actor, exam, marksheet, sheet,
             continue
         batch = await db.batches.find_one({"_id": student.get("batch_id")}, session=session)
         result_id = str(ObjectId())
-        await db.results.insert_one({
-            "_id": result_id,
-            "institute_id": actor["institute_id"],
-            "marksheet_id": marksheet["_id"],
-            "enrollment_id": enrollment["_id"],
-            "student_id": person["_id"],
-            "revision": revision,
-            "active": False,
-            "status": student["status"],
-            "score": student["score"],
-            "maximum": exam["maximum"],
-            "percentage": student["percentage"],
-            "rank": student.get("rank"),
-            "band": student.get("band"),
-            "exam_date": exam.get("exam_date"),
-            "title": exam.get("title"),
-            "assessment_id": exam["assessment_id"],
-            "attempt_kind": "original",
-            "exam_type": exam.get("exam_type"),
-            "counts_in_aggregate": True,
-            "source_rank": student.get("source_rank"),
-            "branch_id": (batch or {}).get("branch_id") or "",
-            "course_id": exam["course_id"],
-            "batch_id": student.get("batch_id") or "",
-            "subject_id": exam["subject_id"],
-            "paper_id": exam.get("paper_id") or "",
-            "source": {
-                "file": job.get("filename"),
-                "sheet": sheet["name"],
-                "row": student["row"],
-                "column": student.get("column"),
-            },
-        }, session=session)
+        await db.results.insert_one(
+            _bundle_result_document(actor, job, exam, marksheet, sheet, student, person, enrollment, batch, revision, result_id),
+            session=session,
+        )
         _note(ledger, "results", "insert", result_id)
     return queued
+
+
+def _bundle_result_document(actor, job, exam, marksheet, sheet, student, person, enrollment, batch, revision, result_id=None) -> dict:
+    document = {
+        "institute_id": actor["institute_id"],
+        "marksheet_id": marksheet["_id"],
+        "enrollment_id": enrollment["_id"],
+        "student_id": person["_id"],
+        "revision": revision,
+        "active": False,
+        "status": student["status"],
+        "score": student["score"],
+        "maximum": exam["maximum"],
+        "percentage": student.get("percentage"),
+        "rank": student.get("rank"),
+        "band": student.get("band"),
+        "exam_date": exam.get("exam_date"),
+        "title": exam.get("title"),
+        "assessment_id": exam["assessment_id"],
+        "attempt_kind": "original",
+        "exam_type": exam.get("exam_type"),
+        "counts_in_aggregate": True,
+        "source_rank": student.get("source_rank"),
+        "branch_id": (batch or {}).get("branch_id") or "",
+        "course_id": exam["course_id"],
+        "batch_id": student.get("batch_id") or "",
+        "subject_id": exam["subject_id"],
+        "paper_id": exam.get("paper_id") or "",
+        "source": {
+            "file": job.get("filename"),
+            "sheet": sheet["name"],
+            "row": student.get("row"),
+            "column": student.get("column"),
+        },
+    }
+    if result_id:
+        document["_id"] = result_id
+    return document
 
 
 async def _enroll_import_row(db, session, actor: dict, student: dict) -> tuple[dict, bool, dict, bool]:

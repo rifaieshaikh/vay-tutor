@@ -80,6 +80,7 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
         "title": sheet.get("title"),
         "exam_date": sheet.get("exam_date"),
         "exam_type": sheet.get("exam_type"),
+        "exam_kind": (exam or {}).get("exam_kind") or sheet.get("exam_kind") or "",
         "maximum": sheet.get("maximum"),
         "source_file": sheet.get("source_file"),
         "source_sheet": sheet.get("source_sheet"),

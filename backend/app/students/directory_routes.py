@@ -216,6 +216,21 @@ async def list_students(
         summary = aggregate(rows, policy)
         latest = max((str(row.get("exam_date") or "") for row in rows), default="")
         visible_contact = contact_visible(user["grants"], owned.get(student["_id"], []))
+        contexts = enrollment_context(by_student.get(student["_id"], []), facts)
+        for context in contexts:
+            batch_rows = [row for row in rows if row.get("batch_id") == context.get("batch_id")]
+            batch_summary = aggregate(batch_rows, policy)
+            context["performance"] = {
+                "percentage": batch_summary["percentage"],
+                "scored": batch_summary["scored"],
+                "expected": batch_summary["expected"],
+                "missing": batch_summary["missing"],
+                "absent": batch_summary["absent"],
+                "band": batch_summary["band"],
+            }
+            batch_latest = max((str(row.get("exam_date") or "") for row in batch_rows), default="")
+            context["latest_exam_date"] = batch_latest or None
+            context["empty_reason"] = None if batch_rows else "unpublished"
         item = {
             "id": student["_id"],
             "student_code": student["student_code"],
@@ -232,7 +247,7 @@ async def list_students(
             },
             "latest_exam_date": latest or None,
             "empty_reason": None if rows else "unpublished",
-            "enrollments": enrollment_context(by_student.get(student["_id"], []), facts),
+            "enrollments": contexts,
             "actions": {
                 "edit": identity_editable(user["grants"], owned.get(student["_id"], [])),
                 "card": card_visible(user["grants"], by_student.get(student["_id"], [])),

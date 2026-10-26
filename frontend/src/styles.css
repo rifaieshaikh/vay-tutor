@@ -534,6 +534,8 @@ dd { margin: 0; }
 .sheet-grid td.batch.bad .batch-choice { background: #fff; }
 .sheet-grid td.name { padding: 0; min-width: 12rem; }
 .sheet-grid td.name input { min-width: 12rem; }
+.sheet-grid .name-line { display: flex; align-items: center; flex-wrap: wrap; }
+.sheet-grid .name-line input { flex: 1 1 8rem; }
 .sheet-grid td.bad, .sheet-grid th.bad { background: #ffc7c2; color: #7a1f1f; box-shadow: inset 0 0 0 2px #d93025; }
 .sheet-grid td.skipped { color: #8a939c; background: #f7f8f9; }
 .sheet-grid select, .sheet-grid input { width: 100%; min-width: 4.5rem; height: 2rem; margin: 0; padding: 0.15rem 0.4rem; border: 0; border-radius: 0; background: transparent; color: inherit; cursor: text; }
@@ -548,12 +550,16 @@ dd { margin: 0; }
 .sheet-tabs.excel-tabs { margin: 0; padding: 0.2rem 0.35rem 0; background: #e6e9ed; gap: 0.15rem; }
 .sheet-tabs.excel-tabs button { border-radius: 0 0 6px 6px; background: #f4f6f8; color: #243040; border: 1px solid transparent; padding: 0.35rem 0.7rem; }
 .sheet-tabs.excel-tabs button.has-error { box-shadow: inset 0 -2px 0 #d93025; }
-.sheet-tabs.excel-tabs button[aria-selected="true"] { background: white; color: #1c2430; border-color: #c5cdd6; font-weight: 700; }
+.sheet-tabs.excel-tabs button[aria-selected="true"] { background: #0f6e6b; color: white; border-color: #0a5552; font-weight: 700; box-shadow: inset 0 3px 0 #083f3d; }
+.sheet-tabs.excel-tabs button.has-error[aria-selected="true"] { box-shadow: inset 0 3px 0 #083f3d, inset 0 -3px 0 #ffd2ce; }
 .sheet-tabs.excel-tabs .tab { display: inline-flex; align-items: center; gap: 0.15rem; background: #f4f6f8; border: 1px solid transparent; border-radius: 0 0 6px 6px; padding: 0 0.2rem 0 0.45rem; }
-.sheet-tabs.excel-tabs .tab:has(button[aria-selected="true"]) { background: white; border-color: #c5cdd6; }
+.sheet-tabs.excel-tabs .tab:has(button[aria-selected="true"]) { background: #0f6e6b; border-color: #0a5552; box-shadow: inset 0 3px 0 #083f3d; }
 .sheet-tabs.excel-tabs .tab.excluded { opacity: 0.55; }
+.sheet-tabs.excel-tabs .tab.excluded:has(button[aria-selected="true"]) { opacity: 1; }
 .sheet-tabs.excel-tabs .tab button { background: transparent; border: 0; border-radius: 0; padding: 0.35rem 0.4rem; }
+.sheet-tabs.excel-tabs .tab button[aria-selected="true"] { color: white; font-weight: 700; }
 .sheet-tabs.excel-tabs .tab input { width: auto; height: auto; margin: 0; accent-color: #0f6e6b; }
+.sheet-tabs.excel-tabs .tab:has(button[aria-selected="true"]) input { accent-color: white; }
 .sheet-grid .row-no button { width: 100%; min-height: 2rem; padding: 0 0.45rem; background: transparent; color: inherit; border: 0; border-radius: 0; font-size: 0.75rem; font-weight: 600; }
 .sheet-grid tr.source-row .row-no { box-shadow: inset 0 -2px 0 #0f6e6b; }
 .history { min-width: 46rem; }
@@ -661,6 +667,18 @@ table.people-table caption:not(.sr-only) { caption-side: top; text-align: left; 
 .comparison-controls { align-items: end; flex-wrap: wrap; margin-bottom: 1rem; }
 .comparison-score { min-width: 8rem; display: grid; gap: 0.35rem; }
 .comparison-score .bar { height: 0.4rem; }
+table.people-table.progress-grid { min-width: 0; width: 100%; table-layout: fixed; }
+.progress-grid col.progress-subject { width: 16%; }
+.progress-grid col.progress-part { width: 18%; }
+.progress-grid .grid-mark { display: grid; gap: 0.2rem; min-width: 0; }
+.progress-grid .grid-mark strong { font-size: 0.95rem; }
+.progress-grid .grid-mark .bar { height: 0.35rem; }
+.progress-grid .grid-mark.danger { color: #b33a32; }
+.progress-grid .grid-mark.fifty-fifty { color: #967019; }
+.progress-grid .grid-mark.safe { color: #0f6e6b; }
+.progress-grid .grid-mark .bar.danger span { background: #b33a32; }
+.progress-grid .grid-mark .bar.fifty-fifty span { background: #967019; }
+.progress-grid .grid-mark .bar.safe span { background: #0f6e6b; }
 .comparison-score .bar.danger span { background: #b33a32; }
 .comparison-score .bar.fifty-fifty span { background: #967019; }
 .academic-page table { min-width: 40rem; }

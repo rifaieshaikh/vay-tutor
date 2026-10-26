@@ -357,6 +357,12 @@ def test_exam_type_is_separate_from_the_subject_partition(client):
     assert {"test-series", "module-exam"} <= {item["key"] for item in listed.json()["items"]}
     created_type = client.post("/api/v1/exam-types", json={"label": "Class test"})
     assert created_type.status_code == 200, created_type.text
+    assert created_type.json()["weight"] == 3
+    weighted = client.patch(f"/api/v1/exam-types/{created_type.json()['key']}", json={"weight": 1})
+    assert weighted.status_code == 200, weighted.text
+    assert weighted.json()["weight"] == 1
+    rejected = client.patch(f"/api/v1/exam-types/{created_type.json()['key']}", json={"weight": 0})
+    assert rejected.status_code == 422
     duplicate = client.post("/api/v1/exam-types", json={"label": "Class test"})
     assert duplicate.status_code == 409
     course_id = client.post("/api/v1/courses", json={"name": "CA Foundation"}).json()["id"]
@@ -404,6 +410,20 @@ def test_exam_type_is_separate_from_the_subject_partition(client):
     assert exam["exam_kind"] == created_type.json()["key"]
     assert exam["scope"]["kind"] == kind.json()["key"]
     assert exam["exam_type"] == kind.json()["key"]
+    switched = client.patch(f"/api/v1/exams/{exam['_id']}", json={"exam_kind": "module-exam"})
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["exam_kind"] == "module-exam"
+    assert database.marksheets.find_one({"_id": exam["marksheet_id"]})["exam_kind"] == "module-exam"
+    assert database.assessments.find_one({"_id": exam["assessment_id"]})["exam_kind"] == "module-exam"
+    rejected = client.patch(f"/api/v1/exams/{exam['_id']}", json={"exam_kind": "not-a-type"})
+    assert rejected.status_code == 422
+    again = _upload(client, branch_id, course_id, [batch_id], _workbook([("Opening", [["Risha Fathima", 8]])]))
+    replaced = client.patch(f"/api/v1/imports/{again}", json={"sheets": {"sheet-0": {
+        "exam": {**fields, "exam_kind": "test-series"},
+    }}})
+    assert replaced.status_code == 200, replaced.text
+    assert client.post(f"/api/v1/imports/{again}/commit", json={"confirm_updates": True}).status_code == 200
+    assert database.exams.find_one({"_id": exam["_id"]})["exam_kind"] == "test-series"
 
 
 def test_bundle_import_enrolls_a_known_student_who_is_not_in_the_batch(client):
@@ -447,3 +467,119 @@ def test_bundle_import_enrolls_a_known_student_who_is_not_in_the_batch(client):
     assert enrollment["course_id"] == course_id
     assert database.results.find_one({"student_id": student_id})["score"] == 9
     assert database.admissions.count_documents({}) == admissions_before
+
+
+def test_sheet_batches_mark_students_missing_from_the_sheet_absent(client):
+    bootstrap(client)
+    course_id = client.post("/api/v1/courses", json={"name": "CA Foundation"}).json()["id"]
+    subject_id = client.post(f"/api/v1/courses/{course_id}/subjects", json={"name": "Accounting"}).json()["id"]
+    branch_id = client.post("/api/v1/branches", json={"name": "North"}).json()["id"]
+    assert client.post(f"/api/v1/branches/{branch_id}/courses", json={"course_id": course_id}).status_code == 200
+    morning = client.post(f"/api/v1/branches/{branch_id}/batches", json={"course_id": course_id, "name": "Morning"}).json()["id"]
+    evening = client.post(f"/api/v1/branches/{branch_id}/batches", json={"course_id": course_id, "name": "Evening"}).json()["id"]
+    database = sync_db(client)
+    institute_id = database.institutes.find_one({})["_id"]
+    risha = _enroll(database, institute_id, morning, branch_id, course_id, "Risha Fathima")
+    meera = _enroll(database, institute_id, morning, branch_id, course_id, "Meera Nair")
+    nila = _enroll(database, institute_id, morning, branch_id, course_id, "Nila Thomas")
+    database.enrollments.update_one({"student_id": nila, "batch_id": morning}, {"$set": {"ended_on": "2026-01-01"}})
+    _enroll(database, institute_id, evening, branch_id, course_id, "Evening Only")
+
+    uploaded = client.post(
+        "/api/v1/exams/import",
+        data={"branch_id": branch_id, "course_id": course_id},
+        files={"file": ("marks.xlsx", _workbook([("Chapter", [["Risha Fathima", 16]])]), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    import_id = uploaded.json()["id"]
+    missing_batch = client.get(f"/api/v1/imports/{import_id}")
+    assert any(item["code"] == "import.batch" for item in missing_batch.json()["blockers"])
+    patched = client.patch(f"/api/v1/imports/{import_id}", json={"sheets": {"sheet-0": {
+        "exam": _exam("Chapter", "2026-10-01", subject_id),
+        "batch_ids": [morning],
+        "cover_roster": True,
+    }}})
+    assert patched.status_code == 200, patched.text
+    ready = client.get(f"/api/v1/imports/{import_id}")
+    assert ready.json()["ready"] is True, ready.text
+    students = ready.json()["sheets"][0]["groups"][0]["students"]
+    assert ready.json()["sheets"][0]["selected_batch_ids"] == [morning]
+    meera_plan = next(item for item in students if item["display_name"] == "Meera Nair")
+    assert meera_plan["roster"] is True
+    assert meera_plan["status"] == "absent"
+    assert meera_plan["change"] == "insert"
+    assert all(item["display_name"] != "Nila Thomas" for item in students)
+    assert all(item["display_name"] != "Evening Only" for item in students)
+    assert client.post(f"/api/v1/imports/{import_id}/commit", json={"confirm_updates": True}).status_code == 200
+    exam = database.exams.find_one({"title": "Chapter"})
+    assert exam["batch_ids"] == [morning]
+    assert database.results.find_one({"student_id": risha, "marksheet_id": exam["marksheet_id"]})["score"] == 16
+    absent = database.results.find_one({"student_id": meera, "marksheet_id": exam["marksheet_id"]})
+    assert absent["status"] == "absent"
+    assert absent["score"] is None
+    assert absent["batch_id"] == morning
+    assert database.results.find_one({"student_id": nila}) is None
+    listed = client.get(f"/api/v1/exams?batch_id={morning}")
+    row = next(item for item in listed.json()["items"] if item["id"] == exam["_id"])
+    assert row["attended"] == 1
+    assert row["roster_total"] == 2
+
+    blank_id = client.post(
+        "/api/v1/exams/import",
+        data={"branch_id": branch_id, "course_id": course_id},
+        files={"file": ("blank.xlsx", _workbook([("Chapter", [["Risha Fathima", None]])]), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    ).json()["id"]
+    client.patch(f"/api/v1/imports/{blank_id}", json={"sheets": {"sheet-0": {
+        "exam": _exam("Chapter", "2026-10-01", subject_id),
+        "batch_ids": [morning],
+        "cover_roster": True,
+    }}})
+    blank = client.get(f"/api/v1/imports/{blank_id}")
+    blank_rows = blank.json()["sheets"][0]["groups"][0]["students"]
+    assert next(item for item in blank_rows if item["display_name"] == "Risha Fathima")["change"] == "skip"
+    assert next(item for item in blank_rows if item["display_name"] == "Meera Nair")["change"] == "unchanged"
+    assert client.post(f"/api/v1/imports/{blank_id}/commit", json={"confirm_updates": True}).status_code == 200
+    assert database.results.find_one({"student_id": risha, "title": "Chapter"})["score"] == 16
+
+    replaced_id = client.post(
+        "/api/v1/exams/import",
+        data={"branch_id": branch_id, "course_id": course_id},
+        files={"file": ("replaced.xlsx", _workbook([("Chapter", [["Meera Nair", 15]])]), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    ).json()["id"]
+    client.patch(f"/api/v1/imports/{replaced_id}", json={"sheets": {"sheet-0": {
+        "exam": _exam("Chapter", "2026-10-01", subject_id),
+        "batch_ids": [morning],
+        "cover_roster": True,
+    }}})
+    replaced = client.get(f"/api/v1/imports/{replaced_id}")
+    assert replaced.json()["ready"] is True, replaced.text
+    replaced_rows = replaced.json()["sheets"][0]["groups"][0]["students"]
+    assert next(item for item in replaced_rows if item["display_name"] == "Risha Fathima")["change"] == "update"
+    assert replaced.json()["totals"]["updates"] >= 1
+    assert client.post(f"/api/v1/imports/{replaced_id}/commit").status_code == 422
+    assert client.post(f"/api/v1/imports/{replaced_id}/commit", json={"confirm_updates": True}).status_code == 200
+    assert database.results.find_one({"student_id": risha, "marksheet_id": exam["marksheet_id"]})["status"] == "absent"
+    assert database.results.find_one({"student_id": meera, "marksheet_id": exam["marksheet_id"]})["score"] == 15
+
+    database.marksheets.update_one({"_id": exam["marksheet_id"]}, {"$set": {"status": "published", "active_revision": 1}})
+    database.results.update_many({"marksheet_id": exam["marksheet_id"]}, {"$set": {"active": True}})
+    dev = _enroll(database, institute_id, morning, branch_id, course_id, "Dev Kumar")
+    published_id = client.post(
+        "/api/v1/exams/import",
+        data={"branch_id": branch_id, "course_id": course_id},
+        files={"file": ("published.xlsx", _workbook([("Chapter", [["Meera Nair", 15]])]), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    ).json()["id"]
+    client.patch(f"/api/v1/imports/{published_id}", json={"sheets": {"sheet-0": {
+        "exam": _exam("Chapter", "2026-10-01", subject_id),
+        "batch_ids": [morning],
+        "cover_roster": True,
+    }}})
+    blocked = client.get(f"/api/v1/imports/{published_id}")
+    assert any(item["code"] == "import.correction_needed" for item in blocked.json()["blockers"]), blocked.text
+    client.patch(f"/api/v1/imports/{published_id}", json={"sheets": {"sheet-0": {"roster_reason": "Full roll"}}})
+    opened = client.get(f"/api/v1/imports/{published_id}")
+    assert opened.json()["ready"] is True, opened.text
+    assert client.post(f"/api/v1/imports/{published_id}/commit", json={"confirm_updates": True}).status_code == 200
+    dev_result = database.results.find_one({"student_id": dev, "marksheet_id": exam["marksheet_id"], "active": True})
+    assert dev_result["status"] == "absent"
+    assert dev_result["score"] is None

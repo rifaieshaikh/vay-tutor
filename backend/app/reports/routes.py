@@ -286,7 +286,7 @@ async def student_card(
     ]
     results = await db(request).results.find({"student_id": student_id, "active": {"$ne": False}}).to_list(length=500)
     from app.calculating import aggregate, public_bands
-    from app.reporting import comparisons, hydrate, matches, policy_for, present, ranks_for, tops_for
+    from app.reporting import attach_parts, comparisons, hydrate, matches, policy_for, present, ranks_for, tops_for
 
     policy = await policy_for(db(request), user["institute_id"])
     hydrated = await hydrate(db(request), results)
@@ -331,8 +331,13 @@ async def student_card(
             for field in ("branch_id", "course_id", "batch_id")
         )
     ]
+    if not card_filters.get("batch_id"):
+        enrolled_batches = list(dict.fromkeys(item.get("batch_id") for item in enrolled if item.get("batch_id")))
+        if len(enrolled_batches) == 1:
+            card_filters = {**card_filters, "batch_id": enrolled_batches[0]}
     context_selected = bool(period) or any(card_filters.get(field) for field in ("branch_id", "course_id", "batch_id"))
-    if context_selected and not enrolled:
+    several_batches = not card_filters.get("batch_id") and len({item.get("batch_id") for item in enrolled if item.get("batch_id")}) > 1
+    if several_batches or (context_selected and not enrolled):
         selected = []
         empty_reason = "enrollment"
     else:
@@ -347,6 +352,7 @@ async def student_card(
             empty_reason = "filters"
         else:
             empty_reason = None
+    await attach_parts(db(request), selected)
     presented = []
     for row in selected:
         rank = batch_rank = top_score = batch_top_score = None

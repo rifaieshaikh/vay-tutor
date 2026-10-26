@@ -206,29 +206,31 @@ function NameCell({ value, label, bad, title, onCommit, extra }: { value: string
 
   return (
     <td className={bad ? "name bad" : "name"} title={title}>
-      <input
-        aria-label={label}
-        value={draft}
-        onFocus={(event) => {
-          focused.current = true;
-          const field = event.currentTarget;
-          requestAnimationFrame(() => field.select());
-        }}
-        onMouseUp={(event) => event.currentTarget.select()}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={(event) => { focused.current = false; commit(event.currentTarget.value); }}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.stopPropagation();
-            setDraft(value);
-            return;
-          }
-          if (event.key !== "Enter") return;
-          event.preventDefault();
-          commit(event.currentTarget.value);
-        }}
-      />
-      {extra}
+      <div className="name-line">
+        <input
+          aria-label={label}
+          value={draft}
+          onFocus={(event) => {
+            focused.current = true;
+            const field = event.currentTarget;
+            requestAnimationFrame(() => field.select());
+          }}
+          onMouseUp={(event) => event.currentTarget.select()}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={(event) => { focused.current = false; commit(event.currentTarget.value); }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.stopPropagation();
+              setDraft(value);
+              return;
+            }
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            commit(event.currentTarget.value);
+          }}
+        />
+        {extra}
+      </div>
     </td>
   );
 }
@@ -1014,7 +1016,7 @@ export function ImportPage({ canUpload = true, examId = "" }: { canUpload?: bool
 
             {preview && step === 2 ? (
               <>
-                <p>{examId ? "Each row needs a name and a mark. Names that are not enrolled in this exam’s batches are left out. Skip every extra mark column." : "The opening rows show what was read from the file. Branch, course, batch, subject, and paper at the top apply to every sheet. On a combined exam, a student already in one of the sheet’s batches keeps that batch. Otherwise choose from the batches written on the sheet."}</p>
+                <p>{examId ? "Each row needs a name and a mark. Names that are not enrolled in this exam’s batches are left out. Skip every extra mark column. Remove a row you do not need." : "The opening rows show what was read from the file. Branch, course, batch, subject, and paper at the top apply to every sheet. On a combined exam, a student already in one of the sheet’s batches keeps that batch. Otherwise choose from the batches written on the sheet. Remove a row you do not need."}</p>
                 {examBlockers(preview)}
                 <SheetGrid
                   lockContext={Boolean(examId)}
@@ -1293,7 +1295,7 @@ function SheetGrid({
           extra={
             <>
               {lockContext && unmatched ? <span className="batch-note">Not enrolled</span> : null}
-              {nameBad || sample?.added ? <button type="button" className="cell-link" onClick={() => onDrop(sheet.id, line.row)}>{nameBad ? "Drop" : "Remove"}</button> : null}
+              <button type="button" className="cell-link" aria-label={`Remove row ${line.row}`} onClick={() => onDrop(sheet.id, line.row)}>Remove</button>
             </>
           }
         />
@@ -1343,7 +1345,7 @@ function SheetGrid({
       {lockContext ? null : <ContextBar sheets={sheets} onCommit={onContext} />}
       <div className="table-wrap">
         <table className="sheet-grid">
-          <caption>{sheet.name}. Click a name or a mark and type. Press Enter to keep it.</caption>
+          <caption>{sheet.name}. Click a name or a mark and type. Press Enter to keep it. Remove leaves a row out of this import.</caption>
           <thead>
             <tr>
               <th className="col-letter" />

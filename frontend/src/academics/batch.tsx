@@ -42,6 +42,8 @@ type ExamRow = {
   scope_label: string;
   marksheet_id: string;
   marksheet_status: string;
+  attended: number;
+  roster_total: number;
   other_batches: { id: string; name: string; branch_name?: string }[];
 };
 type Page<T> = { items: T[]; total: number; page: number; pages: number };
@@ -532,7 +534,7 @@ export function BatchPage({ session }: { session: Session }) {
             <div className="table-wrap">
               <table className="people-table">
                 <caption className="sr-only">Exams for {board.name}.</caption>
-                <thead><tr><th>Exam</th><th>Scope</th><th>Status</th><th>Exam date</th></tr></thead>
+                <thead><tr><th>Exam</th><th>Scope</th><th>Status</th><th>Exam date</th><th>Attended</th></tr></thead>
                 <tbody>
                   {visibleExams.map((row) => (
                     <tr key={row.id}>
@@ -540,6 +542,7 @@ export function BatchPage({ session }: { session: Session }) {
                       <td>{row.scope_label}</td>
                       <td>{row.marksheet_status || "draft"}</td>
                       <td>{formatDisplayDate(row.exam_date)}</td>
+                      <td>{row.attended} / {row.roster_total}</td>
                     </tr>
                   ))}
                 </tbody>

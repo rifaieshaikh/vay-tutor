@@ -1,12 +1,10 @@
-import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
-import { notify } from "../notify";
 import { studentRecordHref } from "../students";
+import { ExamType, useExamTypes } from "../academics/kinds";
 import { Band, BandMark, bandFor, bandTone } from "../bands";
-import { periodLabel } from "../context";
-import { Option, applyScopeChange, optionFits, scopeOptions } from "../filters";
-import { StudentDialog } from "../ui";
+import { Option } from "../filters";
 
 type Performance = {
   percentage: number | null;
@@ -18,6 +16,16 @@ type Performance = {
   band_name?: string | null;
   band_place?: string | null;
 };
+type EnrollmentCard = {
+  id?: string;
+  batch_id?: string | null;
+  branch_id?: string | null;
+  course_id?: string | null;
+  batch_name?: string;
+  performance?: Performance;
+  latest_exam_date?: string | null;
+  empty_reason?: string | null;
+};
 type Student = {
   id: string;
   student_code: string;
@@ -25,6 +33,7 @@ type Student = {
   performance?: Performance;
   latest_exam_date?: string | null;
   empty_reason?: string | null;
+  enrollments?: EnrollmentCard[];
 };
 type ReportSummary = Performance & { students: number; with_results: number };
 type Result = {
@@ -47,6 +56,9 @@ type Result = {
   batch_top_score: number | null;
   exam_date: string | null;
   attempt: string;
+  exam_kind?: string;
+  part_key?: string;
+  part_label?: string;
   marksheet_id?: string | null;
   included_in_total?: boolean;
 };
@@ -80,34 +92,7 @@ type Card = {
 };
 type ExportJob = { format: "pdf" | "xlsx"; state: "queued" | "running" | "ready" | "failed"; fileId?: string | null; filename?: string | null; error?: string };
 
-const REPORT_FILTERS = ["branch_id", "course_id", "batch_id", "subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"] as const;
-const DIALOG_FILTERS = ["branch_id", "course_id", "period", "batch_id", "subject_id", "paper_id", "exam_type", "exam_date_from", "exam_date_to", "attempt"] as const;
-const PAGE_FILTERS = ["q", ...DIALOG_FILTERS] as const;
-const ACADEMIC_FIELDS = [
-  ["subject_id", "Subject", "subject"],
-  ["paper_id", "Paper", "paper"],
-] as const;
-const FILTER_LABELS: Record<string, string> = {
-  q: "Student",
-  branch_id: "Branch",
-  course_id: "Course",
-  period: "Period",
-  batch_id: "Batch",
-  subject_id: "Subject",
-  paper_id: "Paper",
-  exam_type: "Exam type",
-  exam_date_from: "From",
-  exam_date_to: "To",
-  attempt: "Attempt",
-};
-const DIMENSIONS: Record<string, string> = {
-  branch_id: "branch",
-  course_id: "course",
-  batch_id: "batch",
-  subject_id: "subject",
-  paper_id: "paper",
-  exam_type: "exam_type",
-};
+const ENROLLMENT_KEYS = ["branch_id", "course_id", "batch_id"] as const;
 const EMPTY_REASONS: Record<string, string> = {
   enrollment: "This student is not enrolled in the selected branch, course, or batch.",
   filters: "No published results match these filters.",
@@ -195,16 +180,37 @@ function tally(rows: Result[], bands?: Band[]) {
   };
 }
 
-function subjectsFrom(rows: Result[], bands?: Band[]): SubjectSummary[] {
-  const groups = new Map<string, Result[]>();
-  for (const row of rows) {
-    const key = `${row.subject_id || ""}|${row.paper_id || ""}`;
-    groups.set(key, [...(groups.get(key) || []), row]);
-  }
-  return [...groups.entries()].map(([key, group]) => {
-    const [subjectId, paperId] = key.split("|");
-    return { subject_id: subjectId || null, paper_id: paperId || null, ...tally(group, bands) };
-  });
+const EXAM_COLUMN_LIMIT = 5;
+
+function examColumns(rows: Result[], types: ExamType[]) {
+  const weight = new Map(types.map((item) => [item.key, item.weight ?? 99]));
+  const label = new Map(types.map((item) => [item.key, item.label]));
+  const keys = [...new Set(rows.map((row) => row.exam_kind || "").filter(Boolean))];
+  keys.sort((left, right) => (weight.get(left) ?? 99) - (weight.get(right) ?? 99) || (label.get(left) || left).localeCompare(label.get(right) || right));
+  const columns = keys.slice(0, EXAM_COLUMN_LIMIT).map((key) => ({ key, label: label.get(key) || key }));
+  if (rows.some((row) => !row.exam_kind) && columns.length < EXAM_COLUMN_LIMIT) columns.push({ key: "", label: "Exam" });
+  return columns;
+}
+
+function partKey(row: Result) {
+  return row.part_key || `${row.subject_id || ""}|${row.paper_id || "subject"}`;
+}
+
+function partLabel(row: Result, paper: (id?: string | null) => string) {
+  if (row.part_label) return row.part_label;
+  if (row.paper_id) return paper(row.paper_id);
+  return "Whole subject";
+}
+
+function GridMark({ percentage, band, place }: { percentage: number | null; band: string | null; place?: string | null }) {
+  const tone = bandTone(band, place);
+  if (percentage == null) return <span className="meta">—</span>;
+  return (
+    <span className={`grid-mark ${tone}`}>
+      <strong>{formatPercent(percentage)}%</strong>
+      <span className={`bar ${tone}`} aria-hidden="true"><span style={{ width: `${Math.max(0, Math.min(100, percentage))}%` }} /></span>
+    </span>
+  );
 }
 
 function ScoreBar({ percentage, band, place }: { percentage: number | null; band: string | null; place?: string | null }) {
@@ -222,12 +228,7 @@ function studentsReturn(value: string | null) {
 }
 
 function readApplied(params: URLSearchParams) {
-  return Object.fromEntries(["q", "page", ...DIALOG_FILTERS].map((key) => [key, params.get(key) || ""]));
-}
-
-function periodError(from: string, to: string) {
-  if (from && to && from > to) return "The start date must be on or before the end date.";
-  return "";
+  return { q: params.get("q") || "", page: params.get("page") || "" };
 }
 
 function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
@@ -281,99 +282,9 @@ function Dialog({ title, onClose, children }: { title: string; onClose: () => vo
   );
 }
 
-function ReportFilters({
-  draft,
-  options,
-  rangeError,
-  dirty,
-  onChange,
-  onApply,
-  onReset,
-}: {
-  draft: Record<string, string>;
-  options: Record<string, Option[]>;
-  rangeError: string;
-  dirty: boolean;
-  onChange: (key: string, value: string) => void;
-  onApply: () => void;
-  onReset: () => void;
-}) {
-  const scope = scopeOptions(draft, options);
-  return (
-    <form className="report-filters" onSubmit={(event: FormEvent) => { event.preventDefault(); onApply(); }}>
-      <div className="form-grid">
-        <label>
-          Branch
-          <select aria-label="Branch" value={draft.branch_id || ""} onChange={(event) => onChange("branch_id", event.target.value)}>
-            <option value="">All authorized</option>
-            {(options.branch || []).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-          </select>
-        </label>
-        <label>
-          Course
-          <select aria-label="Course" value={draft.course_id || ""} onChange={(event) => onChange("course_id", event.target.value)}>
-            <option value="">All authorized</option>
-            {scope.courses.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-          </select>
-        </label>
-        <label>
-          Period
-          <select aria-label="Period" value={draft.period || ""} onChange={(event) => onChange("period", event.target.value)}>
-            <option value="">All authorized</option>
-            {scope.periodChoices.map((key) => <option key={key} value={key}>{periodLabel(key)}</option>)}
-          </select>
-        </label>
-        <label>
-          Batch
-          <select aria-label="Batch" value={draft.batch_id || ""} onChange={(event) => onChange("batch_id", event.target.value)}>
-            <option value="">All authorized</option>
-            {scope.batches.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-          </select>
-        </label>
-        {ACADEMIC_FIELDS.map(([key, label, dimension]) => (
-          <label key={key}>
-            {label}
-            <select value={draft[key] || ""} onChange={(event) => onChange(key, event.target.value)}>
-              <option value="">All authorized</option>
-              {(options[dimension] || []).filter((option) => optionFits(option, draft)).map((option) => (
-                <option key={option.id} value={option.id}>{option.label}</option>
-              ))}
-            </select>
-          </label>
-        ))}
-        <label>
-          Exam type
-          <select value={draft.exam_type || ""} onChange={(event) => onChange("exam_type", event.target.value)}>
-            <option value="">All authorized</option>
-            {(options.exam_type || []).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-          </select>
-        </label>
-        <label>
-          Attempt
-          <select value={draft.attempt || ""} onChange={(event) => onChange("attempt", event.target.value)}>
-            <option value="">All authorized</option>
-            <option value="original">Original</option>
-            <option value="retest">Retest</option>
-          </select>
-        </label>
-        <label>From<input type="date" value={draft.exam_date_from || ""} onChange={(event) => onChange("exam_date_from", event.target.value)} /></label>
-        <label>To<input type="date" value={draft.exam_date_to || ""} onChange={(event) => onChange("exam_date_to", event.target.value)} /></label>
-      </div>
-      {rangeError ? <p className="error" role="alert">{rangeError}</p> : null}
-      {dirty ? <p className="meta">Choices change when you apply them.</p> : null}
-      <div className="dialog-actions">
-        <button type="button" className="text-button" onClick={onReset}>Reset</button>
-        <button type="submit">Apply</button>
-      </div>
-    </form>
-  );
-}
-
 export function CardsPage({ session }: { session: Session }) {
   const [params, setParams] = useSearchParams();
   const applied = readApplied(params);
-  const [draft, setDraft] = useState(applied);
-  const [rangeError, setRangeError] = useState("");
   const [options, setOptions] = useState<Record<string, Option[]>>({});
   const [students, setStudents] = useState<Student[]>([]);
   const [summary, setSummary] = useState<ReportSummary | null>(null);
@@ -386,35 +297,26 @@ export function CardsPage({ session }: { session: Session }) {
   const [loading, setLoading] = useState(false);
   const [exportJob, setExportJob] = useState<ExportJob | null>(null);
   const [exporting, setExporting] = useState(false);
-  const [filtersOpen, setFiltersOpen] = useState(false);
   const [query, setQuery] = useState(applied.q);
   const [optionsError, setOptionsError] = useState("");
   const [optionsAttempt, setOptionsAttempt] = useState(0);
   const [panel, setPanel] = useState("subjects");
-  const [subjectSort, setSubjectSort] = useState("name");
   const [examSort, setExamSort] = useState("exam_date");
-  const [batchPick, setBatchPick] = useState("");
+  const examTypes = useExamTypes();
   const [photoFailed, setPhotoFailed] = useState(false);
-  const appliedKey = params.toString();
   const studentId = params.get("student") || "";
   const sort = reportSort(params.get("sort") || "");
   const page = Number(applied.page) || 1;
   const listReturn = studentsReturn(params.get("returnTo"));
   const reportScope = new URLSearchParams();
-  for (const key of REPORT_FILTERS) {
+  for (const key of ENROLLMENT_KEYS) {
     const value = params.get(key);
     if (value) reportScope.set(key, value);
   }
-  if (params.get("period")) reportScope.set("period", params.get("period") || "");
   const requestKey = `${studentId}?${reportScope.toString()}`;
-  const listKey = ["list", applied.q, page, sort, params.get("period") || "", ...REPORT_FILTERS.map((key) => applied[key])].join("|");
+  const listKey = ["list", applied.q, page, sort].join("|");
   const shown = card && loadedKey === requestKey ? card : null;
   const cardPending = Boolean(studentId) && loadedKey !== requestKey;
-
-  useEffect(() => {
-    setDraft(readApplied(params));
-    setRangeError("");
-  }, [appliedKey]);
 
   useEffect(() => {
     setQuery(applied.q);
@@ -436,9 +338,7 @@ export function CardsPage({ session }: { session: Session }) {
 
   useEffect(() => {
     setPanel("subjects");
-    setSubjectSort("name");
     setExamSort("exam_date");
-    setBatchPick(studentsReturn(params.get("returnTo")) ? params.get("batch_id") || "" : "");
   }, [studentId]);
 
   useEffect(() => {
@@ -447,7 +347,7 @@ export function CardsPage({ session }: { session: Session }) {
 
   useEffect(() => {
     Promise.all(
-      ["branch", "course", "batch", "subject", "paper", "exam_type"].map(async (dimension) => {
+      ["branch", "course", "batch", "subject", "paper"].map(async (dimension) => {
         const pageOptions = await api<{ items: Option[] }>(`/api/v1/context/options?dimension=${dimension}`);
         return [dimension, pageOptions.items] as const;
       }),
@@ -455,7 +355,7 @@ export function CardsPage({ session }: { session: Session }) {
       setOptions(Object.fromEntries(pairs));
       setOptionsError("");
     }).catch((reason: Error) => {
-      setOptionsError(reason.message || "The filter choices could not be loaded.");
+      setOptionsError(reason.message || "Names could not be loaded.");
     });
   }, [optionsAttempt]);
 
@@ -469,10 +369,6 @@ export function CardsPage({ session }: { session: Session }) {
     setTotal(0);
     const search = new URLSearchParams();
     if (applied.q) search.set("q", applied.q);
-    REPORT_FILTERS.forEach((key) => {
-      if (applied[key]) search.set(key, applied[key]);
-    });
-    if (params.get("period")) search.set("period", params.get("period") || "");
     if (sort !== "name") search.set("sort", sort);
     search.set("page", String(page));
     search.set("page_size", "8");
@@ -530,41 +426,25 @@ export function CardsPage({ session }: { session: Session }) {
     };
   }, [requestKey]);
 
+  useEffect(() => {
+    if (!studentId || !card || loadedKey !== requestKey || params.get("batch_id")) return;
+    const memberships = (card.enrollments || []).filter((item) => item.batch_id);
+    const chosen = memberships[0];
+    if (!chosen?.batch_id) return;
+    const next = new URLSearchParams(params);
+    next.set("batch_id", chosen.batch_id);
+    if (chosen.branch_id) next.set("branch_id", chosen.branch_id);
+    if (chosen.course_id) next.set("course_id", chosen.course_id);
+    setParams(next, { replace: true });
+  }, [studentId, card, loadedKey, requestKey, params, setParams]);
+
   function optionLabel(dimension: string, id?: string | null) {
     if (!id) return "";
     return options[dimension]?.find((option) => option.id === id)?.label || "";
   }
 
-  function labelFor(key: string, value: string) {
-    if (key === "attempt") return value === "retest" ? "Retest" : "Original";
-    if (key === "exam_date_from" || key === "exam_date_to") return formatDate(value);
-    if (key === "period") return periodLabel(value);
-    const dimension = DIMENSIONS[key];
-    return (dimension && optionLabel(dimension, value)) || value;
-  }
-
   function write(next: URLSearchParams) {
     setParams(next);
-  }
-
-  function editDraft(key: string, value: string) {
-    const { filters: next, cleared } = applyScopeChange(draft, options, key, value);
-    setDraft(next);
-    setRangeError("");
-    const labels = cleared.map((field) => FILTER_LABELS[field] || field).join(", ");
-    if (labels) notify(value ? `${labels} cleared because it does not belong with that choice.` : `${labels} cleared because All authorized includes each of them.`);
-  }
-
-  function openFilters() {
-    setDraft(readApplied(params));
-    setRangeError("");
-    setFiltersOpen(true);
-  }
-
-  function closeFilters() {
-    setDraft(readApplied(params));
-    setRangeError("");
-    setFiltersOpen(false);
   }
 
   function commitSearch() {
@@ -578,63 +458,21 @@ export function CardsPage({ session }: { session: Session }) {
     write(next);
   }
 
-  function applyDraft() {
-    const problem = periodError(draft.exam_date_from || "", draft.exam_date_to || "");
-    if (problem) {
-      setRangeError(problem);
-      return;
-    }
-    const next = new URLSearchParams(params);
-    next.delete("page");
-    for (const key of DIALOG_FILTERS) {
-      next.delete(key);
-      if (draft[key]) next.set(key, draft[key]);
-    }
-    setFiltersOpen(false);
-    write(next);
-  }
-
-  function resetDraft() {
-    setDraft((current) => {
-      const next = { ...current };
-      for (const key of DIALOG_FILTERS) next[key] = "";
-      return next;
-    });
-    setRangeError("");
-  }
-
-  function resetFilters() {
-    const next = new URLSearchParams(params);
-    next.delete("page");
-    for (const key of PAGE_FILTERS) next.delete(key);
-    setQuery("");
-    setFiltersOpen(false);
-    write(next);
-  }
-
-  function open(student: Student) {
+  function open(student: Student, enrollment: EnrollmentCard) {
     const next = new URLSearchParams(params);
     next.set("student", student.id);
+    if (enrollment.batch_id) next.set("batch_id", enrollment.batch_id);
+    if (enrollment.branch_id) next.set("branch_id", enrollment.branch_id);
+    if (enrollment.course_id) next.set("course_id", enrollment.course_id);
     write(next);
   }
 
   function closeCard() {
     const next = new URLSearchParams(params);
     next.delete("student");
+    for (const key of ENROLLMENT_KEYS) next.delete(key);
     setCard(null);
     setLoadedKey("");
-    write(next);
-  }
-
-  function removeFilter(key: string) {
-    const opened = applyScopeChange(applied, options, key, "");
-    const next = new URLSearchParams(params);
-    next.delete("page");
-    for (const field of PAGE_FILTERS) {
-      if (opened.filters[field]) next.set(field, opened.filters[field]);
-      else next.delete(field);
-    }
-    if (key === "q") setQuery("");
     write(next);
   }
 
@@ -663,14 +501,6 @@ export function CardsPage({ session }: { session: Session }) {
       reportScope.forEach((value, key) => {
         scope[key] = value;
       });
-      if (!scope.batch_id && card) {
-        const memberships = (card.enrollments || []).filter((item) => item.batch_id);
-        const ordered = [...memberships].sort((left, right) => (optionLabel("batch", left.batch_id) || "").localeCompare(optionLabel("batch", right.batch_id) || ""));
-        if (ordered.length > 1) {
-          const selected = ordered.some((item) => item.batch_id === batchPick) ? batchPick : ordered[0].batch_id;
-          if (selected) scope.batch_id = selected;
-        }
-      }
       const job = await api<{ id: string }>("/api/v1/reports/cards", {
         method: "POST",
         body: JSON.stringify({ format, scope }),
@@ -689,51 +519,19 @@ export function CardsPage({ session }: { session: Session }) {
     }
   }
 
-  const active = PAGE_FILTERS.filter((key) => applied[key]);
-  const draftComparable = Object.fromEntries(["q", ...DIALOG_FILTERS].map((key) => [key, draft[key] || ""]));
-  const appliedComparable = Object.fromEntries(["q", ...DIALOG_FILTERS].map((key) => [key, applied[key] || ""]));
-  const dirty = JSON.stringify(draftComparable) !== JSON.stringify(appliedComparable);
   const canPdf = session.actions.includes("export.pdf");
   const canSheet = session.actions.includes("export.xlsx");
   const rangeFrom = total === 0 ? 0 : (page - 1) * 8 + 1;
   const rangeTo = Math.min(total, (page - 1) * 8 + students.length);
 
-  const filterButton = (
-    <div className="icon-actions">
-      {active.length ? <button type="button" className="secondary" onClick={resetFilters}>Clear</button> : null}
-      <button type="button" className="secondary" onClick={openFilters}>Filters{active.filter((key) => key !== "q").length ? ` (${active.filter((key) => key !== "q").length})` : ""}</button>
-    </div>
-  );
-  const filters = filtersOpen ? (
-    <StudentDialog title="Filters" onClose={closeFilters}>
-      <ReportFilters
-        draft={draft}
-        options={options}
-        rangeError={rangeError}
-        dirty={dirty}
-        onChange={editDraft}
-        onApply={applyDraft}
-        onReset={resetDraft}
-      />
-    </StudentDialog>
-  ) : null;
-  const appliedFilters = (
-    <>
-      {active.length === 0 ? <span>All authorized</span> : active.map((key) => (
-        <button key={key} type="button" className="chip-button" onClick={() => removeFilter(key)}>{FILTER_LABELS[key]}: {labelFor(key, applied[key])}</button>
-      ))}
-      {filterButton}
-    </>
-  );
-
   if (studentId) {
     const allResults = shown?.results || [];
     const memberships = (shown?.enrollments || []).filter((item) => item.batch_id);
     const orderedMemberships = [...memberships].sort((left, right) => (optionLabel("batch", left.batch_id) || "").localeCompare(optionLabel("batch", right.batch_id) || ""));
-    const selectedBatch = orderedMemberships.some((item) => item.batch_id === batchPick) ? batchPick : (orderedMemberships[0]?.batch_id || "");
-    const splitBatch = orderedMemberships.length > 1;
-    const results = splitBatch ? allResults.filter((item) => item.batch_id === selectedBatch) : allResults;
-    const performance = shown ? (splitBatch ? tally(results, shown.bands) : shown.performance) : null;
+    const requestedBatch = params.get("batch_id") || "";
+    const selectedBatch = orderedMemberships.some((item) => item.batch_id === requestedBatch) ? requestedBatch : "";
+    const results = selectedBatch ? allResults.filter((item) => item.batch_id === selectedBatch) : [];
+    const performance = shown && selectedBatch ? shown.performance : null;
     const history = orderResults(results, examSort);
     const danger = [...results].filter((result) => result.band_place === "low" || (result.band_place == null && result.band === "danger")).sort((left, right) => (left.percentage ?? 0) - (right.percentage ?? 0) || (left.title || "").localeCompare(right.title || ""));
     const gaps = results.filter((result) => result.status === "missing" || result.status === "absent");
@@ -749,27 +547,37 @@ export function CardsPage({ session }: { session: Session }) {
     const studentCode = shown?.student_code || (heading?.id === studentId ? heading?.code : "");
     const photoInitials = studentName.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() || "").join("");
     const photoId = shown?.photo_id || "";
-    const retests = (shown?.retests || []).filter((item) => !splitBatch || item.batch_id === selectedBatch);
+    const retests = (shown?.retests || []).filter((item) => !selectedBatch || item.batch_id === selectedBatch);
     function printCard() {
       const previous = document.title;
       document.title = progressFileStem(studentName, studentCode || "", batchName);
       window.print();
       document.title = previous;
     }
-    const subjectRows = [...(splitBatch ? subjectsFrom(results, shown?.bands) : (shown?.subjects || []))].sort((left, right) => {
-      const label = subjectName(left.subject_id).localeCompare(subjectName(right.subject_id))
-        || paperName(left.paper_id).localeCompare(paperName(right.paper_id));
-      if (subjectSort !== "percentage") return label;
-      if (left.percentage == null && right.percentage == null) return label;
-      if (left.percentage == null) return 1;
-      if (right.percentage == null) return -1;
-      return right.percentage - left.percentage || label;
-    });
+    const columns = examColumns(results, examTypes);
+    const visibleKinds = new Set(columns.map((column) => column.key));
+    const gridGroups = new Map<string, { subjectId: string; partKey: string; partLabel: string; rows: Result[] }>();
+    for (const row of results) {
+      const kind = row.exam_kind || "";
+      if (!visibleKinds.has(kind)) continue;
+      const key = `${row.subject_id || ""}|${partKey(row)}`;
+      const current = gridGroups.get(key) || { subjectId: row.subject_id || "", partKey: partKey(row), partLabel: partLabel(row, paperName), rows: [] };
+      current.rows.push(row);
+      gridGroups.set(key, current);
+    }
+    const gridRows = [...gridGroups.values()].sort((left, right) => (
+      subjectName(left.subjectId).localeCompare(subjectName(right.subjectId))
+      || (left.partLabel === "Whole subject" ? 0 : 1) - (right.partLabel === "Whole subject" ? 0 : 1)
+      || left.partLabel.localeCompare(right.partLabel)
+    ));
+    const subjectSpans = new Map<string, number>();
+    for (const row of gridRows) subjectSpans.set(row.subjectId, (subjectSpans.get(row.subjectId) || 0) + 1);
+    const seenSubjects = new Set<string>();
+    const examTypeLabel = (key?: string) => (key ? examTypes.find((item) => item.key === key)?.label || key : "");
+    const examList = history;
     return (
       <section className="panel wide print-card" aria-busy={loading}>
         {listReturn ? <Link className="quiet back-link" to={listReturn}>← Students</Link> : <button type="button" className="quiet back-link" onClick={closeCard}>← Progress cards</button>}
-        {filters}
-        <p className="filter-row">{appliedFilters}</p>
         {optionsError ? <p className="error" role="alert">{optionsError} <button type="button" className="quiet" onClick={() => setOptionsAttempt((value) => value + 1)}>Try again</button></p> : null}
         <div className="card-head">
           <div className="student-photo" role="img" aria-label={photoId && !photoFailed ? `Photo of ${studentName}` : (studentName ? `Photo space for ${studentName}` : "Student photo")}>
@@ -782,11 +590,18 @@ export function CardsPage({ session }: { session: Session }) {
               {studentCode ? <div><dt>Student code</dt><dd>{studentCode}</dd></div> : null}
               {branchName ? <div><dt>Branch</dt><dd>{branchName}</dd></div> : null}
               {courseName ? <div><dt>Course</dt><dd>{courseName}</dd></div> : null}
-              {splitBatch ? (
+              {orderedMemberships.length > 1 ? (
                 <div>
                   <dt>Batch</dt>
                   <dd>
-                    <select className="no-print" aria-label="Batch" value={selectedBatch} onChange={(event) => setBatchPick(event.target.value)}>
+                    <select className="no-print" aria-label="Batch" value={selectedBatch} onChange={(event) => {
+                      const next = new URLSearchParams(params);
+                      const chosen = orderedMemberships.find((item) => item.batch_id === event.target.value);
+                      next.set("batch_id", event.target.value);
+                      if (chosen?.branch_id) next.set("branch_id", chosen.branch_id);
+                      if (chosen?.course_id) next.set("course_id", chosen.course_id);
+                      write(next);
+                    }}>
                       {orderedMemberships.map((item) => <option key={item.batch_id} value={item.batch_id || ""}>{optionLabel("batch", item.batch_id) || "Batch"}</option>)}
                     </select>
                     <span className="print-only">{batchName || "Batch"}</span>
@@ -844,30 +659,42 @@ export function CardsPage({ session }: { session: Session }) {
               ))}
             </nav>
             <div className={panel === "subjects" ? "card-panel" : "card-panel is-hidden"}>
-            <h2 className="sr-only">Subjects and papers</h2>
-            {subjectRows.length === 0 ? <p>No published subjects match these filters.</p> : (
+            <h2 className="sr-only">Subjects and parts</h2>
+            {gridRows.length === 0 ? <p>No published subjects on this enrollment.</p> : (
               <div className="table-wrap">
-                <table className="people-table">
-                  <caption className="sr-only">Subject and paper summaries for {shown.display_name}.</caption>
+                <table className="people-table progress-grid">
+                  <caption className="sr-only">Subject and part performance by exam type for {shown.display_name}.</caption>
+                  <colgroup>
+                    <col className="progress-subject" />
+                    <col className="progress-part" />
+                    {columns.map((column) => <col key={column.key || "exam"} />)}
+                  </colgroup>
                   <thead>
                     <tr>
-                      <th aria-sort={subjectSort === "name" ? "ascending" : "none"}><button type="button" className="sort" onClick={() => setSubjectSort("name")}>Subject</button></th>
-                      <th>Paper</th>
-                      <th aria-sort={subjectSort === "percentage" ? "descending" : "none"}><button type="button" className="sort" onClick={() => setSubjectSort("percentage")}>Performance</button></th>
-                      <th>Results</th>
-                      <th>Band</th>
+                      <th>Subject</th>
+                      <th>Part</th>
+                      {columns.map((column) => <th key={column.key || "exam"}>{column.label}</th>)}
                     </tr>
                   </thead>
                   <tbody>
-                    {subjectRows.map((subject) => (
-                      <tr key={`${subject.subject_id || "subject"}-${subject.paper_id || "paper"}`}>
-                        <td>{subjectName(subject.subject_id)}</td>
-                        <td>{paperName(subject.paper_id)}</td>
-                        <td><ScoreBar percentage={subject.percentage} band={subject.band} place={subject.band_place} /></td>
-                        <td className="nowrap">{subject.scored} of {subject.expected}</td>
-                        <td><BandMark band={subject.band} name={subject.band_name} place={subject.band_place} /></td>
-                      </tr>
-                    ))}
+                    {gridRows.map((row) => {
+                      const first = !seenSubjects.has(row.subjectId);
+                      if (first) seenSubjects.add(row.subjectId);
+                      return (
+                        <tr key={`${row.subjectId}-${row.partKey}`}>
+                          {first ? <td rowSpan={subjectSpans.get(row.subjectId) || 1}>{subjectName(row.subjectId)}</td> : null}
+                          <td>{row.partLabel}</td>
+                          {columns.map((column) => {
+                            const cell = tally(row.rows.filter((item) => (item.exam_kind || "") === column.key), shown.bands);
+                            return (
+                              <td key={column.key || "exam"}>
+                                <GridMark percentage={cell.expected ? cell.percentage : null} band={cell.band} place={cell.band_place} />
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -920,7 +747,7 @@ export function CardsPage({ session }: { session: Session }) {
             </div>
             <div className={panel === "exams" ? "card-panel" : "card-panel is-hidden"}>
             <h2 className="sr-only">Exams</h2>
-            {history.length === 0 ? <p>No published exams match these filters.</p> : (
+            {examList.length === 0 ? <p>No published exams on this enrollment.</p> : (
               <div className="table-wrap">
                 <table className="people-table">
                   <caption className="sr-only">Exam history for {shown.display_name}.</caption>
@@ -936,13 +763,13 @@ export function CardsPage({ session }: { session: Session }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {history.map((result) => (
+                    {examList.map((result) => (
                       <tr key={result.id}>
                         <td className="nowrap">{formatDate(result.exam_date)}</td>
                         <td>
                           <div className="student-cell">
                             {result.marksheet_id ? <Link to={`/marksheets/${result.marksheet_id}?returnTo=${returnTo}`}>{result.title}</Link> : <span>{result.title}</span>}
-                            <span className="meta">{subjectName(result.subject_id)}{result.attempt === "retest" ? " · Retest" : ""}{result.included_in_total === false ? " · kept out" : ""}</span>
+                            <span className="meta">{[subjectName(result.subject_id), result.part_label || partLabel(result, paperName), examTypeLabel(result.exam_kind)].filter(Boolean).join(" · ")}{result.attempt === "retest" ? " · Retest" : ""}{result.included_in_total === false ? " · kept out" : ""}</span>
                           </div>
                         </td>
                         <td><ScoreBar percentage={result.percentage} band={result.band} place={result.band_place} /></td>
@@ -994,15 +821,10 @@ export function CardsPage({ session }: { session: Session }) {
         <label>Search
           <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitSearch(); } }} placeholder="Name or student id" />
         </label>
-        {filterButton}
       </div>
       <p className="filter-row">
-        {active.map((key) => (
-          <button key={key} type="button" className="chip-button" onClick={() => removeFilter(key)}>{FILTER_LABELS[key]}: {labelFor(key, applied[key])}</button>
-        ))}
         <span role="status">{loading ? "Loading students…" : `${total} student${total === 1 ? "" : "s"}`}</span>
       </p>
-      {filters}
       {optionsError ? <p className="error" role="alert">{optionsError} <button type="button" className="quiet" onClick={() => setOptionsAttempt((value) => value + 1)}>Try again</button></p> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
       {!loading && summary ? (
@@ -1013,7 +835,7 @@ export function CardsPage({ session }: { session: Session }) {
           <div><span>Incomplete results</span><strong>{summary.missing + summary.absent}</strong><small>{summary.missing} missing · {summary.absent} absent</small></div>
         </div>
       ) : null}
-      {!loading && total === 0 ? <p>{active.length ? "No students match these filters. Clear them to see the full list." : "No students yet."}</p> : null}
+      {!loading && total === 0 ? <p>{applied.q ? "No students match that search." : "No students yet."}</p> : null}
       {students.length > 0 ? (
         <div className="table-wrap">
           <table className="people-table">
@@ -1024,28 +846,30 @@ export function CardsPage({ session }: { session: Session }) {
                 <th aria-sort={sort === "percentage" ? "descending" : "none"}><button type="button" className="sort" onClick={() => chooseSort("percentage")}>Performance</button></th>
                 <th>Results</th>
                 <th>Band</th>
+                <th>Batch</th>
                 <th aria-sort={sort === "exam_date" ? "descending" : "none"}><button type="button" className="sort" onClick={() => chooseSort("exam_date")}>Latest</button></th>
               </tr>
             </thead>
             <tbody>
-              {students.map((student) => {
-                const unpublished = student.empty_reason === "unpublished";
-                const row = student.performance;
+              {students.flatMap((student) => (student.enrollments || []).filter((enrollment) => enrollment.batch_id).map((enrollment) => {
+                const unpublished = enrollment.empty_reason === "unpublished";
+                const row = enrollment.performance;
                 return (
-                  <tr key={student.id}>
+                  <tr key={`${student.id}:${enrollment.batch_id}`}>
                     <td>
                       <div className="student-cell">
-                        <button type="button" className="quiet" onClick={() => open(student)}>{student.display_name}</button>
+                        <button type="button" className="quiet" onClick={() => open(student, enrollment)}>{student.display_name}</button>
                         <span className="meta">{student.student_code}</span>
                       </div>
                     </td>
                     <td>{unpublished ? "No published results" : <ScoreBar percentage={row?.percentage ?? null} band={row?.band ?? null} place={row?.band_place} />}</td>
                     <td className="nowrap">{unpublished || !row ? "—" : `${row.scored} of ${row.expected}`}</td>
                     <td><BandMark band={row?.band} name={row?.band_name} place={row?.band_place} /></td>
-                    <td>{formatDate(student.latest_exam_date || null)}</td>
+                    <td>{enrollment.batch_name || optionLabel("batch", enrollment.batch_id) || "Batch"}</td>
+                    <td>{formatDate(enrollment.latest_exam_date || null)}</td>
                   </tr>
                 );
-              })}
+              }))}
             </tbody>
           </table>
         </div>

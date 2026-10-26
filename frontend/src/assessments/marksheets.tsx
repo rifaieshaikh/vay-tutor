@@ -7,6 +7,7 @@ import { Band, BandFields, bandsPayload, bandsReady, draftsFrom } from "../bands
 import { useUnsaved } from "../guard";
 import { Icon, moveTab, StudentDialog } from "../ui";
 import { FilterActions, ListToolbar, Pager } from "../academics/lists";
+import { useExamTypes } from "../academics/kinds";
 
 type Marksheet = {
   id: string;
@@ -19,6 +20,7 @@ type Marksheet = {
   batch_ids?: string[];
   exam_date: string | null;
   exam_type: string | null;
+  exam_kind?: string;
   source_file: string | null;
   exam_id?: string;
   source_sheet: string | null;
@@ -637,6 +639,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
   const [bandEditor, setBandEditor] = useState(false);
   const [defaults, setDefaults] = useState<Band[] | null>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const examTypes = useExamTypes();
   const versionRef = useRef(0);
   const savingRef = useRef(false);
   const returned = cardReturn(params.get("returnTo"));
@@ -825,6 +828,17 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
     }
   }
 
+  async function saveExamType(sheet: Detail, examKind: string) {
+    if (!sheet.exam_id || !examKind) return;
+    setError("");
+    try {
+      await api(`/api/v1/exams/${sheet.exam_id}`, { method: "PATCH", body: JSON.stringify({ exam_kind: examKind }) });
+      await reload();
+    } catch (reasonText) {
+      setError(reasonText instanceof Error ? reasonText.message : "Could not save the exam type.");
+    }
+  }
+
   async function saveDate(event: FormEvent<HTMLFormElement>, sheet: Detail) {
     event.preventDefault();
     setError("");
@@ -955,6 +969,19 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
         <div>
           <dt>Status</dt>
           <dd><span className={statusClass(detail.status)}>{statusLabel}</span></dd>
+        </div>
+        <div>
+          <dt>Exam type</dt>
+          <dd>
+            {detail.exam_id ? (
+              <select aria-label="Exam type" value={detail.exam_kind || ""} onChange={(event) => void saveExamType(detail, event.target.value)}>
+                <option value="">Choose an exam type</option>
+                {examTypes.filter((item) => !item.archived || item.key === detail.exam_kind).map((item) => (
+                  <option key={item.key} value={item.key}>{item.label}</option>
+                ))}
+              </select>
+            ) : (examTypes.find((item) => item.key === detail.exam_kind)?.label || "—")}
+          </dd>
         </div>
         <div className={detail.exam_date || detail.status !== "draft" ? undefined : "span-2"}>
           <dt>Exam date</dt>

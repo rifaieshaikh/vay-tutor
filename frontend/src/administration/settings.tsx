@@ -368,7 +368,7 @@ function ExamTypes({ canEdit }: { canEdit: boolean }) {
       <div className="title-row">
         <div>
           <h2>Exam types</h2>
-          <p className="meta">An exam type names the sitting, such as a test series or a module exam. It does not divide the subject.</p>
+          <p className="meta">An exam type names the sitting, such as a test series or a module exam. It does not divide the subject. A lower weight is shown first on the progress card. The card shows five exam types.</p>
         </div>
         {canEdit ? <button type="button" onClick={() => setAdding(true)}>Add exam type</button> : null}
       </div>
@@ -377,15 +377,16 @@ function ExamTypes({ canEdit }: { canEdit: boolean }) {
         <div className="table-wrap">
           <table className="people-table">
             <caption className="sr-only">Exam types</caption>
-            <thead><tr><th>Name</th><th>Status</th>{canEdit ? <th>Actions</th> : null}</tr></thead>
+            <thead><tr><th>Name</th><th>Weight</th><th>Status</th>{canEdit ? <th>Actions</th> : null}</tr></thead>
             <tbody>
-              {types.map((item) => (
+              {[...types].sort((left, right) => (left.weight ?? 99) - (right.weight ?? 99) || left.label.localeCompare(right.label)).map((item) => (
                 <tr key={item.key}>
                   <td>{item.label}</td>
+                  <td>{item.weight ?? "—"}</td>
                   <td>{item.archived ? "Archived" : "Active"}</td>
                   {canEdit ? (
                     <td>
-                      <button type="button" className="quiet" onClick={() => setEditing(item)}>Rename</button>
+                      <button type="button" className="quiet" onClick={() => setEditing(item)}>Edit</button>
                       <button type="button" className="quiet" onClick={() => void archive(item, !item.archived)}>{item.archived ? "Restore" : "Archive"}</button>
                     </td>
                   ) : null}
@@ -396,13 +397,13 @@ function ExamTypes({ canEdit }: { canEdit: boolean }) {
         </div>
       )}
       {adding ? (
-        <KindDialog
+        <ExamTypeDialog
           title="Add exam type"
           submitLabel="Add exam type"
-          nameLabel="Exam type"
+          initialWeight={Math.max(0, ...types.map((item) => item.weight || 0)) + 1}
           onClose={() => setAdding(false)}
-          onSubmit={async (label) => {
-            await api("/api/v1/exam-types", { method: "POST", body: JSON.stringify({ label }) });
+          onSubmit={async (label, weight) => {
+            await api("/api/v1/exam-types", { method: "POST", body: JSON.stringify({ label, weight }) });
             notify(`Added ${label.trim()}.`);
             setAdding(false);
             await load();
@@ -410,14 +411,14 @@ function ExamTypes({ canEdit }: { canEdit: boolean }) {
         />
       ) : null}
       {editing ? (
-        <KindDialog
-          title="Rename exam type"
+        <ExamTypeDialog
+          title="Edit exam type"
           submitLabel="Save"
-          nameLabel="Exam type"
           initial={editing.label}
+          initialWeight={editing.weight || 1}
           onClose={() => setEditing(null)}
-          onSubmit={async (label) => {
-            await api(`/api/v1/exam-types/${editing.key}`, { method: "PATCH", body: JSON.stringify({ label }) });
+          onSubmit={async (label, weight) => {
+            await api(`/api/v1/exam-types/${editing.key}`, { method: "PATCH", body: JSON.stringify({ label, weight }) });
             notify(`Saved ${label.trim()}.`);
             setEditing(null);
             await load();
@@ -425,6 +426,64 @@ function ExamTypes({ canEdit }: { canEdit: boolean }) {
         />
       ) : null}
     </>
+  );
+}
+
+function ExamTypeDialog({
+  title,
+  submitLabel,
+  initial = "",
+  initialWeight,
+  onClose,
+  onSubmit,
+}: {
+  title: string;
+  submitLabel: string;
+  initial?: string;
+  initialWeight: number;
+  onClose: () => void;
+  onSubmit: (label: string, weight: number) => Promise<void>;
+}) {
+  const [label, setLabel] = useState(initial);
+  const [weight, setWeight] = useState(String(initialWeight));
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const parsed = Number(weight);
+  const dirty = label.trim() !== initial.trim() || parsed !== initialWeight;
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 99) {
+      setError("Enter a weight from 1 to 99.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await onSubmit(label, parsed);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save.");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <StudentDialog title={title} onClose={onClose} dirty={dirty}>
+      <form className="form-grid" onSubmit={save}>
+        <label>Name
+          <input value={label} aria-label="Exam type" onChange={(event) => { setLabel(event.target.value); setError(""); }} />
+        </label>
+        <label>Weight
+          <input inputMode="numeric" aria-label="Weight" value={weight} onChange={(event) => { setWeight(event.target.value); setError(""); }} />
+        </label>
+        <p className="meta span-2">A lower weight is shown first on the progress card.</p>
+        {error ? <p className="error span-2" role="alert">{error}</p> : null}
+        <div className="dialog-actions span-2">
+          <button type="button" className="text-button" onClick={onClose}>Cancel</button>
+          <button type="submit" disabled={saving}>{submitLabel}</button>
+        </div>
+      </form>
+    </StudentDialog>
   );
 }
 

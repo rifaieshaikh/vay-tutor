@@ -67,8 +67,20 @@ async def annotate_bundle_plan(db, plan: dict, job: dict) -> None:
     kinds = public_kinds((institute or {}).get("curriculum_kinds"))
     exam_types = public_exam_types((institute or {}).get("exam_types"))
     exams = await db.exams.find({"institute_id": institute_id, "course_id": course_id}).to_list(length=500)
+    course_batches = {
+        item["_id"]: item
+        for item in await db.batches.find(
+            {"institute_id": institute_id, "course_id": course_id}
+        ).to_list(length=200)
+    }
     extra_batches = [batch_id for exam in exams for batch_id in (exam.get("batch_ids") or [])]
-    known_batches = list(set(selected) | set(extra_batches))
+    chosen_batches = [
+        batch_id
+        for choice in choices.values()
+        if isinstance(choice, dict)
+        for batch_id in (choice.get("batch_ids") or [])
+    ]
+    known_batches = list(set(selected) | set(extra_batches) | set(chosen_batches) | set(course_batches))
     names = await db.enrollment_names.find({"batch_id": {"$in": known_batches}}).to_list(length=5000)
     wanted = {
         student.get("name_key")
@@ -86,8 +98,9 @@ async def annotate_bundle_plan(db, plan: dict, job: dict) -> None:
             directory.setdefault(person.get("name_key") or "", []).append(person)
     batches = {
         item["_id"]: item
-        for item in await db.batches.find({"_id": {"$in": known_batches}, "institute_id": institute_id}).to_list(length=100)
+        for item in await db.batches.find({"_id": {"$in": known_batches}, "institute_id": institute_id}).to_list(length=200)
     }
+    batches.update({key: value for key, value in course_batches.items() if key not in batches})
     sheet_rows = await db.marksheets.find({"institute_id": institute_id, "exam_id": {"$exists": True}}).to_list(length=500)
     marksheets = {item["_id"]: item for item in sheet_rows}
     scored_sheets = set()
@@ -102,9 +115,15 @@ async def annotate_bundle_plan(db, plan: dict, job: dict) -> None:
         sheet["planned"] = empty_counts()
         sheet["similar_exams"] = []
         sheet["matched_exam"] = None
+        choice = choices.get(sheet["id"]) or {}
+        resolved, batch_problems = _resolve_batches(sheet, choice, job, course_batches)
+        sheet["selected_batch_ids"] = resolved
+        sheet["cover_roster"] = bool(choice.get("cover_roster"))
+        sheet["roster_reason"] = str(choice.get("roster_reason") or "")
         if not sheet.get("included"):
             continue
-        choice = choices.get(sheet["id"]) or {}
+        for problem in batch_problems:
+            plan["blockers"].append({"code": "import.batch", "sheet_id": sheet["id"], "message": problem})
         exam_fields, problems = _exam_fields(sheet, choice, subjects, paper_ids, kinds, exam_types)
         sheet["exam"] = exam_fields
         for problem in problems:
@@ -118,7 +137,7 @@ async def annotate_bundle_plan(db, plan: dict, job: dict) -> None:
             })
             continue
         group = active[0]
-        target = _target_exam(exams, marksheets, exam_fields, selected, choice.get("use_exam_id") or "")
+        target = _target_exam(exams, marksheets, exam_fields, resolved, choice.get("use_exam_id") or "")
         sheet["matched_exam"] = _public_match(target) if target else None
         if sheet["matched_exam"] and target:
             status = (marksheets.get(target.get("marksheet_id")) or {}).get("status") or "draft"
@@ -130,7 +149,7 @@ async def annotate_bundle_plan(db, plan: dict, job: dict) -> None:
                 "sheet_id": sheet["id"],
                 "message": f"{sheet['name']} matches a submitted marksheet. Leave this sheet out until it is a draft or published.",
             })
-        match_batches = list(target.get("batch_ids") or []) if choice.get("use_exam_id") and target else selected
+        match_batches = resolved
         if choice.get("use_exam_id") and target is None:
             plan["blockers"].append({
                 "code": "import.exam_fields",
@@ -151,8 +170,10 @@ async def annotate_bundle_plan(db, plan: dict, job: dict) -> None:
                     "That maximum stays because the exam already has scores."
                 ),
             })
+        if not match_batches:
+            continue
         group["maximum"] = maximum
-        key = ("exam", target["_id"]) if target else _identity(exam_fields, selected)
+        key = ("exam", target["_id"]) if target else _identity(exam_fields, resolved)
         identities.setdefault(key, []).append(sheet["name"])
         await _score_sheet(
             db, plan, sheet, group, names, batches, target, marksheets, choice,
@@ -309,6 +330,35 @@ def _similar(exams: list, marksheets: dict, exam_fields: dict, target: dict | No
     return found
 
 
+def _resolve_batches(sheet: dict, choice: dict, job: dict, course_batches: dict) -> tuple[list[str], list[str]]:
+    """Batches chosen for this sheet. A sheet that has not chosen yet uses the file default."""
+    if "batch_ids" in choice:
+        raw = [item for item in (choice.get("batch_ids") or []) if item]
+    else:
+        raw = list(job.get("batch_ids") or [])
+    branch_id = job.get("branch_id") or ""
+    course_id = job.get("course_id") or ""
+    resolved: list[str] = []
+    problems: list[str] = []
+    seen: set[str] = set()
+    for batch_id in raw:
+        if batch_id in seen:
+            continue
+        seen.add(batch_id)
+        batch = course_batches.get(batch_id)
+        name = (batch or {}).get("name") or "That batch"
+        if batch is None or batch.get("branch_id") != branch_id or batch.get("course_id") != course_id:
+            problems.append(f"Choose a batch on this branch and course for {sheet['name']}.")
+            continue
+        if batch.get("archived") or batch.get("closed"):
+            problems.append(f"{name} is not a current batch. Choose a current batch for {sheet['name']}.")
+            continue
+        resolved.append(batch_id)
+    if not resolved and not problems:
+        problems.append(f"Choose a batch for {sheet['name']}.")
+    return resolved, problems
+
+
 def _working_maximum(exam_fields: dict, target: dict | None, locked: bool):
     if locked and target:
         return float(target.get("maximum"))
@@ -413,12 +463,139 @@ async def _score_sheet(
         _count(sheet_counts, totals, sheet_seen, seen, "results", label, result_key)
         _count(sheet_counts, totals, sheet_seen, seen, "students", "unchanged", person_id)
         _count(sheet_counts, totals, sheet_seen, seen, "enrollments", "unchanged", f"{person_id}|{chosen}")
+    if choice.get("cover_roster"):
+        await _append_roster(
+            db, plan, sheet, group, batches, by_student, published, choice, match_batches, maximum,
+            sheet_counts, totals, sheet_seen, seen,
+        )
     for other in sheet["groups"]:
         if other is group:
             continue
         for student in other["students"]:
             student["change"] = "skip"
     sheet["planned"] = sheet_counts
+
+
+async def _append_roster(
+    db, plan, sheet, group, batches, by_student, published, choice, match_batches, maximum,
+    sheet_counts, totals, sheet_seen, seen,
+) -> None:
+    """Current students in the selected batches who are not on the sheet are marked absent."""
+    allowed = set(match_batches)
+    enrollments = await db.enrollments.find({"batch_id": {"$in": list(allowed)}}).to_list(length=5000)
+    current: dict[str, list[dict]] = {}
+    for row in enrollments:
+        if not row.get("student_id") or row.get("ended_on") or row.get("batch_id") not in allowed:
+            continue
+        current.setdefault(row["student_id"], []).append(row)
+    covered = {student.get("student_id") for student in group["students"] if student.get("student_id")}
+    missing_ids = [student_id for student_id in current if student_id not in covered]
+    if not missing_ids:
+        return
+    people = {
+        item["_id"]: item
+        for item in await db.students.find({"_id": {"$in": missing_ids}}).to_list(length=len(missing_ids))
+    }
+    reason = str(choice.get("roster_reason") or "").strip()
+    marks = choice.get("roster_marks") or {}
+    needs_reason = False
+    ordered = sorted(
+        missing_ids,
+        key=lambda student_id: ((people.get(student_id) or {}).get("display_name") or "").casefold(),
+    )
+    for index, student_id in enumerate(ordered):
+        person = people.get(student_id) or {}
+        choices = []
+        seen_batches: set[str] = set()
+        for row in current[student_id]:
+            if row["batch_id"] in seen_batches:
+                continue
+            seen_batches.add(row["batch_id"])
+            batch = batches.get(row["batch_id"]) or {}
+            choices.append({"id": row["batch_id"], "name": batch.get("name") or row["batch_id"]})
+        mark = marks.get(student_id) if isinstance(marks, dict) else None
+        mark = mark or {}
+        student = {
+            "row": 1_000_000 + index,
+            "column": None,
+            "display_name": person.get("display_name") or "Student",
+            "name_key": person.get("name_key") or "",
+            "status": "absent",
+            "score": None,
+            "maximum": maximum,
+            "percentage": None,
+            "band": None,
+            "source_rank": None,
+            "batch_session": None,
+            "student_id": student_id,
+            "batch_choices": choices,
+            "roster": True,
+            "match": "roster",
+        }
+        group["students"].append(student)
+        token = mark.get("score")
+        if mark.get("status") == "scored" or (
+            token not in (None, "") and str(token).strip().upper() not in {"A", "AB"}
+        ):
+            try:
+                student["score"] = float(token)
+                student["status"] = "scored"
+            except (TypeError, ValueError):
+                student["status"] = "invalid"
+                student["score"] = token
+        _apply_maximum(student, maximum, sheet, plan)
+        result_key = f"{sheet['id']}|roster|{student_id}"
+        if student.get("status") == "invalid":
+            student["change"] = "reject"
+            _count(sheet_counts, totals, sheet_seen, seen, "results", "reject", result_key)
+            continue
+        chosen = str(mark.get("batch_id") or "")
+        if len(choices) == 1:
+            chosen = choices[0]["id"]
+        elif chosen not in {item["id"] for item in choices}:
+            student["change"] = "reject"
+            student["match"] = "choose"
+            plan["blockers"].append({
+                "code": "import.batch_unassigned",
+                "sheet_id": sheet["id"],
+                "row": student["row"],
+                "message": f"Choose a batch for {student['display_name']} on {sheet['name']}.",
+            })
+            _count(sheet_counts, totals, sheet_seen, seen, "results", "reject", result_key)
+            continue
+        student["batch_id"] = chosen
+        existing = by_student.get(student_id)
+        row_reason = str(mark.get("reason") or reason).strip()
+        if row_reason:
+            student["correction"] = "replace"
+            student["correction_reason"] = row_reason
+        if existing is None and published and not row_reason:
+            student["change"] = "reject"
+            needs_reason = True
+            _count(sheet_counts, totals, sheet_seen, seen, "results", "reject", result_key)
+            continue
+        if existing is None and published:
+            student["published_insert"] = True
+            student["change"] = "insert"
+            label = "insert"
+        elif existing is None:
+            student["change"] = "insert"
+            label = "insert"
+        else:
+            label, before = _result_label(student, existing, published)
+            student["change"] = label
+            student["before_score"] = before
+            if label == "reject":
+                needs_reason = True
+        _count(sheet_counts, totals, sheet_seen, seen, "results", label, result_key)
+        _count(sheet_counts, totals, sheet_seen, seen, "students", "unchanged", student_id)
+        _count(sheet_counts, totals, sheet_seen, seen, "enrollments", "unchanged", f"{student_id}|{chosen}")
+    if needs_reason:
+        plan["blockers"].append({
+            "code": "import.correction_needed",
+            "sheet_id": sheet["id"],
+            "message": f"Enter a reason to correct the published marksheet for {sheet['name']}.",
+        })
 
 
 def _plan_enrollment(

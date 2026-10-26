@@ -246,6 +246,7 @@ async def patch_import(request: Request, import_id: str, body: DecisionBody) -> 
         names = {**(current.get("names") or {}), **(choice.get("names") or {})}
         added = {**(current.get("added") or {}), **(choice.get("added") or {})}
         row_batch_ids = {**(current.get("row_batch_ids") or {}), **(choice.get("row_batch_ids") or {})}
+        roster_marks = {**(current.get("roster_marks") or {}), **(choice.get("roster_marks") or {})}
         drop_rows = list(dict.fromkeys([*(current.get("drop_rows") or []), *(choice.get("drop_rows") or [])]))
         previous_exam = current.get("exam") or {}
         current.update(choice)
@@ -261,6 +262,8 @@ async def patch_import(request: Request, import_id: str, body: DecisionBody) -> 
             current["row_batches"] = row_batches
         if row_batch_ids:
             current["row_batch_ids"] = row_batch_ids
+        if "roster_marks" in choice:
+            current["roster_marks"] = roster_marks
         if corrections:
             current["corrections"] = corrections
         if names:
@@ -1204,6 +1207,9 @@ def _public_sheet(sheet: dict, rows: list | None = None) -> dict:
         "exam": sheet.get("exam"),
         "similar_exams": sheet.get("similar_exams") or [],
         "matched_exam": sheet.get("matched_exam"),
+        "selected_batch_ids": sheet.get("selected_batch_ids") or [],
+        "cover_roster": bool(sheet.get("cover_roster")),
+        "roster_reason": sheet.get("roster_reason") or "",
         "groups": [
             {
                 "id": group["id"],

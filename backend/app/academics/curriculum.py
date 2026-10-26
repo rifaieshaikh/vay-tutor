@@ -22,8 +22,8 @@ DEFAULT_CURRICULUM_KINDS = (
     {"key": "module", "label": "Module", "storage": "unit", "locked": False, "archived": False},
 )
 DEFAULT_EXAM_TYPES = (
-    {"key": "test-series", "label": "Test series", "archived": False},
-    {"key": "module-exam", "label": "Module exam", "archived": False},
+    {"key": "test-series", "label": "Test series", "archived": False, "weight": 1},
+    {"key": "module-exam", "label": "Module exam", "archived": False, "weight": 2},
 )
 
 
@@ -127,6 +127,16 @@ async def patch_curriculum_kind(request: Request, kind_key: str, body: Curriculu
     return found
 
 
+def exam_weight(value, fallback: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    if number < 1 or number > 99:
+        return fallback
+    return number
+
+
 def public_exam_types(stored: list | None) -> list[dict]:
     by_key = {item.get("key"): item for item in stored or [] if item.get("key")}
     merged = []
@@ -137,17 +147,23 @@ def public_exam_types(stored: list | None) -> list[dict]:
             "key": default["key"],
             "label": current.get("label") or default["label"],
             "archived": bool(current.get("archived")),
+            "weight": exam_weight(current.get("weight"), default["weight"]),
         })
         seen.add(default["key"])
+    next_weight = max((item["weight"] for item in merged), default=0) + 1
     for item in stored or []:
         key = item.get("key")
         if not key or key in seen:
             continue
+        weight = exam_weight(item.get("weight"), next_weight)
         merged.append({
             "key": key,
             "label": item.get("label") or key,
             "archived": bool(item.get("archived")),
+            "weight": weight,
         })
+        seen.add(key)
+        next_weight = max(next_weight, weight) + 1
     return merged
 
 
@@ -158,12 +174,20 @@ def active_exam_type(types: list[dict], key: str) -> dict | None:
 class ExamTypeBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     label: str = ""
+    weight: int | None = None
 
 
 class ExamTypePatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     label: str | None = None
     archived: bool | None = None
+    weight: int | None = None
+
+
+def _require_weight(value: int) -> int:
+    if value < 1 or value > 99:
+        raise AppError(422, "exam.weight", "Enter a weight from 1 to 99.", field="weight")
+    return value
 
 
 @router.get("/exam-types")
@@ -188,9 +212,13 @@ async def add_exam_type(request: Request, body: ExamTypeBody) -> dict:
     types = public_exam_types(institute.get("exam_types"))
     if any(item["key"] == key for item in types):
         raise AppError(409, "exam.exists", "That exam type already exists.")
-    types.append({"key": key, "label": label, "archived": False})
+    if body.weight is None:
+        weight = max((item["weight"] for item in types), default=0) + 1
+    else:
+        weight = _require_weight(body.weight)
+    types.append({"key": key, "label": label, "archived": False, "weight": weight})
     await database.institutes.update_one({"_id": institute["_id"]}, {"$set": {"exam_types": types}})
-    return {"key": key, "label": label}
+    return {"key": key, "label": label, "weight": weight}
 
 
 @router.patch("/exam-types/{type_key}")
@@ -212,6 +240,8 @@ async def patch_exam_type(request: Request, type_key: str, body: ExamTypePatch) 
         found["label"] = label
     if body.archived is not None:
         found["archived"] = body.archived
+    if body.weight is not None:
+        found["weight"] = _require_weight(body.weight)
     await database.institutes.update_one({"_id": institute["_id"]}, {"$set": {"exam_types": types}})
     return found
 

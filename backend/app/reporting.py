@@ -43,6 +43,8 @@ async def hydrate(db, results: list[dict]) -> list[dict]:
         row["title"] = result.get("title") or sheet.get("title") or sheet.get("status")
         row["assessment_id"] = result.get("assessment_id") or sheet.get("assessment_id")
         row["exam_type"] = result.get("exam_type") or sheet.get("exam_type")
+        row["exam_kind"] = result.get("exam_kind") or sheet.get("exam_kind") or ""
+        row["exam_id"] = result.get("exam_id") or sheet.get("exam_id") or ""
         row["maximum"] = result.get("maximum") if result.get("maximum") is not None else sheet.get("maximum")
         row["attempt_kind"] = result.get("attempt_kind") or "original"
         row["published"] = sheet.get("status") == "published" or result.get("active") is True
@@ -50,6 +52,107 @@ async def hydrate(db, results: list[dict]) -> list[dict]:
         row["bands"] = sheet.get("bands")
         rows.append(row)
     return rows
+
+
+def describe_part(
+    subject_id: str,
+    exam_type: str,
+    paper_id: str,
+    scope: dict | None,
+    paper_names: dict[str, str],
+    unit_names: dict[str, str],
+    kind_labels: dict[str, str],
+) -> tuple[str, str]:
+    """Return a stable part key and the label shown beside the subject."""
+    scope = scope or {}
+    kind = str(scope.get("kind") or exam_type or "subject")
+    item_ids = [str(item) for item in (scope.get("item_ids") or []) if item]
+    if kind == "subject":
+        return f"{subject_id}|subject", "Whole subject"
+    if kind in {"paper", "unit"} and (paper_id or item_ids):
+        chosen = item_ids or ([paper_id] if paper_id else [])
+        labels = [paper_names.get(item) or unit_names.get(item) or "" for item in chosen]
+        labels = [item for item in labels if item]
+        text = ", ".join(labels) if labels else (paper_names.get(paper_id) or "Paper")
+        identity = "|".join(chosen) or paper_id or kind
+        return f"{subject_id}|paper|{identity}", text
+    if item_ids:
+        labels = [unit_names.get(item) or paper_names.get(item) or "" for item in item_ids]
+        labels = [item for item in labels if item]
+        kind_label = kind_labels.get(kind) or kind.replace("-", " ").title()
+        text = f"{kind_label}: {', '.join(labels)}" if labels else kind_label
+        return f"{subject_id}|{kind}|{'|'.join(item_ids)}", text
+    if paper_id:
+        return f"{subject_id}|paper|{paper_id}", paper_names.get(paper_id) or "Paper"
+    if kind in {"", "subject"}:
+        return f"{subject_id}|subject", "Whole subject"
+    kind_label = kind_labels.get(kind) or kind.replace("-", " ").title()
+    return f"{subject_id}|{kind}", kind_label
+
+
+def exam_columns(rows: list[dict], types: list[dict], limit: int = 5) -> list[tuple[str, str]]:
+    """Exam types that appear on these results, lightest weight first, at most five."""
+    weights = {item["key"]: item.get("weight") or 99 for item in types}
+    labels = {item["key"]: item.get("label") or item["key"] for item in types}
+    keys = list({row.get("exam_kind") or "" for row in rows if row.get("exam_kind")})
+    keys.sort(key=lambda key: (weights.get(key, 99), (labels.get(key) or key).casefold()))
+    columns = [(key, labels.get(key) or key) for key in keys[:limit]]
+    if any(not (row.get("exam_kind") or "") for row in rows) and len(columns) < limit:
+        columns.append(("", "Exam"))
+    return columns
+
+
+async def attach_parts(db, rows: list[dict]) -> None:
+    """Name the subject partition for each result from its exam scope."""
+    if not rows:
+        return
+    from app.academics.curriculum import public_kinds
+
+    exam_ids = list({row.get("exam_id") for row in rows if row.get("exam_id")})
+    exams = {}
+    if exam_ids:
+        for exam in await db.exams.find({"_id": {"$in": exam_ids}}).to_list(length=len(exam_ids)):
+            exams[exam["_id"]] = exam
+    for row in rows:
+        exam = exams.get(row.get("exam_id") or "")
+        if exam and not row.get("exam_kind"):
+            row["exam_kind"] = exam.get("exam_kind") or ""
+    subject_ids = {row.get("subject_id") for row in rows if row.get("subject_id")}
+    subject_ids.update(exam.get("subject_id") for exam in exams.values() if exam.get("subject_id"))
+    subjects = {}
+    if subject_ids:
+        found = await db.subjects.find({"_id": {"$in": list(subject_ids)}}).to_list(length=len(subject_ids))
+        subjects = {item["_id"]: item for item in found}
+    paper_ids = {row.get("paper_id") for row in rows if row.get("paper_id")}
+    for exam in exams.values():
+        if exam.get("paper_id"):
+            paper_ids.add(exam.get("paper_id"))
+        for item in (exam.get("scope") or {}).get("item_ids") or []:
+            if item:
+                paper_ids.add(item)
+    paper_names = {}
+    if paper_ids:
+        found = await db.papers.find({"_id": {"$in": list(paper_ids)}}).to_list(length=len(paper_ids))
+        paper_names = {item["_id"]: item.get("name") or "" for item in found}
+    institute_id = next((row.get("institute_id") for row in rows if row.get("institute_id")), "")
+    institute = await db.institutes.find_one({"_id": institute_id}) if institute_id else None
+    kind_labels = {item["key"]: item["label"] for item in public_kinds((institute or {}).get("curriculum_kinds"))}
+    for row in rows:
+        exam = exams.get(row.get("exam_id") or "") or {}
+        subject = subjects.get(row.get("subject_id") or exam.get("subject_id") or "") or {}
+        units = {unit.get("id"): unit.get("name") or "" for unit in subject.get("units") or [] if unit.get("id")}
+        paper_id = row.get("paper_id") or exam.get("paper_id") or ""
+        key, label = describe_part(
+            row.get("subject_id") or "",
+            row.get("exam_type") or "",
+            paper_id,
+            exam.get("scope") or {},
+            paper_names,
+            units,
+            kind_labels,
+        )
+        row["part_key"] = key
+        row["part_label"] = label
 
 
 def row_policy(row: dict, policy: dict | None) -> dict | None:
@@ -88,6 +191,9 @@ def present(
         "exam_date": row.get("exam_date"),
         "title": row.get("title"),
         "exam_type": row.get("exam_type"),
+        "exam_kind": row.get("exam_kind") or "",
+        "part_key": row.get("part_key") or "",
+        "part_label": row.get("part_label") or "",
         "attempt": row.get("attempt_kind") or "original",
         "assessment_id": row.get("assessment_id"),
         "marksheet_id": row.get("marksheet_id"),
@@ -571,6 +677,11 @@ async def progress_document(
         "paper": await _name_map(db, "papers", {item.get("paper_id") for item in prepared}),
     }
     institute = await db.institutes.find_one({"_id": institute_id})
+    await attach_parts(db, prepared)
+    from app.academics.curriculum import public_exam_types
+
+    columns = exam_columns(prepared, public_exam_types((institute or {}).get("exam_types")))
+    exam_labels = {key: label for key, label in columns}
     grouped: dict[str, list[dict]] = {}
     for row in prepared:
         grouped.setdefault(row.get("student_id") or "", []).append(row)
@@ -588,7 +699,7 @@ async def progress_document(
         identity_rows = student_rows or [
             item for item in enrollments if item.get("student_id") in {student_id, None} or card.get("student_id") == student_id
         ]
-        students.append(_student_block(person, student_rows, identity_rows, names, policy, scope))
+        students.append(_student_block(person, student_rows, identity_rows, names, policy, scope, columns, exam_labels))
     single = bool(card.get("student_id")) or len(students) == 1
     focus = students[0] if single and students else None
     now = datetime.now(timezone.utc).date()
@@ -631,10 +742,20 @@ async def progress_document(
         "context": context,
         "notes": notes,
         "students": students,
+        "subject_headers": ["Subject", "Part", *[label for _key, label in columns]],
     }
 
 
-def _student_block(person: dict, rows: list[dict], identity_rows: list[dict], names: dict, policy: dict, scope: dict) -> dict:
+def _student_block(
+    person: dict,
+    rows: list[dict],
+    identity_rows: list[dict],
+    names: dict,
+    policy: dict,
+    scope: dict,
+    columns: list[tuple[str, str]] | None = None,
+    exam_labels: dict | None = None,
+) -> dict:
     summary = aggregate(rows, policy) if rows else {
         "percentage": None,
         "band_name": None,
@@ -643,22 +764,34 @@ def _student_block(person: dict, rows: list[dict], identity_rows: list[dict], na
         "missing": 0,
         "absent": 0,
     }
+    columns = columns or []
+    exam_labels = exam_labels or {}
+    visible = {key for key, _label in columns}
     grouped: dict[tuple, list[dict]] = {}
     for row in rows:
-        grouped.setdefault((row.get("subject_id") or "", row.get("paper_id") or ""), []).append(row)
+        if (row.get("exam_kind") or "") not in visible:
+            continue
+        grouped.setdefault((row.get("subject_id") or "", row.get("part_key") or ""), []).append(row)
+    ordered = sorted(
+        grouped,
+        key=lambda token: (
+            (names["subject"].get(token[0]) or "Subject").casefold(),
+            0 if (grouped[token][0].get("part_label") == "Whole subject") else 1,
+            (grouped[token][0].get("part_label") or "").casefold(),
+        ),
+    )
     subjects = []
-    for key, group in grouped.items():
-        item = aggregate(group, policy)
-        subjects.append(
-            [
-                names["subject"].get(key[0]) or "Subject",
-                names["paper"].get(key[1]) or "Paper",
-                _percent(item["percentage"]),
-                f"{item['scored']} of {item['expected']}",
-                item.get("band_name") or "-",
-            ]
-        )
-    subjects.sort(key=lambda item: (item[0].casefold(), item[1].casefold()))
+    seen_subject = None
+    for token in ordered:
+        group = grouped[token]
+        subject_name = names["subject"].get(token[0]) or "Subject"
+        show_subject = "" if token[0] == seen_subject else subject_name
+        seen_subject = token[0]
+        cells = []
+        for key, _label in columns:
+            subset = [row for row in group if (row.get("exam_kind") or "") == key]
+            cells.append(_percent(aggregate(subset, policy)["percentage"]) if subset else "-")
+        subjects.append([show_subject, group[0].get("part_label") or "Whole subject", *cells])
     exams = []
     corrections = []
     for row in rows:
@@ -670,6 +803,12 @@ def _student_block(person: dict, rows: list[dict], identity_rows: list[dict], na
         subject = names["subject"].get(shown.get("subject_id") or "")
         if subject and subject not in title:
             title = f"{title} - {subject}"
+        part = shown.get("part_label") or ""
+        if part and part not in title:
+            title = f"{title} - {part}"
+        kind = exam_labels.get(shown.get("exam_kind") or "")
+        if kind and kind not in title:
+            title = f"{title} - {kind}"
         if shown.get("attempt") == "retest":
             title = f"{title} - Retest"
         if shown.get("included_in_total") is False:
@@ -733,6 +872,7 @@ def _student_block(person: dict, rows: list[dict], identity_rows: list[dict], na
         "scored": f"{summary.get('scored', 0)} of {summary.get('expected', 0)}",
         "missing": str(summary.get("missing", 0)),
         "absent": str(summary.get("absent", 0)),
+        "subject_headers": ["Subject", "Part", *[label for _key, label in columns]] if columns else _SUBJECT_HEADERS,
         "subjects": subjects,
         "exams": [item["cells"] for item in exams],
         "retests": retests,
@@ -762,6 +902,23 @@ _WHITE = (1, 1, 1)
 _ZEBRA = (0.957, 0.969, 0.965)
 _SUBJECT_HEADERS = ["Subject", "Paper", "Performance", "Results", "Band"]
 _SUBJECT_WIDTHS = [150, 110, 85, 80, 90]
+_TEXT_HEADERS = {"Subject", "Part", "Paper", "Assessment", "Basis", "Status", "Student", "Code", "Date"}
+
+
+def _grid_widths(total: int) -> list[int]:
+    if total <= 0:
+        return []
+    subject, part = 140, 120
+    if total == 1:
+        return [_CONTENT_W]
+    if total == 2:
+        return [subject, _CONTENT_W - subject]
+    slots = total - 2
+    rest = _CONTENT_W - subject - part
+    each = rest // slots
+    widths = [subject, part] + [each] * slots
+    widths[-1] += _CONTENT_W - sum(widths)
+    return widths
 _EXAM_HEADERS = ["Date", "Assessment", "Performance", "Results", "Band", "Rank", "Top mark"]
 _EXAM_WIDTHS = [68, 125, 64, 70, 60, 48, 80]
 _RETEST_HEADERS = ["Assessment", "Original", "Latest", "Change", "Basis"]
@@ -980,7 +1137,9 @@ class _PdfCard:
             self.y -= 22
         self._identity(student)
         self._heading("Subjects and papers")
-        self._table(_SUBJECT_HEADERS, _SUBJECT_WIDTHS, student.get("subjects") or [], "No published subjects match this report.")
+        subject_headers = student.get("subject_headers") or _SUBJECT_HEADERS
+        subject_widths = _SUBJECT_WIDTHS if subject_headers == _SUBJECT_HEADERS else _grid_widths(len(subject_headers))
+        self._table(subject_headers, subject_widths, student.get("subjects") or [], "No published subjects match this report.")
         self._heading("Exams")
         self._table(_EXAM_HEADERS, _EXAM_WIDTHS, student.get("exams") or [], "No published exams match this report.")
         if student.get("retests"):
@@ -1046,7 +1205,7 @@ class _PdfCard:
         self.y = top - height
 
     def _align_x(self, x: float, width: float, text: str, header: str) -> float:
-        if header not in {"Performance", "Results", "Rank", "Top mark", "Change", "Original", "Latest"}:
+        if header in _TEXT_HEADERS:
             return x + 4
         used = len(text) * 4.5
         return max(x + 4, x + width - used - 6)
@@ -1202,7 +1361,7 @@ def _write_student_sheet(sheet, row: int, student: dict, named: bool) -> int:
     row += 1
     row = _write_row(sheet, row, ["Subjects and papers"], font=_SECTION_FONT)
     if student.get("subjects"):
-        row = _write_table(sheet, row, _SUBJECT_HEADERS, student["subjects"])
+        row = _write_table(sheet, row, student.get("subject_headers") or _SUBJECT_HEADERS, student["subjects"])
     else:
         row = _write_row(sheet, row, ["No published subjects match this report."])
         row += 1
@@ -1293,7 +1452,7 @@ def _workbook(report: dict) -> bytes:
     for note in report.get("notes") or []:
         row = _write_row(sheet, row, [note])
     if subject_rows:
-        _data_sheet(book, report, "Subjects", ["Student", "Code", *_SUBJECT_HEADERS], subject_rows)
+        _data_sheet(book, report, "Subjects", ["Student", "Code", *(report.get("subject_headers") or _SUBJECT_HEADERS)], subject_rows)
     if exam_rows:
         _data_sheet(book, report, "Exams", ["Student", "Code", *_EXAM_HEADERS], exam_rows)
     sheet.freeze_panes = None

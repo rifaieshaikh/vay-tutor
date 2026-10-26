@@ -41,6 +41,7 @@ class ExamPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     maximum: float | None = Field(default=None, gt=0)
     exam_date: str | None = None
+    exam_kind: str | None = None
 
 
 def _now() -> datetime:
@@ -187,6 +188,31 @@ async def list_exams(request: Request, batch_id: str = "") -> dict:
         for item in await database.branches.find({"institute_id": user["institute_id"]}).to_list(length=200)
     }
     exams = await database.exams.find({"institute_id": user["institute_id"], "batch_ids": batch_id}).to_list(length=500)
+    enrolled = await database.enrollments.find(
+        {"institute_id": user["institute_id"], "batch_id": batch_id}
+    ).to_list(length=5000)
+    roster_total = sum(1 for row in enrolled if row.get("student_id") and not row.get("ended_on"))
+    revision_by_sheet = {
+        sheet_id: (sheet.get("active_revision") or sheet.get("revision") or 1)
+        for sheet_id, sheet in sheets.items()
+    }
+    attended_ids: dict[str, set[str]] = {}
+    sheet_ids = [item.get("marksheet_id") for item in exams if item.get("marksheet_id")]
+    if sheet_ids:
+        scored = database.results.find(
+            {
+                "institute_id": user["institute_id"],
+                "marksheet_id": {"$in": sheet_ids},
+                "batch_id": batch_id,
+                "status": "scored",
+            },
+            {"marksheet_id": 1, "student_id": 1, "revision": 1},
+        )
+        async for row in scored:
+            if row.get("revision") != revision_by_sheet.get(row.get("marksheet_id")):
+                continue
+            if row.get("student_id"):
+                attended_ids.setdefault(row["marksheet_id"], set()).add(row["student_id"])
     items = []
     for exam in exams:
         sheet = sheets.get(exam.get("marksheet_id")) or {}
@@ -215,6 +241,8 @@ async def list_exams(request: Request, batch_id: str = "") -> dict:
             "exam_kind": exam.get("exam_kind") or "",
             "marksheet_id": exam.get("marksheet_id") or "",
             "marksheet_status": sheet.get("status") or "draft",
+            "attended": len(attended_ids.get(exam.get("marksheet_id"), ())),
+            "roster_total": roster_total,
             "other_batches": others,
         })
     items.sort(key=lambda item: item["title"].casefold())
@@ -441,12 +469,14 @@ async def upload_exam_bundle(
 ) -> dict:
     user = await current_user(request)
     chosen = [item for item in batch_ids.split(",") if item]
-    if not branch_id or not course_id or not chosen:
-        raise AppError(422, "exam.batch", "Choose a branch, a course, and at least one batch.")
+    if not branch_id or not course_id:
+        raise AppError(422, "exam.batch", "Choose a branch and a course.")
     database = db(request)
-    batches = await database.batches.find(
-        {"_id": {"$in": chosen}, "institute_id": user["institute_id"]}
-    ).to_list(length=len(chosen))
+    batches = []
+    if chosen:
+        batches = await database.batches.find(
+            {"_id": {"$in": chosen}, "institute_id": user["institute_id"]}
+        ).to_list(length=len(chosen))
     by_id = {item["_id"]: item for item in batches}
     if any(item not in by_id for item in chosen):
         raise AppError(404, "not_found", "That record was not found.")
@@ -547,6 +577,7 @@ async def get_exam(request: Request, exam_id: str) -> dict:
         ],
         "marksheet_id": exam.get("marksheet_id") or "",
         "marksheet_status": (sheet or {}).get("status") or "draft",
+        "exam_kind": exam.get("exam_kind") or "",
     }
 
 
@@ -571,6 +602,12 @@ async def patch_exam(request: Request, exam_id: str, body: ExamPatch) -> dict:
         if result_count:
             raise AppError(422, "exam.maximum", "The maximum stays once a marklist has scores.")
         changes["maximum"] = body.maximum
+    if body.exam_kind is not None:
+        exam_kind = body.exam_kind.strip()
+        institute = await database.institutes.find_one({"_id": user["institute_id"]})
+        if active_exam_type(public_exam_types((institute or {}).get("exam_types")), exam_kind) is None:
+            raise AppError(422, "exam.type", "Choose an exam type.", field="exam_kind")
+        changes["exam_kind"] = exam_kind
     if not changes:
         return {"id": exam_id}
     await database.exams.update_one({"_id": exam_id}, {"$set": changes})
