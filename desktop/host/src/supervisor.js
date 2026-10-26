@@ -249,7 +249,7 @@ function writeConnectNote(dataDir, port, certificate) {
   for (const name of certificateNames()) {
     if (name.ip && name.ip !== "127.0.0.1") lines.push(`Other computers: https://${name.ip}:${port}`);
   }
-  lines.push(`Certificate for other computers: ${certificate}`);
+  lines.push(`Certificate for phones and tablets: ${certificate}`);
   lines.push("MongoDB listens on this computer only.");
   fs.writeFileSync(path.join(dataDir, "connect.txt"), `${lines.join("\r\n")}\r\n`);
 }

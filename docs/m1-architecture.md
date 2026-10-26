@@ -358,7 +358,7 @@ Upgrade copies a consistent backup first: `mongodump` of the replica set plus th
 
 The installer creates a private certificate authority and a host certificate whose names include `localhost`, the computer name, and the LAN address. Clients must use HTTPS. MongoDB is not given a LAN listener.
 
-A desktop client trusts the host CA through the installer prompt. An iPhone or iPad trusts it only after the operator installs the CA profile and enables full trust for that certificate, which is an Apple platform rule. Android must install the same CA. This one-time trust step is part of first-site setup. Plain HTTP does not meet the encryption decision.
+A desktop client accepts the certificate of the host address entered there, so that address is the only setup on that computer. An iPhone or iPad trusts it only after the operator installs the CA profile and enables full trust for that certificate, which is an Apple platform rule. Android must install the same CA. Plain HTTP does not meet the encryption decision.
 
 ### Licensing evidence
 

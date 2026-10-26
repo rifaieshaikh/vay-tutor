@@ -41,15 +41,6 @@ function compatibility(body) {
 }
 
 function describeTransportError(message) {
-  const lower = String(message).toLowerCase();
-  if (
-    lower.includes("certificate") ||
-    lower.includes("unknownissuer") ||
-    lower.includes("tls") ||
-    lower.includes("err_cert")
-  ) {
-    return "The host certificate is not trusted. Install the certificate from the Vay Tutor computer, then try again.";
-  }
   return `Cannot reach the host. ${message}`;
 }
 

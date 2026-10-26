@@ -8,7 +8,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test src/host.test.js src/tabs.test.js",
+    "test": "node --test src/host.test.js src/trust.test.js src/tabs.test.js",
     "dist": "electron-builder"
   },
   "devDependencies": {

@@ -47,10 +47,9 @@ test("incompatible client uses the server message", () => {
   );
 });
 
-test("certificate failures name the trust step", () => {
-  const message = describeTransportError("invalid peer certificate: UnknownIssuer");
-  assert.match(message, /certificate/);
-  assert.match(describeTransportError("ERR_CERT_AUTHORITY_INVALID"), /certificate/);
+test("a failed connection names the host", () => {
+  const message = describeTransportError("connection refused");
+  assert.match(message, /Cannot reach the host/);
 });
 
 test("check sends the client version and accepts a standby worker", async () => {
@@ -77,7 +76,7 @@ test("check reports a certificate failure from the connection", async () => {
       checkHost("https://host:8443", async () => {
         throw new Error("ERR_CERT_AUTHORITY_INVALID");
       }, "0.2.0"),
-    /certificate/,
+    /Cannot reach the host/,
   );
 });
 

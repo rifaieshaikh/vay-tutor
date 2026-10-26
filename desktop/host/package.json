@@ -21,7 +21,7 @@
     "appId": "com.vaytutor.host",
     "productName": "Vay Tutor",
     "directories": {
-      "output": "release"
+      "output": "../release"
     },
     "files": [
       "src/main.js",

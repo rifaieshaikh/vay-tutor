@@ -42,7 +42,7 @@ The [desktop workflow](.github/workflows/desktop.yml) builds the installers when
 
 Other computers use this installation. One computer keeps the database. This one only connects to it.
 
-The installed program is named Vay Tutor Client. After installation, enter the host address, for example `https://host:8443`. The app checks that the host is ready and that this client can use it, then opens the institute. Several pages can stay open in tabs. It uses the certificates trusted by the computer, so the host certificate has to be installed there before the connection succeeds. Plain HTTP is refused.
+The installed program is named Vay Tutor Client. After installation, enter the host address, for example `https://192.168.1.37:8443`. The app checks that the host is ready and that this client can use it, then opens the institute. Several pages can stay open in tabs. The host address is the only setup; the client accepts that computer’s certificate. Plain HTTP is refused.
 
 The workflow attaches two artifacts:
 
@@ -55,7 +55,7 @@ The workflow attaches two artifacts:
 
 One computer uses this installation. It includes MongoDB Community, the API, and the institute UI. MongoDB listens on `127.0.0.1:27017` as replica set `rs0`. The institute is served at `https://127.0.0.1:8443`, and on this computer’s other addresses at port 8443, so the client-only installation on another computer can connect. Records, the database, and the certificate stay in `C:\ProgramData\Vay Tutor`. Removing the program leaves that folder in place.
 
-The installed program is named Vay Tutor. A sign-in task starts it again at the next Windows sign-in. Closing the window leaves MongoDB and the API running. The certificate other computers need is `C:\ProgramData\Vay Tutor\vay-tutor.cer`, and the addresses are written to `connect.txt` in that same folder. Install that certificate on each client computer before connecting. MongoDB Community’s license is included beside `mongod.exe`. Redistribution of MongoDB Community has to be confirmed by the release owner.
+The installed program is named Vay Tutor. A sign-in task starts it again at the next Windows sign-in. Closing the window leaves MongoDB and the API running. Vay Tutor Client on another computer needs only the host address. A phone or tablet browser needs `vay-tutor.cer` installed once; on Windows that file is `C:\ProgramData\Vay Tutor\vay-tutor.cer`, and `connect.txt` in that folder lists the address. MongoDB Community’s license is included beside `mongod.exe`. Redistribution of MongoDB Community has to be confirmed by the release owner.
 
 Build both Windows installers from a checkout:
 
@@ -65,7 +65,14 @@ node desktop/scripts/stage-full.js
 cd desktop/host && npm ci && CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --x64
 ```
 
-The client installer is `desktop/release/VayTutorClient-Setup-0.2.0.exe`. The full installer is `desktop/host/release/VayTutor-Setup-0.2.0.exe`. The workflow also publishes it as `vay-tutor-full-windows`. The installers are unsigned, so Windows SmartScreen asks for confirmation.
+Both Windows installers are written to `desktop/release`:
+
+| File | Installation |
+| --- | --- |
+| `VayTutorClient-Setup-0.2.0.exe` | Client-only, for the other computers |
+| `VayTutor-Setup-0.2.0.exe` | Full installation, for the computer that keeps MongoDB, the API, and the institute UI |
+
+The workflow also publishes the full installation as `vay-tutor-full-windows`. The installers are unsigned, so Windows SmartScreen asks for confirmation.
 
 ## Where to change a workflow
 

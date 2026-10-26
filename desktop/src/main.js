@@ -1,8 +1,9 @@
-const { app, BaseWindow, Menu, WebContentsView, ipcMain, net } = require("electron");
+const { app, BaseWindow, Menu, WebContentsView, ipcMain, net, session } = require("electron");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { checkHost, requireHost } = require("./host");
 const { createTabs } = require("./tabs");
+const { certificateDecision, hostHostname } = require("./trust");
 
 const version = require("../package.json").version;
 const TAB_HEIGHT = 44;
@@ -13,6 +14,7 @@ let connectView = null;
 let chromeView = null;
 let mode = "connect";
 let hostOrigin = null;
+let trustedHostname = "";
 const tabs = createTabs();
 const views = new Map();
 let shortcutAt = 0;
@@ -173,6 +175,7 @@ function closeTab(id) {
 function showConnect() {
   mode = "connect";
   hostOrigin = null;
+  trustedHostname = "";
   for (const [id, view] of views) {
     windowRef.contentView.removeChildView(view);
     closeContents(view);
@@ -279,11 +282,17 @@ async function readSavedHost() {
 
 async function connectToHost(value) {
   const origin = requireHost(value);
-  await checkHost(
-    origin,
-    (url, options) => net.fetch(url, { ...options, signal: AbortSignal.timeout(8000) }),
-    version,
-  );
+  trustedHostname = hostHostname(origin);
+  try {
+    await checkHost(
+      origin,
+      (url, options) => net.fetch(url, { ...options, signal: AbortSignal.timeout(8000) }),
+      version,
+    );
+  } catch (error) {
+    trustedHostname = "";
+    throw error;
+  }
   await fs.mkdir(path.dirname(hostFile()), { recursive: true });
   await fs.writeFile(hostFile(), origin, "utf8");
   showInstitute(origin);
@@ -359,6 +368,9 @@ if (!gotLock) {
     windowRef.focus();
   });
   app.whenReady().then(() => {
+    session.defaultSession.setCertificateVerifyProc((request, callback) => {
+      callback(certificateDecision(request.hostname, trustedHostname));
+    });
     ipcMain.handle("saved-host", () => readSavedHost());
     ipcMain.handle("connect", async (_event, url) => {
       try {

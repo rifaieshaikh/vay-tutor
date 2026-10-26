@@ -106,5 +106,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vay-tutor-full-windows
-          path: desktop/host/release/*.exe
+          path: desktop/release/VayTutor-Setup-*.exe
           if-no-files-found: error
