@@ -124,6 +124,7 @@ class RolePatch(BaseModel):
 class BandBody(BaseModel):
     name: str = ""
     through: float | None = None
+    color: str | None = None
 
 
 class PolicyBody(BaseModel):
@@ -183,6 +184,8 @@ async def compatibility(client: str = "1.0.0") -> dict:
 async def bootstrap(request: Request, body: BootstrapBody):
     from fastapi.responses import JSONResponse
 
+    from app.calculating import _default_band_rows
+
     if await db(request).institutes.count_documents({}):
         raise AppError(409, "bootstrap.closed", "This server already has an institute.")
     problem = password_error(body.admin_password)
@@ -222,7 +225,7 @@ async def bootstrap(request: Request, body: BootstrapBody):
                         "_id": new_id(),
                         "institute_id": institute_id,
                         "version": 1,
-                        "bands": {"danger_below": 40, "safe_above": 60},
+                        "bands": _default_band_rows(),
                         "ranking": "dense",
                         "aggregate": "maximum-marks-weighted",
                         "attempt": "latest-by-date",
@@ -826,8 +829,8 @@ async def create_policy(request: Request, body: PolicyBody) -> dict:
     current_bands = public_bands(current.get("bands"))
     chosen_bands = public_bands(chosen)
     same = (
-        [(item["name"], item.get("through")) for item in current_bands]
-        == [(item["name"], item.get("through")) for item in chosen_bands]
+        [(item["name"], item.get("through"), item.get("color")) for item in current_bands]
+        == [(item["name"], item.get("through"), item.get("color")) for item in chosen_bands]
         and current.get("passing_threshold") == threshold
         and publication == bool(current.get("self_publication", False))
     )
@@ -851,13 +854,19 @@ async def create_policy(request: Request, body: PolicyBody) -> dict:
         raise AppError(409, "policy.conflict", "Someone else saved a policy. Reload and try again.") from None
     before = {
         "version": current.get("version"),
-        "bands": [{"name": item["name"], "through": item.get("through")} for item in current_bands],
+        "bands": [
+            {"name": item["name"], "through": item.get("through"), "color": item.get("color")}
+            for item in current_bands
+        ],
         "passing_threshold": current.get("passing_threshold"),
         "self_publication": bool(current.get("self_publication", False)),
     }
     after = {
         "version": version,
-        "bands": [{"name": item["name"], "through": item.get("through")} for item in chosen_bands],
+        "bands": [
+            {"name": item["name"], "through": item.get("through"), "color": item.get("color")}
+            for item in chosen_bands
+        ],
         "passing_threshold": threshold,
         "self_publication": publication,
     }

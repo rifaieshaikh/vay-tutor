@@ -22,6 +22,20 @@ from app.students import (
 router = APIRouter(prefix="/api/v1")
 
 
+def _performance(summary: dict) -> dict:
+    return {
+        "percentage": summary.get("percentage"),
+        "scored": summary.get("scored", 0),
+        "expected": summary.get("expected", 0),
+        "missing": summary.get("missing", 0),
+        "absent": summary.get("absent", 0),
+        "band": summary.get("band"),
+        "band_name": summary.get("band_name"),
+        "band_place": summary.get("band_place"),
+        "band_color": summary.get("band_color"),
+    }
+
+
 @router.get("/students/options")
 async def student_options(request: Request, manage: bool = False) -> dict:
     user = await current_user(request)
@@ -220,14 +234,7 @@ async def list_students(
         for context in contexts:
             batch_rows = [row for row in rows if row.get("batch_id") == context.get("batch_id")]
             batch_summary = aggregate(batch_rows, policy)
-            context["performance"] = {
-                "percentage": batch_summary["percentage"],
-                "scored": batch_summary["scored"],
-                "expected": batch_summary["expected"],
-                "missing": batch_summary["missing"],
-                "absent": batch_summary["absent"],
-                "band": batch_summary["band"],
-            }
+            context["performance"] = _performance(batch_summary)
             batch_latest = max((str(row.get("exam_date") or "") for row in batch_rows), default="")
             context["latest_exam_date"] = batch_latest or None
             context["empty_reason"] = None if batch_rows else "unpublished"
@@ -237,14 +244,7 @@ async def list_students(
             "display_name": student["display_name"],
             "archived": bool(student.get("archived")),
             "contact": (student.get("phone") or student.get("email") or None) if visible_contact else None,
-            "performance": {
-                "percentage": summary["percentage"],
-                "scored": summary["scored"],
-                "expected": summary["expected"],
-                "missing": summary["missing"],
-                "absent": summary["absent"],
-                "band": summary["band"],
-            },
+            "performance": _performance(summary),
             "latest_exam_date": latest or None,
             "empty_reason": None if rows else "unpublished",
             "enrollments": contexts,
@@ -284,12 +284,7 @@ async def list_students(
         included_rows = [row for row in included_rows if row.get("student_id") in kept]
     report = aggregate(included_rows, policy)
     summary = {
-        "percentage": report["percentage"],
-        "scored": report["scored"],
-        "expected": report["expected"],
-        "missing": report["missing"],
-        "absent": report["absent"],
-        "band": report["band"],
+        **_performance(report),
         "students": len(items),
         "with_results": sum(1 for item in items if item["empty_reason"] is None),
     }
@@ -372,14 +367,14 @@ async def _students_without_matching_enrollment(
             "display_name": student.get("display_name") or "",
             "archived": bool(student.get("archived")),
             "contact": (student.get("phone") or student.get("email") or None) if visible_contact else None,
-            "performance": {
+            "performance": _performance({
                 "percentage": None,
                 "scored": 0,
                 "expected": 0,
                 "missing": 0,
                 "absent": 0,
                 "band": None,
-            },
+            }),
             "latest_exam_date": None,
             "empty_reason": "enrollment",
             "enrollments": [],

@@ -77,7 +77,7 @@ type StudentTab = "overview" | "personal" | "education" | "enrollments" | "progr
 const RECORD_TABS: StudentTab[] = ["overview", "personal", "education", "enrollments", "progress", "admissions", "history"];
 const EDIT_TABS = new Set<StudentTab>(["personal", "education", "admissions"]);
 type Conflict = { proposed: ProfileValues; current: ProfileValues; version: number };
-type Performance = { percentage: number | null; band: string | null; band_name?: string | null; band_place?: string | null };
+type Performance = { percentage: number | null; band: string | null; band_name?: string | null; band_place?: string | null; band_color?: string | null };
 type ProgressCard = { empty_reason: string | null; performance: Performance };
 type HistorySide = {
   display_name?: string;
@@ -1060,7 +1060,7 @@ export function StudentPage() {
                     progress.empty_reason ? <p role="status">{EMPTY_REASONS[progress.empty_reason] || "Nothing matches this report."}</p> : (
                       <p>
                         {progress.performance.percentage == null ? "No published percentage" : `${progress.performance.percentage.toFixed(2)}%`}
-                        {progress.performance.band ? <BandMark band={progress.performance.band} name={progress.performance.band_name} place={progress.performance.band_place} /> : null}
+                        {progress.performance.band ? <BandMark band={progress.performance.band} name={progress.performance.band_name} place={progress.performance.band_place} color={progress.performance.band_color} /> : null}
                       </p>
                     )
                   ) : null}
@@ -1202,7 +1202,7 @@ export function StudentPage() {
                     progress.empty_reason ? <p role="status">{EMPTY_REASONS[progress.empty_reason] || "Nothing matches this report."}</p> : (
                       <p>
                         {progress.performance.percentage == null ? "—" : `${progress.performance.percentage.toFixed(2)}%`}
-                        {progress.performance.band ? <BandMark band={progress.performance.band} name={progress.performance.band_name} place={progress.performance.band_place} /> : null}
+                        {progress.performance.band ? <BandMark band={progress.performance.band} name={progress.performance.band_name} place={progress.performance.band_place} color={progress.performance.band_color} /> : null}
                       </p>
                     )
                   ) : null}

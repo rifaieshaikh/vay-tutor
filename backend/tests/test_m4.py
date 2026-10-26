@@ -38,10 +38,10 @@ def test_weighted_aggregate_bands_and_dense_rank():
     assert combined["obtained"] == 25
     assert combined["maximum"] == 45
     assert combined["absent"] == 1
-    assert band(Decimal("39.99")) == "danger"
-    assert band(Decimal("40")) == "fifty-fifty"
-    assert band(Decimal("60")) == "fifty-fifty"
-    assert band(Decimal("60.01")) == "safe"
+    assert band(Decimal("39.99")) == "emerging"
+    assert band(Decimal("40")) == "progressing"
+    assert band(Decimal("60")) == "progressing"
+    assert band(Decimal("60.01")) == "developing"
     ranks = dense_ranks(
         [
             {"id": "one", "status": "scored", "score": 18},
@@ -383,7 +383,7 @@ def test_progress_card_reports_the_exam_top_mark(client):
     assert queued.status_code == 200, queued.text
     assert client.post(f"/api/v1/jobs/{queued.json()['id']}/run").json()["state"] == "succeeded"
     contents = open(database.files.find_one({"job_id": queued.json()["id"]})["path"], "rb").read()
-    assert b"Top mark" in contents
+    assert b"Exam Top Mark" in contents
     assert b"18 of 20" in contents
 
 
@@ -561,6 +561,10 @@ def test_report_filters_reach_the_list_card_and_export(client):
     assert september.status_code == 200, september.text
     assert [item["id"] for item in september.json()["items"]] == [first]
     assert september.json()["items"][0]["performance"]["percentage"] == 90
+    assert september.json()["items"][0]["performance"]["band_name"] == "Proficient"
+    assert september.json()["items"][0]["performance"]["band_color"] == "#8fce6a"
+    assert september.json()["items"][0]["enrollments"][0]["performance"]["band_color"] == "#8fce6a"
+    assert september.json()["summary"]["band_name"] == "Proficient"
     assert september.json()["summary"]["percentage"] == 90
     january = client.get("/api/v1/students", params={"batch_id": other_batch, "page": 1})
     assert [item["id"] for item in january.json()["items"]] == [second]

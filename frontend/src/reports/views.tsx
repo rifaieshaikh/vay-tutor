@@ -4,10 +4,10 @@ import { api } from "../api";
 import { notify } from "../notify";
 import { periodLabel } from "../context";
 import { Option, applyScopeChange, clearIncompatible, optionFits, scopeOptions } from "../filters";
-import { Band, BandMark, bandTone } from "../bands";
+import { Band, BandMark, bandClass, bandStyle } from "../bands";
 import { StudentDialog, moveTab } from "../ui";
 
-type Section = { id: string; label: string; students: number; results: number; percentage: number | null; band: string | null; band_name?: string | null; band_place?: string | null; coverage: string; missing?: number; absent?: number; marksheet_ids?: string[] };
+type Section = { id: string; label: string; students: number; results: number; percentage: number | null; band: string | null; band_name?: string | null; band_place?: string | null; band_color?: string | null; coverage: string; missing?: number; absent?: number; marksheet_ids?: string[] };
 type Standing = {
   student_id: string;
   student_name?: string;
@@ -16,6 +16,7 @@ type Standing = {
   band: string | null;
   band_name?: string | null;
   band_place?: string | null;
+  band_color?: string | null;
   scored: number;
   expected: number;
 };
@@ -42,6 +43,7 @@ type Attention = {
   band: string;
   band_name?: string | null;
   band_place?: string | null;
+  band_color?: string | null;
   marksheet_id?: string | null;
 };
 type View = {
@@ -171,11 +173,11 @@ function StudentName({ id, name, code, cardSuffix }: { id?: string | null; name?
   );
 }
 
-function ScoreBar({ percentage, band, place }: { percentage: number | null; band: string | null; place?: string | null }) {
+function ScoreBar({ percentage, band, place, color }: { percentage: number | null; band: string | null; place?: string | null; color?: string | null }) {
   return (
     <div className="comparison-score">
       <strong>{percentage == null ? "—" : `${formatPercent(percentage)}%`}</strong>
-      <span className={`bar ${bandTone(band, place)}`} aria-hidden="true"><span style={{ width: `${Math.max(0, Math.min(100, percentage ?? 0))}%` }} /></span>
+      <span className={`bar ${bandClass(band, place, color)}`} style={bandStyle(color)} aria-hidden="true"><span style={{ width: `${Math.max(0, Math.min(100, percentage ?? 0))}%` }} /></span>
     </div>
   );
 }
@@ -214,9 +216,9 @@ function StandingList({ shown, cardSuffix }: { shown: View; cardSuffix: string }
               <tr key={item.student_id}>
                 <td className="place">{index + 1}</td>
                 <td><StudentName id={item.student_id} name={item.student_name} code={item.student_code} cardSuffix={cardSuffix} /></td>
-                <td><ScoreBar percentage={item.percentage} band={item.band} place={item.band_place} /></td>
+                <td><ScoreBar percentage={item.percentage} band={item.band} place={item.band_place} color={item.band_color} /></td>
                 <td className="nowrap">{item.scored} of {item.expected}</td>
-                <td><BandMark band={item.band} name={item.band_name} place={item.band_place} /></td>
+                <td><BandMark band={item.band} name={item.band_name} place={item.band_place} color={item.band_color} /></td>
               </tr>
             ))}
           </tbody>
@@ -268,14 +270,14 @@ function AttentionBoards({ shown, cardSuffix, returnTo }: { shown: View; cardSuf
                 <tr key={item.id}>
                   <td className="place">{(current - 1) * 20 + index + 1}</td>
                   <td><StudentName id={item.student_id} name={item.student_name} code={item.student_code} cardSuffix={cardSuffix} /></td>
-                  <td><ScoreBar percentage={item.percentage} band={item.band} place={item.band_place} /></td>
+                  <td><ScoreBar percentage={item.percentage} band={item.band} place={item.band_place} color={item.band_color} /></td>
                   <td>
                     <div className="student-cell">
                       <span className="nowrap">{item.score ?? "—"} of {item.maximum ?? "—"}</span>
                       {item.marksheet_id ? <Link className="result-line" to={`/marksheets/${item.marksheet_id}?returnTo=${returnTo}`}>{item.title}</Link> : <span className="meta">{item.title}</span>}
                     </div>
                   </td>
-                  <td><BandMark band={item.band} name={item.band_name} place={item.band_place} /></td>
+                  <td><BandMark band={item.band} name={item.band_name} place={item.band_place} color={item.band_color} /></td>
                 </tr>
               ))}
             </tbody>
@@ -661,8 +663,8 @@ export function ViewsPage() {
                           </td>
                           <td>{section.students}</td>
                           <td>{section.results}</td>
-                          <td><div className="comparison-score"><strong>{section.percentage == null ? "—" : `${formatPercent(section.percentage)}%`}</strong><span className={`bar ${bandTone(section.band, section.band_place)}`} aria-hidden="true"><span style={{ width: `${Math.max(0, Math.min(100, section.percentage ?? 0))}%` }} /></span></div></td>
-                          <td><BandMark band={section.band} name={section.band_name} place={section.band_place} /></td>
+                          <td><div className="comparison-score"><strong>{section.percentage == null ? "—" : `${formatPercent(section.percentage)}%`}</strong><span className={`bar ${bandClass(section.band, section.band_place, section.band_color)}`} style={bandStyle(section.band_color)} aria-hidden="true"><span style={{ width: `${Math.max(0, Math.min(100, section.percentage ?? 0))}%` }} /></span></div></td>
+                          <td><BandMark band={section.band} name={section.band_name} place={section.band_place} color={section.band_color} /></td>
                           <td>{coverageLabel(section.coverage)}</td><td>{section.missing ?? 0} / {section.absent ?? 0}</td>
                         </tr>
                       ))}

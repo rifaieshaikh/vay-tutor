@@ -76,7 +76,7 @@ export function SettingsPage({ session }: { session: Session }) {
         <dl className="facts">
           {(bands || []).map((item) => (
             <div key={item.key || item.name}>
-              <dt>{item.name}</dt>
+              <dt>{item.color ? <span className="band-swatch" style={{ background: item.color }} aria-hidden="true" /> : null}{item.name}</dt>
               <dd>{item.phrase}</dd>
             </div>
           ))}
@@ -368,7 +368,7 @@ function ExamTypes({ canEdit }: { canEdit: boolean }) {
       <div className="title-row">
         <div>
           <h2>Exam types</h2>
-          <p className="meta">An exam type names the sitting, such as a test series or a module exam. It does not divide the subject. A lower weight is shown first on the progress card. The card shows five exam types.</p>
+          <p className="meta">An exam type names the sitting, such as a test series or a module exam. It does not divide the subject. A lower weight is shown first on the progress card. The part heading is the column name on that exam type's tab and on import.</p>
         </div>
         {canEdit ? <button type="button" onClick={() => setAdding(true)}>Add exam type</button> : null}
       </div>
@@ -377,11 +377,12 @@ function ExamTypes({ canEdit }: { canEdit: boolean }) {
         <div className="table-wrap">
           <table className="people-table">
             <caption className="sr-only">Exam types</caption>
-            <thead><tr><th>Name</th><th>Weight</th><th>Status</th>{canEdit ? <th>Actions</th> : null}</tr></thead>
+            <thead><tr><th>Name</th><th>Part heading</th><th>Weight</th><th>Status</th>{canEdit ? <th>Actions</th> : null}</tr></thead>
             <tbody>
               {[...types].sort((left, right) => (left.weight ?? 99) - (right.weight ?? 99) || left.label.localeCompare(right.label)).map((item) => (
                 <tr key={item.key}>
                   <td>{item.label}</td>
+                  <td>{item.part_heading || "Part"}</td>
                   <td>{item.weight ?? "—"}</td>
                   <td>{item.archived ? "Archived" : "Active"}</td>
                   {canEdit ? (
@@ -402,8 +403,8 @@ function ExamTypes({ canEdit }: { canEdit: boolean }) {
           submitLabel="Add exam type"
           initialWeight={Math.max(0, ...types.map((item) => item.weight || 0)) + 1}
           onClose={() => setAdding(false)}
-          onSubmit={async (label, weight) => {
-            await api("/api/v1/exam-types", { method: "POST", body: JSON.stringify({ label, weight }) });
+          onSubmit={async (label, weight, partHeading) => {
+            await api("/api/v1/exam-types", { method: "POST", body: JSON.stringify({ label, weight, part_heading: partHeading }) });
             notify(`Added ${label.trim()}.`);
             setAdding(false);
             await load();
@@ -416,9 +417,10 @@ function ExamTypes({ canEdit }: { canEdit: boolean }) {
           submitLabel="Save"
           initial={editing.label}
           initialWeight={editing.weight || 1}
+          initialPartHeading={editing.part_heading || "Part"}
           onClose={() => setEditing(null)}
-          onSubmit={async (label, weight) => {
-            await api(`/api/v1/exam-types/${editing.key}`, { method: "PATCH", body: JSON.stringify({ label, weight }) });
+          onSubmit={async (label, weight, partHeading) => {
+            await api(`/api/v1/exam-types/${editing.key}`, { method: "PATCH", body: JSON.stringify({ label, weight, part_heading: partHeading }) });
             notify(`Saved ${label.trim()}.`);
             setEditing(null);
             await load();
@@ -434,6 +436,7 @@ function ExamTypeDialog({
   submitLabel,
   initial = "",
   initialWeight,
+  initialPartHeading = "Part",
   onClose,
   onSubmit,
 }: {
@@ -441,15 +444,17 @@ function ExamTypeDialog({
   submitLabel: string;
   initial?: string;
   initialWeight: number;
+  initialPartHeading?: string;
   onClose: () => void;
-  onSubmit: (label: string, weight: number) => Promise<void>;
+  onSubmit: (label: string, weight: number, partHeading: string) => Promise<void>;
 }) {
   const [label, setLabel] = useState(initial);
   const [weight, setWeight] = useState(String(initialWeight));
+  const [partHeading, setPartHeading] = useState(initialPartHeading);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const parsed = Number(weight);
-  const dirty = label.trim() !== initial.trim() || parsed !== initialWeight;
+  const dirty = label.trim() !== initial.trim() || parsed !== initialWeight || partHeading.trim() !== initialPartHeading.trim();
 
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -460,7 +465,7 @@ function ExamTypeDialog({
     setSaving(true);
     setError("");
     try {
-      await onSubmit(label, parsed);
+      await onSubmit(label, parsed, partHeading.trim() || "Part");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not save.");
       setSaving(false);
@@ -473,10 +478,13 @@ function ExamTypeDialog({
         <label>Name
           <input value={label} aria-label="Exam type" onChange={(event) => { setLabel(event.target.value); setError(""); }} />
         </label>
+        <label>Part heading
+          <input aria-label="Part heading" value={partHeading} onChange={(event) => { setPartHeading(event.target.value); setError(""); }} />
+        </label>
         <label>Weight
           <input inputMode="numeric" aria-label="Weight" value={weight} onChange={(event) => { setWeight(event.target.value); setError(""); }} />
         </label>
-        <p className="meta span-2">A lower weight is shown first on the progress card.</p>
+        <p className="meta span-2">A lower weight is shown first on the progress card. The part heading names that column on the progress card and during import.</p>
         {error ? <p className="error span-2" role="alert">{error}</p> : null}
         <div className="dialog-actions span-2">
           <button type="button" className="text-button" onClick={onClose}>Cancel</button>

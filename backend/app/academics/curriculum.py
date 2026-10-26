@@ -127,6 +127,11 @@ async def patch_curriculum_kind(request: Request, kind_key: str, body: Curriculu
     return found
 
 
+def part_heading(value, fallback: str = "Part") -> str:
+    text = " ".join(str(value or "").split())
+    return text or fallback
+
+
 def exam_weight(value, fallback: int) -> int:
     try:
         number = int(value)
@@ -148,6 +153,7 @@ def public_exam_types(stored: list | None) -> list[dict]:
             "label": current.get("label") or default["label"],
             "archived": bool(current.get("archived")),
             "weight": exam_weight(current.get("weight"), default["weight"]),
+            "part_heading": part_heading(current.get("part_heading")),
         })
         seen.add(default["key"])
     next_weight = max((item["weight"] for item in merged), default=0) + 1
@@ -161,6 +167,7 @@ def public_exam_types(stored: list | None) -> list[dict]:
             "label": item.get("label") or key,
             "archived": bool(item.get("archived")),
             "weight": weight,
+            "part_heading": part_heading(item.get("part_heading")),
         })
         seen.add(key)
         next_weight = max(next_weight, weight) + 1
@@ -175,6 +182,7 @@ class ExamTypeBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     label: str = ""
     weight: int | None = None
+    part_heading: str = ""
 
 
 class ExamTypePatch(BaseModel):
@@ -182,6 +190,7 @@ class ExamTypePatch(BaseModel):
     label: str | None = None
     archived: bool | None = None
     weight: int | None = None
+    part_heading: str | None = None
 
 
 def _require_weight(value: int) -> int:
@@ -216,9 +225,10 @@ async def add_exam_type(request: Request, body: ExamTypeBody) -> dict:
         weight = max((item["weight"] for item in types), default=0) + 1
     else:
         weight = _require_weight(body.weight)
-    types.append({"key": key, "label": label, "archived": False, "weight": weight})
+    heading = part_heading(body.part_heading)
+    types.append({"key": key, "label": label, "archived": False, "weight": weight, "part_heading": heading})
     await database.institutes.update_one({"_id": institute["_id"]}, {"$set": {"exam_types": types}})
-    return {"key": key, "label": label, "weight": weight}
+    return {"key": key, "label": label, "weight": weight, "part_heading": heading}
 
 
 @router.patch("/exam-types/{type_key}")
@@ -242,6 +252,8 @@ async def patch_exam_type(request: Request, type_key: str, body: ExamTypePatch) 
         found["archived"] = body.archived
     if body.weight is not None:
         found["weight"] = _require_weight(body.weight)
+    if body.part_heading is not None:
+        found["part_heading"] = part_heading(body.part_heading)
     await database.institutes.update_one({"_id": institute["_id"]}, {"$set": {"exam_types": types}})
     return found
 

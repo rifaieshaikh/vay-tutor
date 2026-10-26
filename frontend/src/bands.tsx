@@ -1,21 +1,32 @@
+import { CSSProperties } from "react";
 import { Icon } from "./ui";
 
-export type Band = { key?: string; name: string; through?: number | null; phrase?: string };
-export type BandDraft = { name: string; through: string };
+export type Band = { key?: string; name: string; through?: number | null; phrase?: string; color?: string | null };
+export type BandDraft = { name: string; through: string; color: string };
 
 const LEGACY: Record<string, string> = { danger: "Danger", "fifty-fifty": "Fifty-fifty", safe: "Safe" };
+const PALETTE = ["#d6453d", "#e07a2f", "#e6b325", "#8fce6a", "#1b7f4a"];
 
 export const DEFAULT_BANDS: Band[] = [
-  { key: "danger", name: "Danger", through: 40, phrase: "Below 40%" },
-  { key: "fifty-fifty", name: "Fifty-fifty", through: 60, phrase: "40% through 60%" },
-  { key: "safe", name: "Safe", phrase: "Above 60%" },
+  { key: "emerging", name: "Emerging", through: 40, phrase: "Below 40%", color: "#d6453d" },
+  { key: "progressing", name: "Progressing", through: 60, phrase: "40% through 60%", color: "#e07a2f" },
+  { key: "developing", name: "Developing", through: 75, phrase: "Above 60% through 75%", color: "#e6b325" },
+  { key: "proficient", name: "Proficient", through: 90, phrase: "Above 75% through 90%", color: "#8fce6a" },
+  { key: "outstanding", name: "Outstanding", phrase: "Above 90%", color: "#1b7f4a" },
 ];
+
+function draftColor(item: Band, index: number, total: number) {
+  if (item.color && /^#[0-9a-fA-F]{6}$/.test(item.color)) return item.color;
+  if (index === total - 1) return PALETTE[PALETTE.length - 1];
+  return PALETTE[Math.min(index, PALETTE.length - 2)];
+}
 
 export function draftsFrom(bands: Band[] | null | undefined): BandDraft[] {
   const source = bands && bands.length >= 2 ? bands : DEFAULT_BANDS;
   return source.map((item, index) => ({
     name: item.name,
     through: index === source.length - 1 || item.through == null ? "" : String(item.through),
+    color: draftColor(item, index, source.length),
   }));
 }
 
@@ -38,8 +49,8 @@ export function bandsReady(rows: BandDraft[]) {
 export function bandsPayload(rows: BandDraft[]) {
   return rows.map((item, index) => (
     index === rows.length - 1
-      ? { name: item.name.trim() }
-      : { name: item.name.trim(), through: Number(item.through) }
+      ? { name: item.name.trim(), color: item.color }
+      : { name: item.name.trim(), through: Number(item.through), color: item.color }
   ));
 }
 
@@ -78,10 +89,19 @@ export function bandText(band: string | null | undefined, name?: string | null) 
   return LEGACY[band] || band;
 }
 
-export function BandMark({ band, name, place }: { band?: string | null; name?: string | null; place?: string | null }) {
+export function bandClass(band: string | null | undefined, place?: string | null, color?: string | null) {
+  return color ? "toned" : bandTone(band, place);
+}
+
+export function bandStyle(color?: string | null): CSSProperties | undefined {
+  if (!color) return undefined;
+  return { "--band-color": color } as CSSProperties;
+}
+
+export function BandMark({ band, name, place, color }: { band?: string | null; name?: string | null; place?: string | null; color?: string | null }) {
   const label = bandText(band, name);
   if (!label) return "—";
-  return <span className={`chip ${bandTone(band, place)}`}>{label}</span>;
+  return <span className={`chip ${bandClass(band, place, color)}`} style={bandStyle(color)}>{label}</span>;
 }
 
 export function BandFields({ rows, onChange }: { rows: BandDraft[]; onChange: (rows: BandDraft[]) => void }) {
@@ -90,7 +110,9 @@ export function BandFields({ rows, onChange }: { rows: BandDraft[]; onChange: (r
   }
   function add() {
     const next = rows.slice();
-    next.splice(Math.max(rows.length - 1, 0), 0, { name: "", through: "" });
+    const used = new Set(rows.map((item) => item.color.toLowerCase()));
+    const color = PALETTE.find((item) => !used.has(item)) || "#0f6e6b";
+    next.splice(Math.max(rows.length - 1, 0), 0, { name: "", through: "", color });
     onChange(next);
   }
   function remove(index: number) {
@@ -110,6 +132,9 @@ export function BandFields({ rows, onChange }: { rows: BandDraft[]; onChange: (r
                 <input type="number" min={0} max={100} step="0.01" aria-label={`Line for ${item.name || `band ${index + 1}`}`} value={item.through} onChange={(event) => edit(index, { through: event.target.value })} />
               </label>
             )}
+            <label>Color
+              <input type="color" aria-label={`Color for ${item.name || `band ${index + 1}`}`} value={item.color} onChange={(event) => edit(index, { color: event.target.value })} />
+            </label>
             {rows.length > 2 && !last ? (
               <div className="icon-actions">
                 <button type="button" aria-label={`Remove ${item.name || "band"}`} title="Remove" onClick={() => remove(index)}><Icon name="clear" /></button>

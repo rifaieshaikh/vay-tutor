@@ -22,6 +22,38 @@ def client(tmp_path, monkeypatch):
         yield test_client
 
 
+def test_a_new_institute_starts_with_five_mark_bands(client):
+    bootstrap(client)
+    bands = client.get("/api/v1/policies/active").json()["bands"]
+    assert [(item["name"], item.get("through"), item["color"]) for item in bands] == [
+        ("Emerging", 40, "#d6453d"),
+        ("Progressing", 60, "#e07a2f"),
+        ("Developing", 75, "#e6b325"),
+        ("Proficient", 90, "#8fce6a"),
+        ("Outstanding", None, "#1b7f4a"),
+    ]
+    assert [item["phrase"] for item in bands] == [
+        "Below 40%",
+        "40% through 60%",
+        "Above 60% through 75%",
+        "Above 75% through 90%",
+        "Above 90%",
+    ]
+    assert band(Decimal("39.99"), None) == "emerging"
+    assert band(Decimal("40"), None) == "progressing"
+    assert band(Decimal("60"), None) == "progressing"
+    assert band(Decimal("72"), None) == "developing"
+    assert band(Decimal("90"), None) == "proficient"
+    assert band(Decimal("90.01"), None) == "outstanding"
+    recolored = client.post(
+        "/api/v1/policies",
+        json={"bands": [{**item, "color": "#112233"} if item["name"] == "Emerging" else item for item in bands]},
+    )
+    assert recolored.status_code == 200, recolored.text
+    assert recolored.json()["bands"][0]["color"] == "#112233"
+    assert recolored.json()["version"] == 2
+
+
 def test_saving_settings_starts_the_next_policy_version(client):
     started = bootstrap(client)
     database = sync_db(client)
@@ -111,7 +143,7 @@ def test_a_marksheet_can_keep_its_own_bands(client):
     mixed = aggregate([
         {"id": "a", "student_id": "s", "status": "scored", "score": 50, "maximum": 100, "bands": custom},
     ])
-    assert mixed["band"] == "fifty-fifty"
+    assert mixed["band"] == "progressing"
     cleared = client.patch("/api/v1/marksheets/sheet-bands", json={"bands": None})
     assert cleared.status_code == 200, cleared.text
     assert cleared.json()["bands"] is None

@@ -36,11 +36,11 @@ export function kindLabel(kinds: CurriculumKind[], key: string) {
   return kinds.find((item) => item.key === key)?.label || key.slice(0, 1).toUpperCase() + key.slice(1);
 }
 
-export type ExamType = { key: string; label: string; archived: boolean; weight?: number };
+export type ExamType = { key: string; label: string; archived: boolean; weight?: number; part_heading?: string };
 
 const EXAM_FALLBACK: ExamType[] = [
-  { key: "test-series", label: "Test series", archived: false, weight: 1 },
-  { key: "module-exam", label: "Module exam", archived: false, weight: 2 },
+  { key: "test-series", label: "Test series", archived: false, weight: 1, part_heading: "Part" },
+  { key: "module-exam", label: "Module exam", archived: false, weight: 2, part_heading: "Part" },
 ];
 
 export function useExamTypes() {

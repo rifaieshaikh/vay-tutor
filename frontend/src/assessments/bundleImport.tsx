@@ -233,8 +233,8 @@ export function BundleImportPage() {
     if (!label) return;
     setError("");
     try {
-      const created = await api<{ key: string; label: string }>("/api/v1/exam-types", { method: "POST", body: JSON.stringify({ label }) });
-      setAddedTypes((current) => [...current, { key: created.key, label: created.label, archived: false }]);
+      const created = await api<{ key: string; label: string; part_heading?: string }>("/api/v1/exam-types", { method: "POST", body: JSON.stringify({ label }) });
+      setAddedTypes((current) => [...current, { key: created.key, label: created.label, archived: false, part_heading: created.part_heading || "Part" }]);
       updateDraft(setDrafts, sheetIdForType, { examType: created.key, useExamId: "" });
       setTypeName((current) => ({ ...current, [sheetIdForType]: "" }));
     } catch (reason) {
@@ -447,6 +447,7 @@ export function BundleImportPage() {
           {(() => {
             const row = draft;
             const item = sheet;
+            const partHeading = (activeTypes.find((entry) => entry.key === row.examType)?.part_heading || "Part").trim() || "Part";
             const subject = subjects.find((entry) => entry.id === row.subjectId);
             const items = !subject || row.kind === "subject" ? [] : row.kind === "paper" ? subject.papers : subject.units.filter((unit) => unit.kind === row.kind);
             const saveCovered = (next: Draft) => {
@@ -473,16 +474,16 @@ export function BundleImportPage() {
                         <button type="button" disabled={!(typeName[item.id] || "").trim()} onClick={() => addExamType(item.id)}>Add exam type</button>
                       </span>
                     </label>
-                    <label>Subject partition
-                      <select aria-label={`Subject partition for ${item.name}`} value={row.kind} onChange={(event) => updateDraft(setDrafts, item.id, { kind: event.target.value, itemIds: [], useExamId: "" })}>
+                    <label>{partHeading}
+                      <select aria-label={`${partHeading} for ${item.name}`} value={row.kind} onChange={(event) => updateDraft(setDrafts, item.id, { kind: event.target.value, itemIds: [], useExamId: "" })}>
                         <option value="subject">Whole subject</option>
                         {activeKinds.map((kind) => <option key={kind.key} value={kind.key}>{kind.label}</option>)}
                       </select>
                     </label>
-                    <label>New subject partition
+                    <label>New {partHeading}
                       <span className="inline-field">
-                        <input aria-label={`New subject partition for ${item.name}`} value={partitionName[item.id] || ""} onChange={(event) => setPartitionName((current) => ({ ...current, [item.id]: event.target.value }))} />
-                        <button type="button" disabled={!(partitionName[item.id] || "").trim()} onClick={() => addPartition(item.id)}>Add subject partition</button>
+                        <input aria-label={`New ${partHeading} for ${item.name}`} value={partitionName[item.id] || ""} onChange={(event) => setPartitionName((current) => ({ ...current, [item.id]: event.target.value }))} />
+                        <button type="button" disabled={!(partitionName[item.id] || "").trim()} onClick={() => addPartition(item.id)}>Add {partHeading}</button>
                       </span>
                     </label>
                     <label>Subject

@@ -1007,7 +1007,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
         <dl className="facts">
           {detail.bands.map((item) => (
             <div key={item.key || item.name}>
-              <dt>{item.name}</dt>
+              <dt>{item.color ? <span className="band-swatch" style={{ background: item.color }} aria-hidden="true" /> : null}{item.name}</dt>
               <dd>{item.phrase}</dd>
             </div>
           ))}
@@ -1019,7 +1019,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
             <dl className="facts">
               {defaults.map((item) => (
                 <div key={item.key || item.name}>
-                  <dt>{item.name}</dt>
+                  <dt>{item.color ? <span className="band-swatch" style={{ background: item.color }} aria-hidden="true" /> : null}{item.name}</dt>
                   <dd>{item.phrase}</dd>
                 </div>
               ))}

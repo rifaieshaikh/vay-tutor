@@ -358,6 +358,10 @@ def test_exam_type_is_separate_from_the_subject_partition(client):
     created_type = client.post("/api/v1/exam-types", json={"label": "Class test"})
     assert created_type.status_code == 200, created_type.text
     assert created_type.json()["weight"] == 3
+    assert created_type.json()["part_heading"] == "Part"
+    headed = client.patch(f"/api/v1/exam-types/{created_type.json()['key']}", json={"part_heading": "Chapter"})
+    assert headed.status_code == 200, headed.text
+    assert headed.json()["part_heading"] == "Chapter"
     weighted = client.patch(f"/api/v1/exam-types/{created_type.json()['key']}", json={"weight": 1})
     assert weighted.status_code == 200, weighted.text
     assert weighted.json()["weight"] == 1

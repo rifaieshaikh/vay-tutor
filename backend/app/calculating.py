@@ -43,11 +43,26 @@ def _band_key(name: str, index: int, total: int, used: set[str]) -> str:
     return candidate
 
 
+def _clean_color(value, strict: bool = False) -> str | None:
+    if value is None or not str(value).strip():
+        return None
+    text = str(value).strip().lower()
+    if len(text) == 4 and text[0] == "#" and all(character in "0123456789abcdef" for character in text[1:]):
+        text = "#" + "".join(character * 2 for character in text[1:])
+    if len(text) == 7 and text[0] == "#" and all(character in "0123456789abcdef" for character in text[1:]):
+        return text
+    if strict:
+        raise ValueError("Choose a color for each band.")
+    return None
+
+
 def _default_band_rows() -> list[dict]:
     return [
-        {"name": "Danger", "through": 40},
-        {"name": "Fifty-fifty", "through": 60},
-        {"name": "Safe"},
+        {"name": "Emerging", "through": 40, "color": "#d6453d"},
+        {"name": "Progressing", "through": 60, "color": "#e07a2f"},
+        {"name": "Developing", "through": 75, "color": "#e6b325"},
+        {"name": "Proficient", "through": 90, "color": "#8fce6a"},
+        {"name": "Outstanding", "color": "#1b7f4a"},
     ]
 
 
@@ -71,6 +86,9 @@ def normalize_bands(raw) -> list[dict]:
         entry = {"name": name}
         if item.get("through") is not None:
             entry["through"] = item.get("through")
+        color = _clean_color(item.get("color"))
+        if color:
+            entry["color"] = color
         cleaned.append(entry)
     if len(cleaned) < 2 or any("through" not in item for item in cleaned[:-1]):
         cleaned = _default_band_rows()
@@ -102,8 +120,15 @@ def public_bands(raw) -> list[dict]:
         shown = {"key": item["key"], "name": item["name"], "phrase": band_phrase(bands, index)}
         if index < len(bands) - 1:
             shown["through"] = item["through"]
+        if item.get("color"):
+            shown["color"] = item["color"]
         items.append(shown)
     return items
+
+
+def _color_field(item: dict) -> dict:
+    color = _clean_color(item.get("color"), strict=item.get("color") not in (None, ""))
+    return {"color": color} if color else {}
 
 
 def prepare_bands(rows: list[dict]) -> list[dict]:
@@ -124,7 +149,7 @@ def prepare_bands(rows: list[dict]) -> list[dict]:
         seen.add(folded)
         last = index == len(rows) - 1
         if last:
-            stored.append({"name": name})
+            stored.append({"name": name, **_color_field(item)})
             continue
         if item.get("through") is None:
             raise ValueError(f"Choose the line for {name}.")
@@ -137,7 +162,7 @@ def prepare_bands(rows: list[dict]) -> list[dict]:
         if previous is not None and through <= previous:
             raise ValueError("Each line must be higher than the one before it.")
         previous = through
-        stored.append({"name": name, "through": through})
+        stored.append({"name": name, "through": through, **_color_field(item)})
     return stored
 
 
@@ -160,10 +185,10 @@ def band_detail(value: Decimal | None, policy: dict | None = None) -> dict:
     raw = policy.get("bands") if isinstance(policy, dict) else None
     bands = normalize_bands(raw)
     if key is None:
-        return {"band": None, "band_name": None, "band_place": None}
+        return {"band": None, "band_name": None, "band_place": None, "band_color": None}
     index = next(position for position, item in enumerate(bands) if item["key"] == key)
     place = "low" if index == 0 else "high" if index == len(bands) - 1 else "middle"
-    return {"band": key, "band_name": bands[index]["name"], "band_place": place}
+    return {"band": key, "band_name": bands[index]["name"], "band_place": place, "band_color": bands[index].get("color")}
 
 
 def dense_ranks(rows: list[dict]) -> dict[str, int]:
@@ -221,6 +246,7 @@ def aggregate(rows: list[dict], policy: dict | None = None) -> dict:
         "band": detail["band"],
         "band_name": detail["band_name"],
         "band_place": detail["band_place"],
+        "band_color": detail["band_color"],
         "scored": len(scored),
         "missing": len(missing),
         "absent": len(absent),

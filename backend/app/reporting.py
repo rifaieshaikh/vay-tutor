@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 
 from app.acl import allows
 from app.calculating import (
+    _default_band_rows,
     aggregate,
     band_detail,
     dense_ranks,
@@ -25,7 +26,7 @@ from app.calculating import (
 
 async def policy_for(db, institute_id: str) -> dict:
     policy = await db.policies.find_one({"institute_id": institute_id}, sort=[("version", -1)])
-    return policy or {"version": 1, "bands": {"danger_below": 40, "safe_above": 60}, "aggregate": "maximum-marks-weighted", "passing_threshold": None}
+    return policy or {"version": 1, "bands": _default_band_rows(), "aggregate": "maximum-marks-weighted", "passing_threshold": None}
 
 
 async def hydrate(db, results: list[dict]) -> list[dict]:
@@ -54,6 +55,47 @@ async def hydrate(db, results: list[dict]) -> list[dict]:
     return rows
 
 
+def describe_parts(
+    subject_id: str,
+    exam_type: str,
+    paper_id: str,
+    scope: dict | None,
+    paper_names: dict[str, str],
+    unit_names: dict[str, str],
+    kind_labels: dict[str, str],
+) -> list[tuple[str, str]]:
+    """One row identity and label for each curriculum item on the exam."""
+    scope = scope or {}
+    kind = str(scope.get("kind") or exam_type or "subject")
+    item_ids = [str(item) for item in (scope.get("item_ids") or []) if item]
+    if kind == "subject" or (not item_ids and not paper_id and kind in {"", "subject"}):
+        return [(f"{subject_id}|subject", "Whole subject")]
+    if kind in {"paper", "unit"} and (paper_id or item_ids):
+        chosen = item_ids or ([paper_id] if paper_id else [])
+        named = [
+            (f"{subject_id}|paper|{item}", paper_names.get(item) or unit_names.get(item) or "")
+            for item in chosen
+        ]
+        named = [(key, label) for key, label in named if label]
+        if named:
+            return named
+        return [(f"{subject_id}|paper|{paper_id or kind}", paper_names.get(paper_id) or "Paper")]
+    if item_ids:
+        named = [
+            (f"{subject_id}|{kind}|{item}", unit_names.get(item) or paper_names.get(item) or "")
+            for item in item_ids
+        ]
+        named = [(key, label) for key, label in named if label]
+        if named:
+            return named
+        kind_label = kind_labels.get(kind) or kind.replace("-", " ").title()
+        return [(f"{subject_id}|{kind}", kind_label)]
+    if paper_id:
+        return [(f"{subject_id}|paper|{paper_id}", paper_names.get(paper_id) or "Paper")]
+    kind_label = kind_labels.get(kind) or kind.replace("-", " ").title()
+    return [(f"{subject_id}|{kind}", kind_label)]
+
+
 def describe_part(
     subject_id: str,
     exam_type: str,
@@ -63,41 +105,18 @@ def describe_part(
     unit_names: dict[str, str],
     kind_labels: dict[str, str],
 ) -> tuple[str, str]:
-    """Return a stable part key and the label shown beside the subject."""
-    scope = scope or {}
-    kind = str(scope.get("kind") or exam_type or "subject")
-    item_ids = [str(item) for item in (scope.get("item_ids") or []) if item]
-    if kind == "subject":
-        return f"{subject_id}|subject", "Whole subject"
-    if kind in {"paper", "unit"} and (paper_id or item_ids):
-        chosen = item_ids or ([paper_id] if paper_id else [])
-        labels = [paper_names.get(item) or unit_names.get(item) or "" for item in chosen]
-        labels = [item for item in labels if item]
-        text = ", ".join(labels) if labels else (paper_names.get(paper_id) or "Paper")
-        identity = "|".join(chosen) or paper_id or kind
-        return f"{subject_id}|paper|{identity}", text
-    if item_ids:
-        labels = [unit_names.get(item) or paper_names.get(item) or "" for item in item_ids]
-        labels = [item for item in labels if item]
-        kind_label = kind_labels.get(kind) or kind.replace("-", " ").title()
-        text = f"{kind_label}: {', '.join(labels)}" if labels else kind_label
-        return f"{subject_id}|{kind}|{'|'.join(item_ids)}", text
-    if paper_id:
-        return f"{subject_id}|paper|{paper_id}", paper_names.get(paper_id) or "Paper"
-    if kind in {"", "subject"}:
-        return f"{subject_id}|subject", "Whole subject"
-    kind_label = kind_labels.get(kind) or kind.replace("-", " ").title()
-    return f"{subject_id}|{kind}", kind_label
+    """Return the first curriculum item. Several items stay separate in describe_parts."""
+    return describe_parts(subject_id, exam_type, paper_id, scope, paper_names, unit_names, kind_labels)[0]
 
 
-def exam_columns(rows: list[dict], types: list[dict], limit: int = 5) -> list[tuple[str, str]]:
-    """Exam types that appear on these results, lightest weight first, at most five."""
+def exam_columns(rows: list[dict], types: list[dict]) -> list[tuple[str, str]]:
+    """Exam types that appear on these results, lightest weight first."""
     weights = {item["key"]: item.get("weight") or 99 for item in types}
     labels = {item["key"]: item.get("label") or item["key"] for item in types}
     keys = list({row.get("exam_kind") or "" for row in rows if row.get("exam_kind")})
     keys.sort(key=lambda key: (weights.get(key, 99), (labels.get(key) or key).casefold()))
-    columns = [(key, labels.get(key) or key) for key in keys[:limit]]
-    if any(not (row.get("exam_kind") or "") for row in rows) and len(columns) < limit:
+    columns = [(key, labels.get(key) or key) for key in keys]
+    if any(not (row.get("exam_kind") or "") for row in rows):
         columns.append(("", "Exam"))
     return columns
 
@@ -142,7 +161,7 @@ async def attach_parts(db, rows: list[dict]) -> None:
         subject = subjects.get(row.get("subject_id") or exam.get("subject_id") or "") or {}
         units = {unit.get("id"): unit.get("name") or "" for unit in subject.get("units") or [] if unit.get("id")}
         paper_id = row.get("paper_id") or exam.get("paper_id") or ""
-        key, label = describe_part(
+        parts = describe_parts(
             row.get("subject_id") or "",
             row.get("exam_type") or "",
             paper_id,
@@ -151,8 +170,9 @@ async def attach_parts(db, rows: list[dict]) -> None:
             units,
             kind_labels,
         )
-        row["part_key"] = key
-        row["part_label"] = label
+        row["part_items"] = [{"key": key, "label": label} for key, label in parts]
+        row["part_key"] = parts[0][0]
+        row["part_label"] = parts[0][1]
 
 
 def row_policy(row: dict, policy: dict | None) -> dict | None:
@@ -170,7 +190,7 @@ def present(
     batch_top_score=None,
 ) -> dict:
     exact = percentage(row.get("score"), row.get("maximum")) if row.get("status") == "scored" else None
-    detail = band_detail(exact, row_policy(row, policy)) if row.get("status") == "scored" else {"band": None, "band_name": None, "band_place": None}
+    detail = band_detail(exact, row_policy(row, policy)) if row.get("status") == "scored" else {"band": None, "band_name": None, "band_place": None, "band_color": None}
     return {
         "id": row["id"],
         "subject_id": row.get("subject_id"),
@@ -183,6 +203,7 @@ def present(
         "band": detail["band"],
         "band_name": detail["band_name"],
         "band_place": detail["band_place"],
+        "band_color": detail.get("band_color"),
         "rank": rank,
         "batch_rank": batch_rank,
         "rank_label": "Cohort rank" if rank is not None else None,
@@ -194,6 +215,7 @@ def present(
         "exam_kind": row.get("exam_kind") or "",
         "part_key": row.get("part_key") or "",
         "part_label": row.get("part_label") or "",
+        "part_items": row.get("part_items") or [{"key": row.get("part_key") or "", "label": row.get("part_label") or "Whole subject"}],
         "attempt": row.get("attempt_kind") or "original",
         "assessment_id": row.get("assessment_id"),
         "marksheet_id": row.get("marksheet_id"),
@@ -221,6 +243,7 @@ def comparisons(rows: list[dict], outside: list[dict] | None = None) -> list[dic
                 "change": percentage_change(ordered[0], ordered[-1]),
                 "baseline_outside_period": ordered[0]["id"] not in included,
                 "batch_id": ordered[-1].get("batch_id"),
+                "exam_kind": ordered[-1].get("exam_kind") or "",
             }
         )
     return items
@@ -304,6 +327,7 @@ def view_sections(level: str, rows: list[dict], enrollments: list[dict], names: 
                 "band": summary["band"],
                 "band_name": summary.get("band_name"),
                 "band_place": summary.get("band_place"),
+                "band_color": summary.get("band_color"),
                 "coverage": f"{summary['scored']}/{summary['expected']}" if summary["expected"] else "0/0",
                 "missing": summary["missing"],
                 "absent": summary["absent"],
@@ -410,6 +434,7 @@ def _ranked_students(by_student: dict[str, list[dict]], policy: dict, limit: int
                 "band": summary["band"],
                 "band_name": summary.get("band_name"),
                 "band_place": summary.get("band_place"),
+                "band_color": summary.get("band_color"),
                 "scored": summary["scored"],
                 "expected": summary["expected"],
             }
@@ -474,6 +499,7 @@ def attention(rows: list[dict], policy: dict) -> list[dict]:
                 "band": detail["band"],
                 "band_name": detail["band_name"],
                 "band_place": detail["band_place"],
+                "band_color": detail.get("band_color"),
                 "marksheet_id": row.get("marksheet_id"),
             }
         )
@@ -590,6 +616,25 @@ def _rank_text(row: dict) -> str:
     return str(rank if rank is not None else batch_rank)
 
 
+def _batch_rank_text(row: dict) -> str:
+    value = row.get("batch_rank")
+    if value is None:
+        value = row.get("rank")
+    return "-" if value is None else str(value)
+
+
+def _exam_rank_text(row: dict) -> str:
+    value = row.get("rank")
+    return "-" if value is None else str(value)
+
+
+def _exam_top_text(row: dict) -> str:
+    top = row.get("top_score")
+    if top is None:
+        return "-"
+    return _mark_pair(top, row.get("maximum"))
+
+
 def _top_text(row: dict) -> str:
     top = row.get("top_score")
     batch = row.get("batch_top_score")
@@ -680,8 +725,10 @@ async def progress_document(
     await attach_parts(db, prepared)
     from app.academics.curriculum import public_exam_types
 
-    columns = exam_columns(prepared, public_exam_types((institute or {}).get("exam_types")))
+    exam_types = public_exam_types((institute or {}).get("exam_types"))
+    columns = exam_columns(prepared, exam_types)
     exam_labels = {key: label for key, label in columns}
+    part_headings = {item["key"]: item.get("part_heading") or "Part" for item in exam_types}
     grouped: dict[str, list[dict]] = {}
     for row in prepared:
         grouped.setdefault(row.get("student_id") or "", []).append(row)
@@ -699,7 +746,7 @@ async def progress_document(
         identity_rows = student_rows or [
             item for item in enrollments if item.get("student_id") in {student_id, None} or card.get("student_id") == student_id
         ]
-        students.append(_student_block(person, student_rows, identity_rows, names, policy, scope, columns, exam_labels))
+        students.append(_student_block(person, student_rows, identity_rows, names, policy, scope, columns, exam_labels, part_headings))
     single = bool(card.get("student_id")) or len(students) == 1
     focus = students[0] if single and students else None
     now = datetime.now(timezone.utc).date()
@@ -742,8 +789,59 @@ async def progress_document(
         "context": context,
         "notes": notes,
         "students": students,
-        "subject_headers": ["Subject", "Part", *[label for _key, label in columns]],
+        "subject_headers": list(_FLAT_SUBJECT_HEADERS),
     }
+
+
+def _exam_rows(rows: list[dict], names: dict, policy: dict) -> list[list[str]]:
+    """One line per curriculum item, repeating the exam's result on each line."""
+
+    def first_label(row: dict) -> str:
+        items = row.get("part_items") or []
+        if items:
+            return items[0].get("label") or ""
+        return row.get("part_label") or ""
+
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            (names["subject"].get(row.get("subject_id") or "") or "Subject").casefold(),
+            str(row.get("exam_date") or ""),
+            (row.get("title") or "").casefold(),
+            str(row.get("id") or ""),
+        ),
+    )
+    table = []
+    seen_subject = None
+    for row in ordered:
+        shown = present(row, policy, row.get("rank"), row.get("batch_rank"), row.get("top_score"), row.get("batch_top_score"))
+        items = sorted(
+            row.get("part_items") or [{"key": row.get("part_key") or "", "label": row.get("part_label") or "Whole subject"}],
+            key=lambda item: (0 if item.get("label") == "Whole subject" else 1, (item.get("label") or "").casefold()),
+        )
+        subject_id = row.get("subject_id") or ""
+        subject_name = names["subject"].get(subject_id) or "Subject"
+        percentage = _percent(shown["percentage"]) if shown.get("status") == "scored" else "-"
+        mark = _mark_text(shown)
+        if row.get("previous_score") is not None:
+            mark = f"{mark} (previous {_plain_number(row.get('previous_score'))})"
+        for index, item in enumerate(items):
+            show_subject = "" if subject_id == seen_subject else subject_name
+            seen_subject = subject_id
+            shared = index == 0
+            table.append(
+                [
+                    show_subject,
+                    item.get("label") or "Whole subject",
+                    mark if shared else "",
+                    percentage if shared else "",
+                    (shown.get("band_name") or _status_label(shown.get("status"))) if shared else "",
+                    _batch_rank_text(shown) if shared else "",
+                    _exam_rank_text(shown) if shared else "",
+                    _exam_top_text(shown) if shared else "",
+                ]
+            )
+    return table
 
 
 def _student_block(
@@ -755,6 +853,7 @@ def _student_block(
     scope: dict,
     columns: list[tuple[str, str]] | None = None,
     exam_labels: dict | None = None,
+    part_headings: dict | None = None,
 ) -> dict:
     summary = aggregate(rows, policy) if rows else {
         "percentage": None,
@@ -766,32 +865,7 @@ def _student_block(
     }
     columns = columns or []
     exam_labels = exam_labels or {}
-    visible = {key for key, _label in columns}
-    grouped: dict[tuple, list[dict]] = {}
-    for row in rows:
-        if (row.get("exam_kind") or "") not in visible:
-            continue
-        grouped.setdefault((row.get("subject_id") or "", row.get("part_key") or ""), []).append(row)
-    ordered = sorted(
-        grouped,
-        key=lambda token: (
-            (names["subject"].get(token[0]) or "Subject").casefold(),
-            0 if (grouped[token][0].get("part_label") == "Whole subject") else 1,
-            (grouped[token][0].get("part_label") or "").casefold(),
-        ),
-    )
-    subjects = []
-    seen_subject = None
-    for token in ordered:
-        group = grouped[token]
-        subject_name = names["subject"].get(token[0]) or "Subject"
-        show_subject = "" if token[0] == seen_subject else subject_name
-        seen_subject = token[0]
-        cells = []
-        for key, _label in columns:
-            subset = [row for row in group if (row.get("exam_kind") or "") == key]
-            cells.append(_percent(aggregate(subset, policy)["percentage"]) if subset else "-")
-        subjects.append([show_subject, group[0].get("part_label") or "Whole subject", *cells])
+    part_headings = part_headings or {}
     exams = []
     corrections = []
     for row in rows:
@@ -846,21 +920,43 @@ def _student_block(
         if item["status"] in {"missing", "absent"}
     ]
     retests = []
+    retests_by_kind: dict[str, list] = {}
     for item in comparisons(rows):
         basis = (
             "Original is outside this period and is not in the total"
             if item.get("baseline_outside_period")
             else "Both attempts are in this report"
         )
-        retests.append(
-            [
-                item.get("title") or "Result",
-                _percent(item.get("original_percentage")),
-                _percent(item.get("latest_percentage")),
-                _signed(item.get("change")),
-                basis,
-            ]
+        line = [
+            item.get("title") or "Result",
+            _percent(item.get("original_percentage")),
+            _percent(item.get("latest_percentage")),
+            _signed(item.get("change")),
+            basis,
+        ]
+        retests.append(line)
+        retests_by_kind.setdefault(item.get("exam_kind") or "", []).append(line)
+    exam_sections = []
+    subjects = []
+    for key, label in columns:
+        subset = [row for row in rows if (row.get("exam_kind") or "") == key]
+        section_rows = _exam_rows(subset, names, policy)
+        if not section_rows:
+            continue
+        heading = part_headings.get(key) or "Part"
+        exam_sections.append(
+            {
+                "label": label,
+                "part_heading": heading,
+                "headers": _section_headers(heading),
+                "rows": section_rows,
+                "retests": retests_by_kind.get(key) or [],
+            }
         )
+        carried = ""
+        for item in section_rows:
+            carried = item[0] or carried
+            subjects.append([label, carried, *item[1:]])
     return {
         "name": person.get("display_name") or "Student",
         "code": person.get("student_code") or "",
@@ -872,8 +968,9 @@ def _student_block(
         "scored": f"{summary.get('scored', 0)} of {summary.get('expected', 0)}",
         "missing": str(summary.get("missing", 0)),
         "absent": str(summary.get("absent", 0)),
-        "subject_headers": ["Subject", "Part", *[label for _key, label in columns]] if columns else _SUBJECT_HEADERS,
+        "subject_headers": list(_FLAT_SUBJECT_HEADERS),
         "subjects": subjects,
+        "exam_sections": exam_sections,
         "exams": [item["cells"] for item in exams],
         "retests": retests,
         "attention": attention,
@@ -900,9 +997,35 @@ _INK = (0.110, 0.141, 0.188)
 _MUTED = (0.322, 0.400, 0.369)
 _WHITE = (1, 1, 1)
 _ZEBRA = (0.957, 0.969, 0.965)
+_SECTION_VALUE_HEADERS = ["Mark", "Percentage", "Band", "Batch Rank", "Exam Rank", "Exam Top Mark"]
+_FLAT_SUBJECT_HEADERS = ["Exam type", "Subject", "Part", *_SECTION_VALUE_HEADERS]
 _SUBJECT_HEADERS = ["Subject", "Paper", "Performance", "Results", "Band"]
+
+
+def _section_headers(part_heading: str) -> list[str]:
+    return ["Subject", part_heading or "Part", *_SECTION_VALUE_HEADERS]
+
+
 _SUBJECT_WIDTHS = [150, 110, 85, 80, 90]
-_TEXT_HEADERS = {"Subject", "Part", "Paper", "Assessment", "Basis", "Status", "Student", "Code", "Date"}
+
+
+def _section_widths(headers: list[str]) -> list[int]:
+    minimums = {
+        "Mark": 56,
+        "Percentage": 64,
+        "Band": 58,
+        "Batch Rank": 64,
+        "Exam Rank": 58,
+        "Exam Top Mark": 74,
+    }
+    if len(headers) <= 2:
+        return _grid_widths(len(headers))
+    values = [minimums.get(header, 48) for header in headers[2:]]
+    remaining = _CONTENT_W - sum(values)
+    if remaining < 120:
+        return _grid_widths(len(headers))
+    subject = max(70, int(remaining * 0.45))
+    return [subject, remaining - subject, *values]
 
 
 def _grid_widths(total: int) -> list[int]:
@@ -919,6 +1042,8 @@ def _grid_widths(total: int) -> list[int]:
     widths = [subject, part] + [each] * slots
     widths[-1] += _CONTENT_W - sum(widths)
     return widths
+
+
 _EXAM_HEADERS = ["Date", "Assessment", "Performance", "Results", "Band", "Rank", "Top mark"]
 _EXAM_WIDTHS = [68, 125, 64, 70, 60, 48, 80]
 _RETEST_HEADERS = ["Assessment", "Original", "Latest", "Change", "Basis"]
@@ -1136,15 +1261,13 @@ class _PdfCard:
             self._text(student["name"], "F2", 16, _INK)
             self.y -= 22
         self._identity(student)
-        self._heading("Subjects and papers")
-        subject_headers = student.get("subject_headers") or _SUBJECT_HEADERS
-        subject_widths = _SUBJECT_WIDTHS if subject_headers == _SUBJECT_HEADERS else _grid_widths(len(subject_headers))
-        self._table(subject_headers, subject_widths, student.get("subjects") or [], "No published subjects match this report.")
-        self._heading("Exams")
-        self._table(_EXAM_HEADERS, _EXAM_WIDTHS, student.get("exams") or [], "No published exams match this report.")
-        if student.get("retests"):
-            self._heading("Original and retest")
-            self._table(_RETEST_HEADERS, _RETEST_WIDTHS, student["retests"], "")
+        self._subject_sections(student)
+        if not student.get("exam_sections"):
+            self._heading("Exams")
+            self._table(_EXAM_HEADERS, _EXAM_WIDTHS, student.get("exams") or [], "No published exams match this report.")
+            if student.get("retests"):
+                self._heading("Original and retest")
+                self._table(_RETEST_HEADERS, _RETEST_WIDTHS, student["retests"], "")
         if student.get("corrections"):
             self._heading("Corrections")
             for line in student["corrections"]:
@@ -1156,8 +1279,25 @@ class _PdfCard:
             if student.get("gaps"):
                 self._table(_GAP_HEADERS, _GAP_WIDTHS, student["gaps"], "")
 
-    def _table(self, headers: list[str], widths: list[int], rows: list[list[str]], empty: str):
-        headers, widths, rows = _pdf_columns(headers, widths, rows)
+    def _subject_sections(self, student: dict):
+        sections = student.get("exam_sections") or []
+        if sections:
+            for section in sections:
+                headers = section.get("headers") or _section_headers("Part")
+                self._heading(section.get("label") or "Exam")
+                self._table(headers, _section_widths(headers), section.get("rows") or [], "No published subjects match this report.", drop_band=False)
+                if section.get("retests"):
+                    self._heading("Original and retest")
+                    self._table(_RETEST_HEADERS, _RETEST_WIDTHS, section["retests"], "")
+            return
+        self._heading("Subjects and papers")
+        subject_headers = student.get("subject_headers") or _SUBJECT_HEADERS
+        subject_widths = _SUBJECT_WIDTHS if subject_headers == _SUBJECT_HEADERS else _grid_widths(len(subject_headers))
+        self._table(subject_headers, subject_widths, student.get("subjects") or [], "No published subjects match this report.")
+
+    def _table(self, headers: list[str], widths: list[int], rows: list[list[str]], empty: str, drop_band: bool = True):
+        if drop_band:
+            headers, widths, rows = _pdf_columns(headers, widths, rows)
         if not rows:
             if empty:
                 self._paragraph(empty)
@@ -1205,7 +1345,7 @@ class _PdfCard:
         self.y = top - height
 
     def _align_x(self, x: float, width: float, text: str, header: str) -> float:
-        if header in _TEXT_HEADERS:
+        if header not in {"Performance", "Results", "Mark", "Percentage", "Band", "Rank", "Batch Rank", "Exam Rank", "Top mark", "Exam Top Mark", "Original", "Latest", "Change"}:
             return x + 4
         used = len(text) * 4.5
         return max(x + 4, x + width - used - 6)
@@ -1359,21 +1499,37 @@ def _write_student_sheet(sheet, row: int, student: dict, named: bool) -> int:
     sheet.row_dimensions[row].height = 24
     row = _write_row(sheet, row, values, font=_STAT_FONT, fill=_STAT_FILL)
     row += 1
-    row = _write_row(sheet, row, ["Subjects and papers"], font=_SECTION_FONT)
-    if student.get("subjects"):
-        row = _write_table(sheet, row, student.get("subject_headers") or _SUBJECT_HEADERS, student["subjects"])
+    sections = student.get("exam_sections") or []
+    if sections:
+        for section in sections:
+            row = _write_row(sheet, row, [section.get("label") or "Exam"], font=_SECTION_FONT)
+            rows = section.get("rows") or []
+            headers = section.get("headers") or _section_headers("Part")
+            if rows:
+                row = _write_table(sheet, row, headers, rows)
+            else:
+                row = _write_row(sheet, row, ["No published subjects match this report."])
+                row += 1
+            if section.get("retests"):
+                row = _write_row(sheet, row, ["Original and retest"], font=_SECTION_FONT)
+                row = _write_table(sheet, row, _RETEST_HEADERS, section["retests"])
     else:
-        row = _write_row(sheet, row, ["No published subjects match this report."])
-        row += 1
-    row = _write_row(sheet, row, ["Exams"], font=_SECTION_FONT)
-    if student.get("exams"):
-        row = _write_table(sheet, row, _EXAM_HEADERS, student["exams"])
-    else:
-        row = _write_row(sheet, row, ["No published exams match this report."])
-        row += 1
-    if student.get("retests"):
-        row = _write_row(sheet, row, ["Original and retest"], font=_SECTION_FONT)
-        row = _write_table(sheet, row, _RETEST_HEADERS, student["retests"])
+        row = _write_row(sheet, row, ["Subjects and papers"], font=_SECTION_FONT)
+        if student.get("subjects"):
+            row = _write_table(sheet, row, student.get("subject_headers") or _SUBJECT_HEADERS, student["subjects"])
+        else:
+            row = _write_row(sheet, row, ["No published subjects match this report."])
+            row += 1
+    if not sections:
+        row = _write_row(sheet, row, ["Exams"], font=_SECTION_FONT)
+        if student.get("exams"):
+            row = _write_table(sheet, row, _EXAM_HEADERS, student["exams"])
+        else:
+            row = _write_row(sheet, row, ["No published exams match this report."])
+            row += 1
+        if student.get("retests"):
+            row = _write_row(sheet, row, ["Original and retest"], font=_SECTION_FONT)
+            row = _write_table(sheet, row, _RETEST_HEADERS, student["retests"])
     if student.get("corrections"):
         row = _write_row(sheet, row, ["Corrections"], font=_SECTION_FONT)
         for line in student["corrections"]:
@@ -1391,7 +1547,7 @@ def _write_student_sheet(sheet, row: int, student: dict, named: bool) -> int:
 def _data_sheet(book, report: dict, title: str, headers: list[str], rows: list[list]):
     sheet = book.create_sheet(title[:31])
     _sheet_page(sheet, report, landscape=len(headers) > 5)
-    widths = [22, 16, 16, 28, 16, 16, 16, 14, 16]
+    widths = [22, 16, 18, 22, 24, 16, 14, 16, 14, 14, 18]
     for index, width in enumerate(widths[: max(len(headers), 1)], start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     _write_row(sheet, 1, headers, font=_HEADER_FONT, fill=_HEADER_FILL, border=_THIN)

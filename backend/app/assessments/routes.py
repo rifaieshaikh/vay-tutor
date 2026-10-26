@@ -54,6 +54,7 @@ class ResultPatch(BaseModel):
 class BandBody(BaseModel):
     name: str = ""
     through: float | None = None
+    color: str | None = None
 
 
 class MarksheetPatch(BaseModel):
