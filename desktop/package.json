@@ -1,0 +1,55 @@
+{
+  "name": "vay-tutor-client",
+  "productName": "Vay Tutor Client",
+  "private": true,
+  "version": "0.2.0",
+  "description": "Client-only installation. Opens a Vay Tutor host in tabs.",
+  "author": "Vay Tutor",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test src/host.test.js src/tabs.test.js",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "com.vaytutor.client",
+    "productName": "Vay Tutor Client",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/main.js",
+      "src/preload.js",
+      "src/host.js",
+      "src/tabs.js",
+      "ui/**",
+      "build/window.png",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": ["nsis"],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": false,
+      "artifactName": "VayTutorClient-Setup-${version}.${ext}"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.education",
+      "identity": null
+    },
+    "dmg": {
+      "artifactName": "VayTutorClient-${version}.${ext}"
+    }
+  }
+}

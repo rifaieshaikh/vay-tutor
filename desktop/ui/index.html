@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vay Tutor Client</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">Client-only installation</p>
+      <h1>Connect to the host</h1>
+      <p class="lead">
+        This installation opens the institute on the Vay Tutor host. Pages stay in tabs
+        on that host. It does not install the database or keep institute records on this computer.
+      </p>
+      <form id="connect-form">
+        <label for="host">Host address</label>
+        <input id="host" name="host" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://host:8443" required />
+        <button id="connect" type="submit">Connect</button>
+        <p id="status" role="status"></p>
+      </form>
+    </main>
+    <script src="./main.js"></script>
+  </body>
+</html>

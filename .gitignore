@@ -11,4 +11,5 @@ __pycache__/
 .mypy_cache/
 node_modules/
 frontend/dist/
+desktop/release/
 *.log

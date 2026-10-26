@@ -327,13 +327,13 @@ The file sha256 is stored on the import job. A second upload of the same bytes i
 
 ## ARC-05 — Desktop packaging
 
-Selected approach, from vendor documentation. No installer has been built. M5 is what produces signed installers and proves the residual checks below.
+Selected approach. The client is an Electron app. Signed installers and the live packaging proof remain M5.
 
 ### Client-only installation
 
-[Tauri 2](https://v2.tauri.app/develop/sidecar/) packages the Windows and macOS client. The client stores the host URL, opens that origin in the webview, and talks only to `/api/v1`. It does not embed Python, MongoDB, or the workbook store. Offline writes are absent. Connection failure uses `/api/v1/health` and the compatibility route, and it does not present an empty institute as success.
+Electron packages the Windows and macOS client. The client stores the host URL, opens that origin in tabs, and talks only to `/api/v1`. A new tab, and a link that asks for a new window, stays on the same host. It does not embed Python, MongoDB, or the workbook store. Offline writes are absent. Connection failure uses `/api/v1/health` and the compatibility route, and it does not present an empty institute as success.
 
-Windows target: Windows 11 x64, NSIS installer. macOS target: Apple Silicon and Intel, as separate builds or one universal build. Sidecar binaries are not required for the client.
+Windows target: Windows 11 x64, NSIS installer. macOS target: an Apple Silicon disk image. An Intel build is the same client on an Intel runner.
 
 The host UI can be this same client pointed at `https://127.0.0.1:8443`, or the system browser. Staff do not need the client in order to use the host.
 
@@ -346,7 +346,7 @@ The full installer is a different product name and a different package. It insta
 | Supervisor | Windows service, or macOS LaunchDaemon, started without an interactive login so phones and other computers can connect while the desktop window is closed |
 | MongoDB Community Server | One-member replica set on `127.0.0.1` only. Data directory under ProgramData or Application Support, never inside the folder that an upgrade replaces |
 | API and worker | Embedded CPython running FastAPI and the job worker. Listens on the LAN only when network access is enabled |
-| Host launcher | Tauri window for health, logs, backup, and opening the app. Closing it does not stop the supervisor |
+| Host launcher | Electron window for health, logs, backup, and opening the app. Closing it does not stop the supervisor |
 
 Default API port is **8443**. If it is taken, the installer asks for another port and records it. The React app is static files served by FastAPI, so the browser and the launcher share one origin.
 
@@ -362,7 +362,7 @@ A desktop client trusts the host CA through the installer prompt. An iPhone or i
 
 ### Licensing evidence
 
-MongoDB Community Server is SSPL. [MongoDB's SSPL FAQ](https://www.mongodb.com/legal/licensing/server-side-public-license/faq) says an application built on Community Server is not, by itself, a public MongoDB-as-a-service, and that section 13 does not apply to an internal deployment. This installation matches that description only while clients reach FastAPI and `mongod` stays on localhost. The Release owner still has to confirm redistribution, keep the SSPL notice, and ship the MongoDB source offer before a public installer. Python, FastAPI, and Tauri use permissive licenses; the spike records the exact notices.
+MongoDB Community Server is SSPL. [MongoDB's SSPL FAQ](https://www.mongodb.com/legal/licensing/server-side-public-license/faq) says an application built on Community Server is not, by itself, a public MongoDB-as-a-service, and that section 13 does not apply to an internal deployment. This installation matches that description only while clients reach FastAPI and `mongod` stays on localhost. The Release owner still has to confirm redistribution, keep the SSPL notice, and ship the MongoDB source offer before a public installer. Python, FastAPI, and Electron use permissive licenses; the spike records the exact notices.
 
 ### Residual proof for the first packaging build
 

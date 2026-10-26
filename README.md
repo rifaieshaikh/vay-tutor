@@ -32,6 +32,25 @@ cd frontend && npm run build
 
 `DEPLOYMENT_MODE=cloud` requires an authentication code for administrator sign-in. The default local mode does not.
 
+## Desktop
+
+`desktop/` is the Electron app, Vay Tutor Client. It stores a host address, checks `/api/v1/health` and `/api/v1/compatibility`, and opens that host in tabs. A new tab, and a link that asks for a new window, stays on that same host. It does not install MongoDB or keep institute records.
+
+The [desktop workflow](.github/workflows/desktop.yml) builds the installers when desktop files change, and also when the workflow is run manually.
+
+## Client-only installation
+
+Other computers use this installation. One computer keeps the database. This one only connects to it.
+
+The installed program is named Vay Tutor Client. After installation, enter the host address, for example `https://host:8443`. The app checks that the host is ready and that this client can use it, then opens the institute. Several pages can stay open in tabs. It uses the certificates trusted by the computer, so the host certificate has to be installed there before the connection succeeds. Plain HTTP is refused.
+
+The workflow attaches two artifacts:
+
+| Artifact | Computer |
+| --- | --- |
+| `vay-tutor-client-only-windows` | Windows 11, NSIS installer |
+| `vay-tutor-client-only-macos` | macOS, disk image |
+
 ## Where to change a workflow
 
 Each domain owns its pages and its HTTP routes. Shared request checks live in `backend/app/deps.py`. Enrollment shape and name conflicts live in `backend/app/enrollment.py` and are used by admission, manual enrollment, transfer, and import.

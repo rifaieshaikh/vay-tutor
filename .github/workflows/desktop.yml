@@ -1,0 +1,60 @@
+name: desktop
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - desktop/**
+      - .github/workflows/desktop.yml
+  pull_request:
+    paths:
+      - desktop/**
+      - .github/workflows/desktop.yml
+
+jobs:
+  client-only:
+    name: Client-only (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+            target: win
+            artifact: vay-tutor-client-only-windows
+            installer: desktop/release/*.exe
+          - os: macos-latest
+            label: macOS
+            target: mac
+            artifact: vay-tutor-client-only-macos
+            installer: desktop/release/*.dmg
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install the desktop toolchain
+        working-directory: desktop
+        run: npm ci
+
+      - name: Test the host connection and tabs
+        working-directory: desktop
+        run: npm test
+
+      - name: Build the client-only installer
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npx electron-builder --${{ matrix.target }}
+
+      - name: Publish the client-only installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.installer }}
+          if-no-files-found: error
