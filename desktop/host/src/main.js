@@ -30,6 +30,7 @@ let hostOrigin = null;
 let ready = false;
 const tabs = createTabs();
 const views = new Map();
+const extraWindows = new Set();
 let shortcutAt = 0;
 
 function resourceRoot() {
@@ -130,36 +131,39 @@ function reloadActive() {
   if (view && !view.webContents.isDestroyed()) view.webContents.reload();
 }
 
-function bindPageMenu(contents, { refreshActive = false } = {}) {
+function bindPageMenu(contents, { refreshActive = false, menuWindow = null } = {}) {
   contents.on("context-menu", (_event, params) => {
     if (!ready || !hostOrigin) return;
-    const template = [
-      {
-        label: "Refresh",
-        click: () => {
-          if (refreshActive) reloadActive();
-          else if (!contents.isDestroyed()) contents.reload();
-        },
-      },
-      {
-        label: "New Tab",
-        click: () => openTab(`${hostOrigin}/`),
-      },
-    ];
+    const refresh = () => {
+      if (refreshActive) reloadActive();
+      else if (!contents.isDestroyed()) contents.reload();
+    };
+    const link = params.linkURL && isHostUrl(params.linkURL) ? params.linkURL : "";
+    const template = link
+      ? [
+          { label: "Open in New Tab", click: () => openTab(link) },
+          { label: "Open in New Window", click: () => openWindow(link) },
+          { type: "separator" },
+          { label: "Refresh", click: refresh },
+        ]
+      : [
+          { label: "Refresh", click: refresh },
+          { label: "New Tab", click: () => openTab(`${hostOrigin}/`) },
+        ];
     Menu.buildFromTemplate(template).popup({
-      window: windowRef ?? undefined,
+      window: menuWindow || windowRef || undefined,
       x: params.x,
       y: params.y,
     });
   });
 }
 
-function bindShortcuts(contents) {
+function bindShortcuts(contents, { reload = reloadActive, close = () => closeTab(tabs.activeId) } = {}) {
   contents.on("before-input-event", (event, input) => {
     if (!ready || input.type !== "keyDown") return;
     if (input.key === "F5") {
       event.preventDefault();
-      oncePerShortcut(() => reloadActive());
+      oncePerShortcut(reload);
       return;
     }
     if (!(input.meta || input.control)) return;
@@ -169,10 +173,10 @@ function bindShortcuts(contents) {
       oncePerShortcut(() => openTab(`${hostOrigin}/`));
     } else if (key === "w") {
       event.preventDefault();
-      oncePerShortcut(() => closeTab(tabs.activeId));
+      oncePerShortcut(close);
     } else if (key === "r") {
       event.preventDefault();
-      oncePerShortcut(() => reloadActive());
+      oncePerShortcut(reload);
     } else if (key === "tab") {
       event.preventDefault();
       oncePerShortcut(() => {
@@ -228,6 +232,64 @@ function openTab(url) {
   bindPageMenu(contents);
   contents.loadURL(url);
   showActive();
+}
+
+function openWindow(url) {
+  if (!ready || !isHostUrl(url)) return;
+  const child = new BaseWindow({
+    width: 1100,
+    height: 760,
+    minWidth: 720,
+    minHeight: 520,
+    title: "Vay Tutor",
+    backgroundColor: "#f7f4ee",
+    show: true,
+  });
+  const view = new WebContentsView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  child.contentView.addChildView(view);
+  const layoutChild = () => {
+    const { width, height } = child.getContentBounds();
+    view.setBounds({ x: 0, y: 0, width, height });
+  };
+  child.on("resize", layoutChild);
+  layoutChild();
+  const contents = view.webContents;
+  contents.setWindowOpenHandler(({ url: target }) => {
+    if (isHostUrl(target)) openTab(target);
+    else shell.openExternal(target);
+    return { action: "deny" };
+  });
+  contents.on("will-navigate", (event, target) => {
+    if (!isHostUrl(target)) event.preventDefault();
+  });
+  contents.on("will-redirect", (event, target) => {
+    if (!isHostUrl(target)) event.preventDefault();
+  });
+  contents.on("page-title-updated", (_event, title) => {
+    if (!child.isDestroyed()) child.setTitle(title);
+  });
+  const reload = () => {
+    if (!contents.isDestroyed()) contents.reload();
+  };
+  bindShortcuts(contents, {
+    reload,
+    close: () => {
+      if (!child.isDestroyed()) child.close();
+    },
+  });
+  bindPageMenu(contents, { menuWindow: child });
+  contents.loadURL(url);
+  extraWindows.add(child);
+  child.on("closed", () => {
+    extraWindows.delete(child);
+    closeContents(view);
+  });
 }
 
 function closeTab(id) {
@@ -302,6 +364,9 @@ function createWindow() {
   windowRef.contentView.addChildView(chromeView);
   windowRef.on("resize", layout);
   windowRef.on("closed", () => {
+    for (const child of [...extraWindows]) {
+      if (!child.isDestroyed()) child.close();
+    }
     closeContents(statusView);
     closeContents(chromeView);
     for (const view of views.values()) closeContents(view);
