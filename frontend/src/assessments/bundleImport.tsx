@@ -521,6 +521,7 @@ export function BundleImportPage() {
       ) : null}
       {step === 1 && preview && sheet && draft ? (
         <div className="import-marks">
+          <div className="import-marks-body">
           {(() => {
             const row = draft;
             const item = sheet;
@@ -688,35 +689,38 @@ export function BundleImportPage() {
             />
           ) : null}
           <BlockerList blockers={preview.blockers.filter((entry) => (!entry.sheet_id || entry.sheet_id === sheet.id) && entry.code !== "import.exam_fields" && entry.code !== "import.batch")} />
-          <div className="import-marks-foot">
-            <button type="button" className="quiet" disabled={pending || !draft.included} onClick={() => void addMarkRow(sheet, draft.keepGroup)}>Add mark row</button>
-            <button type="button" disabled={pending} onClick={() => void saveDrafts(2)}>Continue</button>
           </div>
-          <div className="sheet-tabs excel-tabs import-sheet-tabs" role="tablist" aria-label="Sheets">
-            {preview.sheets.map((item) => {
-              const tabDraft = drafts[item.id];
-              const included = tabDraft?.included ?? item.included;
-              const needsWork = tabDraft ? sheetNeedsWork(tabDraft, activeKinds, activeTypes) : false;
-              const label = sheetTabLabel(item, tabDraft, subjects);
-              return (
-                <div key={item.id} className={`tab${included ? "" : " excluded"}${needsWork ? " needs-work" : ""}`}>
-                  <input
-                    type="checkbox"
-                    checked={included}
-                    disabled={pending}
-                    aria-label={`Include ${item.name}`}
-                    onChange={(event) => {
-                      if (!tabDraft) return;
-                      void saveSheet(item, { ...tabDraft, included: event.target.checked });
-                    }}
-                  />
-                  <button type="button" role="tab" aria-selected={item.id === sheet.id} title={label} onClick={() => setSheetId(item.id)}>
-                    <span className="tab-label">{label}</span>
-                    {needsWork ? <span className="tab-dot" aria-label="Needs details" /> : null}
-                  </button>
-                </div>
-              );
-            })}
+          <div className="import-marks-chrome">
+            <div className="sheet-tabs excel-tabs import-sheet-tabs" role="tablist" aria-label="Sheets">
+              {preview.sheets.map((item) => {
+                const tabDraft = drafts[item.id];
+                const included = tabDraft?.included ?? item.included;
+                const needsWork = tabDraft ? sheetNeedsWork(tabDraft, activeKinds, activeTypes) : false;
+                const label = sheetTabLabel(item, tabDraft, subjects);
+                return (
+                  <div key={item.id} className={`tab${included ? "" : " excluded"}${needsWork ? " needs-work" : ""}`}>
+                    <input
+                      type="checkbox"
+                      checked={included}
+                      disabled={pending}
+                      aria-label={`Include ${item.name}`}
+                      onChange={(event) => {
+                        if (!tabDraft) return;
+                        void saveSheet(item, { ...tabDraft, included: event.target.checked });
+                      }}
+                    />
+                    <button type="button" role="tab" aria-selected={item.id === sheet.id} title={label} onClick={() => setSheetId(item.id)}>
+                      <span className="tab-label">{label}</span>
+                      {needsWork ? <span className="tab-dot" aria-label="Needs details" /> : null}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="import-marks-foot">
+              <button type="button" className="quiet" disabled={pending || !draft.included} onClick={() => void addMarkRow(sheet, draft.keepGroup)}>Add mark</button>
+              <button type="button" disabled={pending} onClick={() => void saveDrafts(2)}>Continue</button>
+            </div>
           </div>
           {dialog?.sheetId === sheet.id ? (
             <ImportAddDialog

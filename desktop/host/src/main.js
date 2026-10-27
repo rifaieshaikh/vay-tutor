@@ -125,9 +125,44 @@ function publishTabs() {
   if (windowRef) windowRef.setTitle(active ? active.title : "Vay Tutor");
 }
 
+function reloadActive() {
+  const view = views.get(tabs.activeId);
+  if (view && !view.webContents.isDestroyed()) view.webContents.reload();
+}
+
+function bindPageMenu(contents, { refreshActive = false } = {}) {
+  contents.on("context-menu", (_event, params) => {
+    if (!ready || !hostOrigin) return;
+    const template = [
+      {
+        label: "Refresh",
+        click: () => {
+          if (refreshActive) reloadActive();
+          else if (!contents.isDestroyed()) contents.reload();
+        },
+      },
+      {
+        label: "New Tab",
+        click: () => openTab(`${hostOrigin}/`),
+      },
+    ];
+    Menu.buildFromTemplate(template).popup({
+      window: windowRef ?? undefined,
+      x: params.x,
+      y: params.y,
+    });
+  });
+}
+
 function bindShortcuts(contents) {
   contents.on("before-input-event", (event, input) => {
-    if (!ready || input.type !== "keyDown" || !(input.meta || input.control)) return;
+    if (!ready || input.type !== "keyDown") return;
+    if (input.key === "F5") {
+      event.preventDefault();
+      oncePerShortcut(() => reloadActive());
+      return;
+    }
+    if (!(input.meta || input.control)) return;
     const key = input.key.toLowerCase();
     if (key === "t") {
       event.preventDefault();
@@ -135,6 +170,9 @@ function bindShortcuts(contents) {
     } else if (key === "w") {
       event.preventDefault();
       oncePerShortcut(() => closeTab(tabs.activeId));
+    } else if (key === "r") {
+      event.preventDefault();
+      oncePerShortcut(() => reloadActive());
     } else if (key === "tab") {
       event.preventDefault();
       oncePerShortcut(() => {
@@ -187,6 +225,7 @@ function openTab(url) {
     publishTabs();
   });
   bindShortcuts(contents);
+  bindPageMenu(contents);
   contents.loadURL(url);
   showActive();
 }
@@ -242,6 +281,7 @@ function createChromeView() {
     if (!url.startsWith("file:")) event.preventDefault();
   });
   bindShortcuts(view.webContents);
+  bindPageMenu(view.webContents, { refreshActive: true });
   view.webContents.loadFile(path.join(__dirname, "../ui/tabs.html"));
   return view;
 }
