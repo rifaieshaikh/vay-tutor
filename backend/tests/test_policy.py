@@ -111,6 +111,42 @@ def test_saving_settings_starts_the_next_policy_version(client):
     assert cleared.json()["passing_threshold"] is None
 
 
+def test_a_course_can_keep_its_own_bands(client):
+    custom = [
+        {"name": "Weak", "through": 30, "color": "#d6453d"},
+        {"name": "Steady", "through": 70, "color": "#e6b325"},
+        {"name": "Strong", "color": "#1b7f4a"},
+    ]
+    bootstrap(client)
+    course = client.post("/api/v1/courses", json={"name": "CA Foundation"})
+    assert course.status_code == 200, course.text
+    course_id = course.json()["id"]
+    saved = client.patch(f"/api/v1/catalog/course/{course_id}", json={"bands": custom})
+    assert saved.status_code == 200, saved.text
+    assert [item["name"] for item in saved.json()["bands"]] == ["Weak", "Steady", "Strong"]
+    catalog = client.get("/api/v1/catalog").json()
+    listed = next(item for item in catalog["courses"] if item["id"] == course_id)
+    assert [item["name"] for item in listed["bands"]] == ["Weak", "Steady", "Strong"]
+    from app.reporting import row_policy
+
+    own_sheet = {"bands": [{"name": "Sheet", "through": 50}, {"name": "Top"}], "course_bands": custom}
+    assert row_policy(own_sheet, {"bands": {"danger_below": 40, "safe_above": 60}})["bands"][0]["name"] == "Sheet"
+    course_only = {"course_bands": custom}
+    assert row_policy(course_only, {"bands": {"danger_below": 40, "safe_above": 60}})["bands"] == custom
+    assert present(
+        {"id": "row", "status": "scored", "score": 25, "maximum": 100, "course_bands": custom},
+        {"bands": {"danger_below": 40, "safe_above": 60}},
+        None,
+        None,
+    )["band"] == "weak"
+    cleared = client.patch(f"/api/v1/catalog/course/{course_id}", json={"bands": None})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["bands"] is None
+    again = client.get("/api/v1/catalog").json()
+    listed = next(item for item in again["courses"] if item["id"] == course_id)
+    assert "bands" not in listed or not listed.get("bands")
+
+
 def test_a_marksheet_can_keep_its_own_bands(client):
     custom = [
         {"name": "Weak", "through": 30},

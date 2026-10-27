@@ -47,6 +47,15 @@ async def publish_revision(db, client, user: dict, sheet: dict) -> dict:
                 session=session,
             )
     await _audit(db, user, "marksheet.publish", {"marksheet_id": sheet["_id"], "revision": revision})
+    from app.assessments.marks import refresh_sheet_marks
+
+    published = {
+        **sheet,
+        "status": "published",
+        "active_revision": revision,
+        "policy_version": policy_version,
+    }
+    await refresh_sheet_marks(db, published)
     return {"id": sheet["_id"], "status": "published", "revision": revision}
 
 

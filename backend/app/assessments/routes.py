@@ -874,7 +874,9 @@ async def add_result(request: Request, marksheet_id: str, body: ResultCreate) ->
     )
     version = sheet.get("edit_version", 0) + 1
     await db(request).marksheets.update_one({"_id": sheet["_id"]}, {"$set": {"edit_version": version}})
-    await _refresh_sheet_marks(request, sheet)
+    from app.assessments.marks import refresh_sheet_marks
+
+    await refresh_sheet_marks(db(request), sheet)
     return {"id": result_id, "edit_version": version}
 
 
@@ -1049,8 +1051,14 @@ async def patch_marksheet(request: Request, marksheet_id: str, body: MarksheetPa
         if unset:
             change["$unset"] = unset
         await db(request).marksheets.update_one({"_id": sheet["_id"]}, change)
+    from app.assessments.marks import refresh_sheet_marks
     from app.calculating import public_bands
 
+    fresh = {**sheet, **updates}
+    if "bands" in unset:
+        fresh.pop("bands", None)
+    if wants_bands:
+        await refresh_sheet_marks(db(request), fresh)
     saved = updates.get("bands")
     if "bands" in unset:
         shown = None
@@ -1088,36 +1096,10 @@ async def patch_result(request: Request, marksheet_id: str, result_id: str, body
     version = sheet.get("edit_version", 0) + 1
     await db(request).results.update_one({"_id": result_id}, {"$set": updates})
     await db(request).marksheets.update_one({"_id": sheet["_id"]}, {"$set": {"edit_version": version}})
-    await _refresh_sheet_marks(request, sheet)
+    from app.assessments.marks import refresh_sheet_marks
+
+    await refresh_sheet_marks(db(request), sheet)
     return {"id": result_id, "edit_version": version, **updates}
-
-
-async def _refresh_sheet_marks(request: Request, sheet: dict) -> None:
-    from app.calculating import band, dense_ranks, display_percentage, percentage
-
-    revision = sheet.get("revision") or 1
-    rows = await db(request).results.find({"marksheet_id": sheet["_id"], "revision": revision}).to_list(length=500)
-    policy = (
-        {"bands": sheet["bands"]}
-        if sheet.get("bands")
-        else await db(request).policies.find_one({"institute_id": sheet["institute_id"]}, sort=[("version", -1)])
-    )
-    ranked = dense_ranks([{"id": row["_id"], "status": row.get("status"), "score": row.get("score")} for row in rows])
-    for row in rows:
-        exact = percentage(
-            row.get("score"), row.get("maximum") if row.get("maximum") is not None else sheet.get("maximum")
-        )
-        exact = exact if row.get("status") == "scored" else None
-        await db(request).results.update_one(
-            {"_id": row["_id"]},
-            {
-                "$set": {
-                    "percentage": display_percentage(exact),
-                    "band": band(exact, policy) if row.get("status") == "scored" else None,
-                    "rank": ranked.get(row["_id"]),
-                }
-            },
-        )
 
 
 async def _plan_totals(database, institute_id: str, plan: dict, known: dict) -> dict:

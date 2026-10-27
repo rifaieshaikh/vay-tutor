@@ -1043,6 +1043,12 @@ async def end_batch_assignment(
     )
     return {"id": assignment_id, "status": "ended", "ended_on": ended}
 
+class BandBody(BaseModel):
+    name: str = ""
+    through: float | None = None
+    color: str | None = None
+
+
 class CatalogPatch(BaseModel):
     name: str | None = None
     archived: bool | None = None
@@ -1059,6 +1065,7 @@ class CatalogPatch(BaseModel):
     ended_on: str | None = None
     timings: str | None = None
     expected_revision: int | None = None
+    bands: list[BandBody] | None = None
 
 
 def batch_visible(user: dict, batch: dict) -> bool:
@@ -1211,6 +1218,20 @@ async def patch_catalog(request: Request, kind: str, record_id: str, body: Catal
                 updates["notes"] = notes
             else:
                 unsets["notes"] = ""
+    if kind == "course" and "bands" in sent:
+        from app.calculating import prepare_bands, public_bands
+
+        if body.bands is None:
+            if record.get("bands"):
+                unsets["bands"] = ""
+            else:
+                return {"id": record_id, "bands": None}
+        else:
+            try:
+                chosen = prepare_bands([item.model_dump() for item in body.bands])
+            except ValueError as error:
+                raise AppError(422, "policy.bands", str(error)) from None
+            updates["bands"] = chosen
     if kind == "batch":
         started = (
             calendar_date(body.started_on or "", "started_on")
@@ -1243,7 +1264,7 @@ async def patch_catalog(request: Request, kind: str, record_id: str, body: Catal
         if "closed" in sent and bool(body.closed) != bool(record.get("closed")):
             updates["closed"] = bool(body.closed)
     if not updates and not unsets:
-        raise AppError(422, "catalog.empty", "Choose a new name or an archive state.")
+        raise AppError(422, "catalog.empty", "Nothing changed to save.")
     updates["revision"] = int(record.get("revision") or 0) + 1
     change = {}
     if updates:
@@ -1261,10 +1282,17 @@ async def patch_catalog(request: Request, kind: str, record_id: str, body: Catal
             "action": "catalog.correct",
             "actor_id": user["_id"],
             "at": _now(),
-            "context": {"kind": kind, "id": record_id, **updates},
+            "context": {"kind": kind, "id": record_id, **{key: value for key, value in updates.items() if key != "bands"}},
         }
     )
-    return {"id": record_id, **updates}
+    payload = {"id": record_id, **{key: value for key, value in updates.items() if key != "bands"}}
+    if kind == "course" and ("bands" in updates or "bands" in unsets):
+        from app.assessments.marks import refresh_course_marksheets
+        from app.calculating import public_bands
+
+        payload["bands"] = public_bands(updates["bands"]) if "bands" in updates else None
+        await refresh_course_marksheets(db(request), user["institute_id"], record_id)
+    return payload
 
 
 def _catalog_row(item: dict) -> dict:
@@ -1296,5 +1324,9 @@ def _catalog_row(item: dict) -> dict:
             for unit in item["units"]
             if unit.get("id")
         ]
+    if item.get("bands"):
+        from app.calculating import public_bands
+
+        row["bands"] = public_bands(item["bands"])
     return row
 

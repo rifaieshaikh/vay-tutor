@@ -93,9 +93,18 @@ export function bandClass(band: string | null | undefined, place?: string | null
   return color ? "toned" : bandTone(band, place);
 }
 
+function bandInk(color: string) {
+  if (!/^#[0-9a-fA-F]{6}$/.test(color)) return "#1c2430";
+  const red = Number.parseInt(color.slice(1, 3), 16);
+  const green = Number.parseInt(color.slice(3, 5), 16);
+  const blue = Number.parseInt(color.slice(5, 7), 16);
+  const light = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+  return light > 0.55 ? "#1c2430" : "#ffffff";
+}
+
 export function bandStyle(color?: string | null): CSSProperties | undefined {
   if (!color) return undefined;
-  return { "--band-color": color } as CSSProperties;
+  return { "--band-color": color, "--band-ink": bandInk(color) } as CSSProperties;
 }
 
 export function BandMark({ band, name, place, color }: { band?: string | null; name?: string | null; place?: string | null; color?: string | null }) {

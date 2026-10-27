@@ -20,6 +20,9 @@ LIMIT_ROWS = 10_000
 LIMIT_SHEETS = 20
 RETENTION_DAYS = 30
 DECOMPRESSED_LIMIT = 50_000_000
+# read_only openpyxl often reports max_row=1_048_576 when dimensions are missing;
+# stop after this many blank rows past the last content instead of walking the sheet.
+_EMPTY_ROW_STOP = 100
 
 FIELD_LABELS = {
     "name": "Name",
@@ -711,11 +714,27 @@ def _xlsx_sheets(data: bytes) -> list[dict]:
             cached_sheet = cached[sheet.title]
             rows = []
             cached_rows = cached_sheet.iter_rows()
+            empty_streak = 0
+            seen_content = False
             for cells, cached_cells in zip(sheet.iter_rows(), cached_rows):
                 built = []
                 for cell, cached_cell in zip(cells, cached_cells):
                     built.append(_xlsx_cell(cell, cached_cell.value if cached_cell is not None else None))
-                rows.append(built)
+                blank = not any(item.get("text") or item.get("formula") for item in built)
+                if blank:
+                    if seen_content:
+                        empty_streak += 1
+                        if empty_streak >= _EMPTY_ROW_STOP:
+                            break
+                    rows.append(built)
+                else:
+                    seen_content = True
+                    empty_streak = 0
+                    rows.append(built)
+                if len(rows) > LIMIT_ROWS + _EMPTY_ROW_STOP:
+                    raise AppError(422, "import.too_large", "The file has more than 10,000 data rows.")
+            while rows and not any(item.get("text") or item.get("formula") for item in rows[-1]):
+                rows.pop()
             sheets.append({"name": sheet.title, "index": index, "rows": rows})
     finally:
         formulas.close()

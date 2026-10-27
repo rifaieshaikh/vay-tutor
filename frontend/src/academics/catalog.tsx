@@ -1,6 +1,7 @@
 import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
+import { Band, BandFields, bandsPayload, bandsReady, draftsFrom } from "../bands";
 import { notify } from "../notify";
 import { formatDisplayDate } from "../format";
 import { useRecordLabel } from "../orientation";
@@ -43,6 +44,7 @@ type Row = {
   closed?: boolean;
   units?: Unit[];
   revision?: number;
+  bands?: Band[] | null;
 };
 type Offering = { id: string; branch_id?: string; course_id?: string };
 type Catalog = { branches: Row[]; courses: Row[]; batches: Row[]; subjects: Row[]; papers: Row[]; students: Row[]; offerings: Offering[]; truncated?: boolean };
@@ -676,12 +678,19 @@ export function CoursePage({ session }: { session: Session }) {
   const [params, setParams] = useSearchParams();
   const { catalog, error, correct, reload, setError } = useCatalog();
   const [editing, setEditing] = useState<{ kind: CatalogKind; row: Row } | null>(null);
+  const [bandEditor, setBandEditor] = useState(false);
+  const [defaults, setDefaults] = useState<Band[] | null>(null);
   const [addingItemFor, setAddingItemFor] = useState<Row | null>(null);
   const [addingSubject, setAddingSubject] = useState(false);
   const [itemQuery, setItemQuery] = useState("");
   const canCorrect = session.actions.includes("catalog.correct") || session.actions.includes("catalog.manage");
   const kinds = useCurriculumKinds();
   const course = catalog?.courses.find((row) => row.id === courseId);
+  useEffect(() => {
+    api<{ bands?: Band[] }>("/api/v1/policies/active")
+      .then((policy) => setDefaults(policy.bands || null))
+      .catch(() => setDefaults(null));
+  }, []);
   useRecordLabel(course?.name || "");
   const section = (readChoice(params, "section", ["curriculum", "offered"]) || "overview") as "overview" | "curriculum" | "offered";
 
@@ -742,6 +751,34 @@ export function CoursePage({ session }: { session: Session }) {
         <>
           <p className={course.notes ? undefined : "meta"}>{course.notes || "No notes recorded."}</p>
           <p>{canCorrect ? <Link to={`/forms?course_id=${course.id}`}>Manage application questions</Link> : "Application questions are managed in Forms."}</p>
+          <div className="title-row">
+            <h2>Performance bands</h2>
+            {canCorrect ? <button type="button" onClick={() => setBandEditor(true)}>Edit bands</button> : null}
+          </div>
+          {course.bands?.length ? (
+            <dl className="facts">
+              {course.bands.map((item) => (
+                <div key={item.key || item.name}>
+                  <dt>{item.color ? <span className="band-swatch" style={{ background: item.color }} aria-hidden="true" /> : null}{item.name}</dt>
+                  <dd>{item.phrase}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : (
+            <>
+              <p className="meta">This course uses the bands in Settings. Marksheets without their own bands use these course bands when set.</p>
+              {defaults?.length ? (
+                <dl className="facts">
+                  {defaults.map((item) => (
+                    <div key={item.key || item.name}>
+                      <dt>{item.color ? <span className="band-swatch" style={{ background: item.color }} aria-hidden="true" /> : null}{item.name}</dt>
+                      <dd>{item.phrase}</dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : null}
+            </>
+          )}
         </>
       ) : null}
       {section === "curriculum" ? (
@@ -809,7 +846,79 @@ export function CoursePage({ session }: { session: Session }) {
           onSaved={async (created) => { notify(`Added ${created.name}.`); setAddingSubject(false); await reload(); }}
         />
       ) : null}
+      {bandEditor ? (
+        <CourseBands
+          courseId={course.id}
+          bands={course.bands}
+          fallback={defaults}
+          onClose={() => setBandEditor(false)}
+          onSaved={async (messageText) => {
+            setBandEditor(false);
+            notify(messageText);
+            await reload();
+          }}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function CourseBands({
+  courseId,
+  bands,
+  fallback,
+  onClose,
+  onSaved,
+}: {
+  courseId: string;
+  bands?: Band[] | null;
+  fallback: Band[] | null;
+  onClose: () => void;
+  onSaved: (message: string) => Promise<void>;
+}) {
+  const [rows, setRows] = useState(draftsFrom(bands?.length ? bands : fallback));
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const ready = bandsReady(rows);
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api(`/api/v1/catalog/course/${courseId}`, { method: "PATCH", body: JSON.stringify({ bands: bandsPayload(rows) }) });
+      await onSaved("These bands apply to this course.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save the bands.");
+      setSaving(false);
+    }
+  }
+
+  async function useSettings() {
+    setSaving(true);
+    setError("");
+    try {
+      await api(`/api/v1/catalog/course/${courseId}`, { method: "PATCH", body: JSON.stringify({ bands: null }) });
+      await onSaved("This course uses the bands in Settings.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save the bands.");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <StudentDialog title="Bands for this course" onClose={onClose}>
+      <form className="form-grid" onSubmit={save}>
+        <p className="meta span-2">Exams and totals for this course use these bands when a marksheet does not set its own. Leave them on Settings when this course should follow the institute bands.</p>
+        <BandFields rows={rows} onChange={setRows} />
+        {error ? <p className="error span-2" role="alert">{error}</p> : null}
+        <div className="dialog-actions span-2">
+          <button type="button" className="quiet" onClick={onClose}>Cancel</button>
+          <button type="button" className="quiet" disabled={saving || !bands?.length} onClick={() => void useSettings()}>Use settings</button>
+          <button type="submit" disabled={saving || !ready}>Save</button>
+        </div>
+      </form>
+    </StudentDialog>
   );
 }
 

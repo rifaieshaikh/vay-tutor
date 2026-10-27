@@ -120,6 +120,7 @@ async def commit_import(db, client, job: dict, actor: dict, confirm_updates: boo
             "context": {"import_id": job["_id"], "file": job.get("filename")},
         }
     )
+    await _refresh_committed_marksheets(db, actor["institute_id"], job)
     return {"state": "committed", "outcomes": outcomes, "summary": stored_summary}
 
 
@@ -168,6 +169,35 @@ async def _mark_sheet_failed(db, job: dict, actor: dict, sheet: dict, outcomes: 
     await db.import_jobs.update_one({"_id": job["_id"]}, {"$set": stored})
     if state == "failed":
         await _record_import(db, actor, job, batch_ids, "An import failed", "/ecr")
+
+
+async def _refresh_committed_marksheets(db, institute_id: str, job: dict) -> None:
+    from app.assessments.marks import refresh_sheet_marks
+
+    query: dict = {"institute_id": institute_id}
+    if job.get("file_id"):
+        query["file_id"] = job["file_id"]
+    elif job.get("filename"):
+        query["source_file"] = job["filename"]
+    else:
+        return
+    for sheet in await db.marksheets.find(query).to_list(length=100):
+        await refresh_sheet_marks(db, sheet)
+
+
+async def _refresh_committed_marksheets(db, institute_id: str, job: dict) -> None:
+    from app.assessments.marks import refresh_sheet_marks
+
+    query: dict = {"institute_id": institute_id}
+    if job.get("file_id"):
+        query["file_id"] = job["file_id"]
+    elif job.get("filename"):
+        query["source_file"] = job["filename"]
+    else:
+        return
+    sheets = await db.marksheets.find(query).to_list(length=200)
+    for sheet in sheets:
+        await refresh_sheet_marks(db, sheet)
 
 
 async def _record_import(db, actor: dict, job: dict, batch_ids: set[str], action: str, href: str) -> None:
@@ -608,6 +638,11 @@ async def commit_exam_import(db, client, job: dict, actor: dict, confirm_updates
             "context": {"import_id": job["_id"], "file": job.get("filename"), "exam_id": exam["_id"]},
         }
     )
+    from app.assessments.marks import refresh_sheet_marks
+
+    fresh = await db.marksheets.find_one({"_id": marksheet["_id"], "institute_id": actor["institute_id"]})
+    if fresh:
+        await refresh_sheet_marks(db, fresh)
     return {"state": "committed", "outcomes": outcomes, "summary": stored_summary}
 
 
@@ -818,6 +853,15 @@ async def commit_bundle_import(db, client, job: dict, actor: dict, confirm_updat
         "at": _now(),
         "context": {"import_id": job["_id"], "file": job.get("filename"), "bundle": True},
     })
+    from app.assessments.marks import refresh_sheet_marks
+
+    for item in outcomes:
+        exam_id = item.get("exam_id")
+        if item.get("status") != "committed" or not exam_id:
+            continue
+        sheet = await db.marksheets.find_one({"exam_id": exam_id, "institute_id": actor["institute_id"]})
+        if sheet:
+            await refresh_sheet_marks(db, sheet)
     return {"state": "committed", "outcomes": outcomes, "summary": summary}
 
 

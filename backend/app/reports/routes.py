@@ -108,7 +108,7 @@ async def view(
         view_sections,
     )
 
-    policy = await policy_for(db(request), user["institute_id"])
+    policy = await policy_for(db(request), user["institute_id"], course_id or None)
     result_clause = mongo_clause(
         user["grants"],
         "dashboard.view",
@@ -286,9 +286,17 @@ async def student_card(
     ]
     results = await db(request).results.find({"student_id": student_id, "active": {"$ne": False}}).to_list(length=500)
     from app.calculating import aggregate, public_bands
-    from app.reporting import attach_parts, comparisons, hydrate, matches, policy_for, present, ranks_for, tops_for
+    from app.reporting import (
+        attach_parts,
+        comparisons,
+        hydrate,
+        matches,
+        policy_for_rows,
+        present,
+        ranks_for,
+        tops_for,
+    )
 
-    policy = await policy_for(db(request), user["institute_id"])
     hydrated = await hydrate(db(request), results)
     shown_rows = []
     hidden = False
@@ -335,6 +343,11 @@ async def student_card(
         enrolled_batches = list(dict.fromkeys(item.get("batch_id") for item in enrolled if item.get("batch_id")))
         if len(enrolled_batches) == 1:
             card_filters = {**card_filters, "batch_id": enrolled_batches[0]}
+    if not card_filters.get("course_id") and enrolled:
+        enrolled_courses = list(dict.fromkeys(item.get("course_id") for item in enrolled if item.get("course_id")))
+        if len(enrolled_courses) == 1:
+            card_filters = {**card_filters, "course_id": enrolled_courses[0]}
+            course_id = enrolled_courses[0]
     context_selected = bool(period) or any(card_filters.get(field) for field in ("branch_id", "course_id", "batch_id"))
     several_batches = not card_filters.get("batch_id") and len({item.get("batch_id") for item in enrolled if item.get("batch_id")}) > 1
     if several_batches or (context_selected and not enrolled):
@@ -353,6 +366,7 @@ async def student_card(
         else:
             empty_reason = None
     await attach_parts(db(request), selected)
+    policy = await policy_for_rows(db(request), user["institute_id"], selected, course_id or card_filters.get("course_id") or None)
     presented = []
     for row in selected:
         rank = batch_rank = top_score = batch_top_score = None

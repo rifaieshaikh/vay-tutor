@@ -198,9 +198,17 @@ async def list_students(
     if needle:
         students = [student for student in students if matches_student(student)]
     from app.calculating import aggregate
-    from app.reporting import hydrate, matches, policy_for
+    from app.reporting import hydrate, matches, policy_for, policy_for_rows
 
-    policy = await policy_for(db(request), user["institute_id"])
+    policy_cache: dict[str, dict] = {}
+
+    async def bands_for(course: str | None, rows: list) -> dict:
+        key = course or ""
+        if key not in policy_cache:
+            policy_cache[key] = await policy_for_rows(db(request), user["institute_id"], rows, course or None)
+        return policy_cache[key]
+
+    list_policy = await policy_for(db(request), user["institute_id"], course_id or None)
     grouped: dict[str, list] = {}
     if student_ids:
         found = await db(request).results.find(
@@ -227,13 +235,13 @@ async def list_students(
         rows = grouped.get(student["_id"], [])
         if academic and not rows:
             continue
-        summary = aggregate(rows, policy)
+        summary = aggregate(rows, await bands_for(course_id or None, rows))
         latest = max((str(row.get("exam_date") or "") for row in rows), default="")
         visible_contact = contact_visible(user["grants"], owned.get(student["_id"], []))
         contexts = enrollment_context(by_student.get(student["_id"], []), facts)
         for context in contexts:
             batch_rows = [row for row in rows if row.get("batch_id") == context.get("batch_id")]
-            batch_summary = aggregate(batch_rows, policy)
+            batch_summary = aggregate(batch_rows, await bands_for(context.get("course_id"), batch_rows))
             context["performance"] = _performance(batch_summary)
             batch_latest = max((str(row.get("exam_date") or "") for row in batch_rows), default="")
             context["latest_exam_date"] = batch_latest or None
@@ -282,7 +290,7 @@ async def list_students(
         ]
         kept = {item["id"] for item in items}
         included_rows = [row for row in included_rows if row.get("student_id") in kept]
-    report = aggregate(included_rows, policy)
+    report = aggregate(included_rows, list_policy)
     summary = {
         **_performance(report),
         "students": len(items),

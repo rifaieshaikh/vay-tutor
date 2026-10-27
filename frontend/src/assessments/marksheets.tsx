@@ -3,7 +3,7 @@ import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-r
 import { ApiError, api } from "../api";
 import { notify } from "../notify";
 import { CONTEXT_FIELDS, Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
-import { Band, BandFields, bandsPayload, bandsReady, draftsFrom } from "../bands";
+import { Band, BandFields, BandMark, bandsPayload, bandsReady, draftsFrom } from "../bands";
 import { useUnsaved } from "../guard";
 import { Icon, moveTab, StudentDialog } from "../ui";
 import { FilterActions, ListToolbar, Pager } from "../academics/lists";
@@ -40,10 +40,14 @@ type Result = {
   score: number | null;
   rank: number | null;
   percentage: number | null;
+  band?: string | null;
+  band_name?: string | null;
+  band_place?: string | null;
+  band_color?: string | null;
   previous_score: number | null;
   source?: { row?: number };
 };
-type Detail = Marksheet & { attempt_kind?: string; available_students?: Person[]; results: Result[]; bands?: Band[] | null };
+type Detail = Marksheet & { attempt_kind?: string; available_students?: Person[]; results: Result[]; bands?: Band[] | null; course_bands?: Band[] | null };
 type Draft = { score: string; status: string };
 
 const FILTER_KEYS = ["q", "status", "exam_type", "branch_id", "course_id", "batch_id", "subject_id", "paper_id", "exam_date_from", "exam_date_to", "sort", "page"];
@@ -1014,10 +1018,10 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
         </dl>
       ) : (
         <>
-          <p className="meta">This marksheet uses the bands in Settings.</p>
-          {defaults?.length ? (
+          <p className="meta">{detail.course_bands?.length ? "This marksheet uses the bands for its course." : "This marksheet uses the bands in Settings."}</p>
+          {(detail.course_bands?.length ? detail.course_bands : defaults)?.length ? (
             <dl className="facts">
-              {defaults.map((item) => (
+              {(detail.course_bands?.length ? detail.course_bands : defaults || []).map((item) => (
                 <div key={item.key || item.name}>
                   <dt>{item.color ? <span className="band-swatch" style={{ background: item.color }} aria-hidden="true" /> : null}{item.name}</dt>
                   <dd>{item.phrase}</dd>
@@ -1060,7 +1064,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
       <div className="table-wrap">
         <table>
           <caption className="sr-only">Results on {detail.title}. Maximum {detail.maximum ?? "—"}, revision {detail.revision}.</caption>
-          <thead><tr><th>Student</th><th>ID</th><th>Row</th><th>Status</th><th>Score</th><th>Previous</th><th>%</th><th>Rank</th></tr></thead>
+          <thead><tr><th>Student</th><th>ID</th><th>Row</th><th>Status</th><th>Score</th><th>Previous</th><th>%</th><th>Band</th><th>Rank</th></tr></thead>
               <tbody>
                 {detail.results.map((result) => (
                   <tr key={result.id}>
@@ -1090,6 +1094,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
                     </td>
                     <td>{result.previous_score ?? "—"}</td>
                     <td>{result.percentage == null ? "—" : result.percentage.toFixed(2)}</td>
+                    <td>{result.band ? <BandMark band={result.band} name={result.band_name} place={result.band_place} color={result.band_color} /> : "—"}</td>
                     <td>{result.rank ?? "—"}</td>
                   </tr>
                 ))}
@@ -1148,7 +1153,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
       {bandEditor ? (
         <SheetBands
           bands={detail.bands}
-          fallback={defaults}
+          fallback={detail.course_bands?.length ? detail.course_bands : defaults}
           onClose={() => setBandEditor(false)}
           onSaved={async (messageText) => {
             setBandEditor(false);
@@ -1186,7 +1191,7 @@ function SheetBands({ bands, fallback, onClose, onSaved }: { bands?: Band[] | nu
     setError("");
     try {
       await api(`/api/v1/marksheets/${marksheetId}`, { method: "PATCH", body: JSON.stringify({ bands: null }) });
-      await onSaved("This marksheet uses the bands in Settings.");
+      await onSaved("This marksheet follows the course bands when set, otherwise Settings.");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not save the bands.");
       setSaving(false);
@@ -1196,12 +1201,12 @@ function SheetBands({ bands, fallback, onClose, onSaved }: { bands?: Band[] | nu
   return (
     <StudentDialog title="Bands for this marksheet" onClose={onClose}>
       <form className="form-grid" onSubmit={save}>
-        <p className="meta span-2">Scores on this marksheet use these bands. Leave them on Settings when this sheet should follow the institute bands. Totals that mix marksheets still use Settings.</p>
+        <p className="meta span-2">Scores on this marksheet use these bands. Leave them clear to follow the course bands when set, otherwise Settings. Totals that mix courses still use Settings.</p>
         <BandFields rows={rows} onChange={setRows} />
         {error ? <p className="error span-2" role="alert">{error}</p> : null}
         <div className="dialog-actions span-2">
           <button type="button" className="quiet" onClick={onClose}>Cancel</button>
-          <button type="button" className="quiet" disabled={saving || !bands?.length} onClick={() => void useSettings()}>Use settings</button>
+          <button type="button" className="quiet" disabled={saving || !bands?.length} onClick={() => void useSettings()}>Use course or settings</button>
           <button type="submit" disabled={saving || !ready}>Save</button>
         </div>
       </form>

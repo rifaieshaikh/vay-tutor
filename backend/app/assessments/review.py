@@ -25,6 +25,7 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
     )
     if sheet is None:
         raise AppError(404, "not_found", "That record was not found.")
+    from app.assessments.marks import band_policy_for_sheet
     from app.calculating import public_bands
 
     resource = _sheet_resource(sheet)
@@ -45,6 +46,11 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
         if not visible:
             raise AppError(404, "not_found", "That record was not found.")
     exam = await db(request).exams.find_one({"marksheet_id": sheet["_id"], "institute_id": user["institute_id"]})
+    course = None
+    if sheet.get("course_id"):
+        course = await db(request).courses.find_one(
+            {"_id": sheet["course_id"], "institute_id": user["institute_id"]}
+        )
     revision = sheet.get("active_revision") or sheet.get("revision") or 1
     results = await db(request).results.find(
         {"marksheet_id": sheet["_id"], "revision": revision}
@@ -91,8 +97,29 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
         "uploader_id": sheet.get("uploader_id"),
         "reviewer_id": sheet.get("reviewer_id"),
         "bands": public_bands(sheet["bands"]) if sheet.get("bands") else None,
+        "course_bands": public_bands(course["bands"]) if course and course.get("bands") else None,
         "available_students": available,
-        "results": [
+        "results": _present_results(results, names, codes, sheet, await band_policy_for_sheet(db(request), sheet)),
+    }
+
+
+def _present_results(results: list, names: dict, codes: dict, sheet: dict, policy: dict | None) -> list[dict]:
+    from app.calculating import band_detail, percentage
+
+    rows = []
+    for item in results:
+        exact = (
+            percentage(
+                item.get("score"),
+                item.get("maximum") if item.get("maximum") is not None else sheet.get("maximum"),
+            )
+            if item.get("status") == "scored"
+            else None
+        )
+        detail = band_detail(exact, policy) if exact is not None else {
+            "band": None, "band_name": None, "band_place": None, "band_color": None,
+        }
+        rows.append(
             {
                 "id": item["_id"],
                 "student_id": item.get("student_id"),
@@ -102,12 +129,15 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
                 "score": item.get("score"),
                 "rank": item.get("rank"),
                 "percentage": item.get("percentage"),
+                "band": detail["band"],
+                "band_name": detail["band_name"],
+                "band_place": detail["band_place"],
+                "band_color": detail.get("band_color"),
                 "previous_score": item.get("previous_score"),
                 "source": item.get("source"),
             }
-            for item in results
-        ],
-    }
+        )
+    return rows
 
 
 @router.post("/marksheets/{marksheet_id}/publish")

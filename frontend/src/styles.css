@@ -291,7 +291,7 @@ main { padding: 1rem; display: flex; flex-direction: column; min-width: 0; min-h
 .chip.danger { background: #f3e4e1; }
 .chip.fifty-fifty { background: #f4e7c8; }
 .chip.safe { background: #e7f3f2; }
-.chip.toned { background: color-mix(in srgb, var(--band-color) 28%, white); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--band-color) 55%, transparent); }
+.chip.toned { background: var(--band-color); color: var(--band-ink, #1c2430); }
 .card-panel.is-hidden { display: none; }
 .nowrap { white-space: nowrap; }
 .chip.update { background: #f4e7c8; }
@@ -415,27 +415,45 @@ main { padding: 1rem; display: flex; flex-direction: column; min-width: 0; min-h
   font-weight: 700;
 }
 .wizard-steps button[aria-current="step"] .wizard-index { background: #0f6e6b; color: white; }
-.import-marks { display: grid; gap: 0.75rem; }
+main:has(.import-marks) {
+  max-height: calc(100vh - 4.2rem);
+  overflow: hidden;
+}
+.panel.wide.import-exams:has(.import-marks) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.import-marks {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 0;
+}
 .import-marks-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
   display: grid;
   gap: 0.75rem;
   align-content: start;
-  padding-bottom: 5.5rem;
+  padding-bottom: 0.75rem;
 }
 .import-sheet-fields { margin-top: 0; }
 .import-marks-chrome {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 6;
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 4;
   display: grid;
   gap: 0;
   margin: 0;
-  padding: 0 1rem 0.55rem;
+  padding: 0;
   background: #fffcf7;
   border-top: 1px solid #d0d5db;
-  box-shadow: 0 -6px 16px rgba(28, 36, 48, 0.08);
+  box-shadow: 0 -6px 16px rgba(28, 36, 48, 0.06);
 }
 .import-marks-foot {
   display: flex;
@@ -448,13 +466,6 @@ main { padding: 1rem; display: flex; flex-direction: column; min-width: 0; min-h
   background: #fffcf7;
 }
 .import-marks-foot button { width: auto; }
-@media (min-width: 900px) {
-  .import-marks-chrome {
-    left: var(--sidebar);
-    padding-left: 1.5rem;
-    padding-right: 1.5rem;
-  }
-}
 .import-sheet-tabs {
   margin: 0;
   height: 1.85rem;

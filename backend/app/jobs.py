@@ -153,9 +153,8 @@ async def _run(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
         return
     target = data_dir / "files"
     target.mkdir(parents=True, exist_ok=True)
-    from app.reporting import authorized, export_bytes, file_digest, hydrate, policy_for, progress_document
+    from app.reporting import authorized, export_bytes, file_digest, hydrate, policy_for_rows, progress_document
 
-    policy = await policy_for(db, job["institute_id"])
     stored = await db.results.find({"institute_id": job["institute_id"], "active": {"$ne": False}}).to_list(length=5000)
     card = job["payload"].get("card") or {}
     visible = [
@@ -163,6 +162,12 @@ async def _run(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
         if _in_scope(row, resource)
     ]
     rows = [row for row in visible if _matches_card(row, card)]
+    policy = await policy_for_rows(
+        db,
+        job["institute_id"],
+        rows,
+        str(card.get("course_id") or resource.get("course_id") or "") or None,
+    )
     document = await progress_document(db, job["institute_id"], rows, policy, card, resource, job["kind"], visible)
     payload, filename = export_bytes(job["kind"], document)
     partial = target / f"{job['_id']}.partial"

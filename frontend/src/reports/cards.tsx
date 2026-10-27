@@ -1,11 +1,13 @@
-import { ReactNode, useEffect, useRef, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
-import { studentRecordHref } from "../students";
+import { FilterActions, ListToolbar } from "../academics/lists";
 import { ExamType, useExamTypes } from "../academics/kinds";
 import { Band, BandMark, bandClass, bandStyle } from "../bands";
-import { Option } from "../filters";
-import { moveTab } from "../ui";
+import { periodLabel } from "../context";
+import { Option, optionFits, scopeOptions } from "../filters";
+import { studentRecordHref } from "../students";
+import { StudentDialog, moveTab } from "../ui";
 
 type Performance = {
   percentage: number | null;
@@ -98,6 +100,14 @@ type Card = {
 type ExportJob = { format: "pdf" | "xlsx"; state: "queued" | "running" | "ready" | "failed"; fileId?: string | null; filename?: string | null; error?: string };
 
 const ENROLLMENT_KEYS = ["branch_id", "course_id", "batch_id"] as const;
+const FILTER_KEYS = ["branch_id", "course_id", "batch_id", "period"] as const;
+const LIST_STASH = "vay-cards-list";
+const LIST_PARAM_KEYS = ["q", "page", "sort", "period", ...FILTER_KEYS] as const;
+const SORT_OPTIONS = [
+  ["name", "Name, A to Z"],
+  ["percentage", "Performance, high to low"],
+  ["exam_date", "Latest exam"],
+] as const;
 const EMPTY_REASONS: Record<string, string> = {
   enrollment: "This student is not enrolled in the selected branch, course, or batch.",
   filters: "No published results match these filters.",
@@ -197,7 +207,47 @@ function studentsReturn(value: string | null) {
 }
 
 function readApplied(params: URLSearchParams) {
-  return { q: params.get("q") || "", page: params.get("page") || "" };
+  return {
+    q: params.get("q") || "",
+    page: params.get("page") || "",
+    branch_id: params.get("branch_id") || "",
+    course_id: params.get("course_id") || "",
+    batch_id: params.get("batch_id") || "",
+    period: params.get("period") || "",
+  };
+}
+
+function filterDraftFrom(params: URLSearchParams) {
+  return Object.fromEntries(FILTER_KEYS.map((key) => [key, params.get(key) || ""])) as Record<(typeof FILTER_KEYS)[number], string>;
+}
+
+function stashListFilters(params: URLSearchParams) {
+  const saved: Record<string, string> = {};
+  for (const key of LIST_PARAM_KEYS) {
+    const value = params.get(key);
+    if (value) saved[key] = value;
+  }
+  try {
+    sessionStorage.setItem(LIST_STASH, JSON.stringify(saved));
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+function restoreListFilters() {
+  const next = new URLSearchParams();
+  try {
+    const raw = sessionStorage.getItem(LIST_STASH);
+    sessionStorage.removeItem(LIST_STASH);
+    if (!raw) return next;
+    const saved = JSON.parse(raw) as Record<string, string>;
+    for (const [key, value] of Object.entries(saved)) {
+      if (value) next.set(key, value);
+    }
+  } catch {
+    /* ignore bad stash */
+  }
+  return next;
 }
 
 function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
@@ -267,6 +317,8 @@ export function CardsPage({ session }: { session: Session }) {
   const [exportJob, setExportJob] = useState<ExportJob | null>(null);
   const [exporting, setExporting] = useState(false);
   const [query, setQuery] = useState(applied.q);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filterDraft, setFilterDraft] = useState(() => filterDraftFrom(params));
   const [optionsError, setOptionsError] = useState("");
   const [optionsAttempt, setOptionsAttempt] = useState(0);
   const [panel, setPanel] = useState("subjects");
@@ -282,7 +334,7 @@ export function CardsPage({ session }: { session: Session }) {
     if (value) reportScope.set(key, value);
   }
   const requestKey = `${studentId}?${reportScope.toString()}`;
-  const listKey = ["list", applied.q, page, sort].join("|");
+  const listKey = ["list", applied.q, applied.branch_id, applied.course_id, applied.batch_id, applied.period, page, sort].join("|");
   const shown = card && loadedKey === requestKey ? card : null;
   const cardPending = Boolean(studentId) && loadedKey !== requestKey;
 
@@ -327,6 +379,42 @@ export function CardsPage({ session }: { session: Session }) {
   }, [optionsAttempt]);
 
   useEffect(() => {
+    if (studentId || !options.branch) return;
+    const next = new URLSearchParams(params);
+    let changed = false;
+    const scope = () => ({
+      branch_id: next.get("branch_id") || "",
+      course_id: next.get("course_id") || "",
+    });
+    if (next.get("branch_id") && !(options.branch || []).some((item) => item.id === next.get("branch_id"))) {
+      next.delete("branch_id");
+      next.delete("course_id");
+      next.delete("batch_id");
+      next.delete("period");
+      changed = true;
+    }
+    if (next.get("course_id") && !(options.course || []).some((item) => item.id === next.get("course_id") && optionFits(item, scope()))) {
+      next.delete("course_id");
+      next.delete("batch_id");
+      next.delete("period");
+      changed = true;
+    }
+    const batch = (options.batch || []).find((item) => item.id === next.get("batch_id"));
+    if (next.get("batch_id") && (!batch || !optionFits(batch, scope()) || (next.get("period") && batch.parents?.session_key !== next.get("period")))) {
+      next.delete("batch_id");
+      changed = true;
+    }
+    if (next.get("period")) {
+      const periods = scopeOptions({ branch_id: next.get("branch_id") || "", course_id: next.get("course_id") || "" }, options).periodChoices;
+      if (!periods.includes(next.get("period") || "")) {
+        next.delete("period");
+        changed = true;
+      }
+    }
+    if (changed) setParams(next, { replace: true });
+  }, [studentId, options, params, setParams]);
+
+  useEffect(() => {
     if (studentId) return;
     let cancelled = false;
     setLoading(true);
@@ -336,6 +424,9 @@ export function CardsPage({ session }: { session: Session }) {
     setTotal(0);
     const search = new URLSearchParams();
     if (applied.q) search.set("q", applied.q);
+    for (const key of FILTER_KEYS) {
+      if (applied[key]) search.set(key, applied[key]);
+    }
     if (sort !== "name") search.set("sort", sort);
     search.set("page", String(page));
     search.set("page_size", "8");
@@ -425,8 +516,74 @@ export function CardsPage({ session }: { session: Session }) {
     write(next);
   }
 
-  function open(student: Student, enrollment: EnrollmentCard) {
+  function openFilters() {
+    setFilterDraft(filterDraftFrom(params));
+    setFiltersOpen(true);
+  }
+
+  function editDraft(key: string, value: string) {
+    setFilterDraft((current) => {
+      const next = { ...current, [key]: value };
+      if (key === "branch_id") {
+        next.course_id = "";
+        next.batch_id = "";
+        next.period = "";
+      }
+      if (key === "course_id") {
+        next.batch_id = "";
+        next.period = "";
+      }
+      if (key === "period") {
+        const batch = (options.batch || []).find((item) => item.id === current.batch_id);
+        if (value && batch?.parents?.session_key !== value) next.batch_id = "";
+      }
+      return next;
+    });
+  }
+
+  function applyFilters(event: FormEvent) {
+    event.preventDefault();
     const next = new URLSearchParams(params);
+    next.delete("page");
+    next.delete("student");
+    for (const key of FILTER_KEYS) {
+      if (filterDraft[key]) next.set(key, filterDraft[key]);
+      else next.delete(key);
+    }
+    write(next);
+    setFiltersOpen(false);
+  }
+
+  function removeFilter(key: string) {
+    if (key === "q") setQuery("");
+    const next = new URLSearchParams(params);
+    next.delete("page");
+    next.delete("student");
+    next.delete(key);
+    if (key === "branch_id") {
+      next.delete("course_id");
+      next.delete("batch_id");
+      next.delete("period");
+    }
+    if (key === "course_id") {
+      next.delete("batch_id");
+      next.delete("period");
+    }
+    write(next);
+  }
+
+  function clearFilters() {
+    setQuery("");
+    const next = new URLSearchParams();
+    if (sort !== "name") next.set("sort", sort);
+    write(next);
+  }
+
+  function open(student: Student, enrollment: EnrollmentCard) {
+    stashListFilters(params);
+    const next = new URLSearchParams();
+    const ret = params.get("returnTo");
+    if (ret) next.set("returnTo", ret);
     next.set("student", student.id);
     if (enrollment.batch_id) next.set("batch_id", enrollment.batch_id);
     if (enrollment.branch_id) next.set("branch_id", enrollment.branch_id);
@@ -435,12 +592,9 @@ export function CardsPage({ session }: { session: Session }) {
   }
 
   function closeCard() {
-    const next = new URLSearchParams(params);
-    next.delete("student");
-    for (const key of ENROLLMENT_KEYS) next.delete(key);
     setCard(null);
     setLoadedKey("");
-    write(next);
+    write(restoreListFilters());
   }
 
   function chooseSort(value: string) {
@@ -448,6 +602,7 @@ export function CardsPage({ session }: { session: Session }) {
     if (value === "name") next.delete("sort");
     else next.set("sort", value);
     next.delete("page");
+    next.delete("student");
     write(next);
   }
 
@@ -490,6 +645,14 @@ export function CardsPage({ session }: { session: Session }) {
   const canSheet = session.actions.includes("export.xlsx");
   const rangeFrom = total === 0 ? 0 : (page - 1) * 8 + 1;
   const rangeTo = Math.min(total, (page - 1) * 8 + students.length);
+  const draftScope = scopeOptions(filterDraft, options);
+  const chips: { key: string; label: string }[] = [];
+  if (applied.q) chips.push({ key: "q", label: `Search: ${applied.q}` });
+  if (applied.branch_id) chips.push({ key: "branch_id", label: `Branch: ${optionLabel("branch", applied.branch_id) || "Selected"}` });
+  if (applied.course_id) chips.push({ key: "course_id", label: `Course: ${optionLabel("course", applied.course_id) || "Selected"}` });
+  if (applied.period) chips.push({ key: "period", label: `Intake: ${periodLabel(applied.period)}` });
+  if (applied.batch_id) chips.push({ key: "batch_id", label: `Batch: ${optionLabel("batch", applied.batch_id) || "Selected"}` });
+  const filtered = chips.length > 0;
 
   if (studentId) {
     const allResults = shown?.results || [];
@@ -757,14 +920,22 @@ export function CardsPage({ session }: { session: Session }) {
           <h1>Progress cards</h1>
         </div>
       </div>
-      <div className="toolbar common">
-        <label>Search
-          <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commitSearch(); } }} placeholder="Name or student id" />
-        </label>
-      </div>
-      <p className="filter-row">
-        <span role="status">{loading ? "Loading students…" : `${total} student${total === 1 ? "" : "s"}`}</span>
-      </p>
+      <ListToolbar
+        searchLabel="Search progress cards"
+        placeholder="Name or student id"
+        query={query}
+        onQuery={setQuery}
+        onSearch={commitSearch}
+        sort={sort}
+        sortOptions={SORT_OPTIONS}
+        onSort={chooseSort}
+        onOpenFilters={openFilters}
+        summary={loading ? "Loading students…" : error ? "Students could not be loaded." : total === 0 ? "0 students" : `${rangeFrom}–${rangeTo} of ${total}`}
+        chips={chips}
+        onRemove={removeFilter}
+        onClear={clearFilters}
+        filtered={filtered}
+      />
       {optionsError ? <p className="error" role="alert">{optionsError} <button type="button" className="quiet" onClick={() => setOptionsAttempt((value) => value + 1)}>Try again</button></p> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
       {!loading && summary ? (
@@ -775,19 +946,19 @@ export function CardsPage({ session }: { session: Session }) {
           <div><span>Incomplete results</span><strong>{summary.missing + summary.absent}</strong><small>{summary.missing} missing · {summary.absent} absent</small></div>
         </div>
       ) : null}
-      {!loading && total === 0 ? <p>{applied.q ? "No students match that search." : "No students yet."}</p> : null}
+      {!loading && total === 0 ? <p>{filtered ? "No students match." : "No students yet."}</p> : null}
       {students.length > 0 ? (
         <div className="table-wrap">
           <table className="people-table">
             <caption className="sr-only">{total} student{total === 1 ? "" : "s"}. Page {page} of {pages}. Sorted by {sort === "percentage" ? "overall percentage" : sort === "exam_date" ? "latest exam" : "name"}.</caption>
             <thead>
               <tr>
-                <th aria-sort={sort === "name" ? "ascending" : "none"}><button type="button" className="sort" onClick={() => chooseSort("name")}>Student</button></th>
-                <th aria-sort={sort === "percentage" ? "descending" : "none"}><button type="button" className="sort" onClick={() => chooseSort("percentage")}>Performance</button></th>
+                <th aria-sort={sort === "name" ? "ascending" : "none"}>Student</th>
+                <th aria-sort={sort === "percentage" ? "descending" : "none"}>Performance</th>
                 <th>Results</th>
                 <th>Band</th>
                 <th>Batch</th>
-                <th aria-sort={sort === "exam_date" ? "descending" : "none"}><button type="button" className="sort" onClick={() => chooseSort("exam_date")}>Latest</button></th>
+                <th aria-sort={sort === "exam_date" ? "descending" : "none"}>Latest</th>
               </tr>
             </thead>
             <tbody>
@@ -814,11 +985,44 @@ export function CardsPage({ session }: { session: Session }) {
           </table>
         </div>
       ) : null}
-      <p className="pager">
-        <button type="button" className="quiet" disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</button>
-        <span>{rangeFrom}–{rangeTo} of {total}</span>
-        <button type="button" className="quiet" disabled={page >= pages} onClick={() => setPage(page + 1)}>Next</button>
-      </p>
+      {!error && total > 0 ? (
+        <p className="pager">
+          <button type="button" className="quiet" disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</button>
+          <span>{rangeFrom}–{rangeTo} of {total}</span>
+          <button type="button" className="quiet" disabled={page >= pages} onClick={() => setPage(page + 1)}>Next</button>
+        </p>
+      ) : null}
+      {filtersOpen ? (
+        <StudentDialog title="Filters" onClose={() => setFiltersOpen(false)}>
+          <form className="form-grid" onSubmit={applyFilters}>
+            <label>Branch
+              <select aria-label="Branch" value={filterDraft.branch_id} onChange={(event) => editDraft("branch_id", event.target.value)}>
+                <option value="">Any branch</option>
+                {(options.branch || []).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select>
+            </label>
+            <label>Course
+              <select aria-label="Course" value={filterDraft.course_id} onChange={(event) => editDraft("course_id", event.target.value)}>
+                <option value="">Any course</option>
+                {draftScope.courses.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select>
+            </label>
+            <label>Intake period
+              <select aria-label="Intake period" value={filterDraft.period} onChange={(event) => editDraft("period", event.target.value)}>
+                <option value="">Any period</option>
+                {draftScope.periodChoices.map((key) => <option key={key} value={key}>{periodLabel(key)}</option>)}
+              </select>
+            </label>
+            <label>Batch
+              <select aria-label="Batch" value={filterDraft.batch_id} onChange={(event) => editDraft("batch_id", event.target.value)}>
+                <option value="">Any batch</option>
+                {draftScope.batches.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select>
+            </label>
+            <FilterActions onReset={() => setFilterDraft({ branch_id: "", course_id: "", batch_id: "", period: "" })} onClose={() => setFiltersOpen(false)} />
+          </form>
+        </StudentDialog>
+      ) : null}
     </section>
   );
 }

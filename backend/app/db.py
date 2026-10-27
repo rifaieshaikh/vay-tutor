@@ -87,6 +87,27 @@ async def configure_mongo(client: AsyncIOMotorClient, settings: Settings | None 
     log.info("MongoDB is standalone; local writes continue without a replica set.")
 
 
+async def _unique_string_idempotency(collection) -> None:
+    """Unique only when idempotency_key is a string.
+
+    A compound sparse unique index still indexes every row that has institute_id,
+    treating a missing key as null — so a second open upload 500s. Partial filter
+    keeps uniqueness for commit retries without blocking new uploads.
+    """
+    name = "institute_id_1_idempotency_key_1"
+    indexes = await collection.index_information()
+    current = indexes.get(name) or {}
+    wanted = {"idempotency_key": {"$type": "string"}}
+    if current and current.get("partialFilterExpression") != wanted:
+        await collection.drop_index(name)
+    await collection.create_index(
+        [("institute_id", 1), ("idempotency_key", 1)],
+        name=name,
+        unique=True,
+        partialFilterExpression=wanted,
+    )
+
+
 async def ensure_schema(db: AsyncIOMotorDatabase) -> None:
     await db.policies.create_index([("institute_id", 1), ("version", 1)], unique=True)
     await db.teachers.create_index(
@@ -99,14 +120,10 @@ async def ensure_schema(db: AsyncIOMotorDatabase) -> None:
     await db.prospects.create_index([("institute_id", 1), ("name_key", 1)])
     await db.prospects.create_index([("institute_id", 1), ("whatsapp_key", 1)])
     await db.enquiry_imports.create_index([("institute_id", 1), ("expires_at", 1)])
-    await db.enquiry_imports.create_index(
-        [("institute_id", 1), ("idempotency_key", 1)], unique=True, sparse=True
-    )
+    await _unique_string_idempotency(db.enquiry_imports)
     await db.enquiry_mappings.create_index([("institute_id", 1), ("owner_id", 1), ("name_key", 1)])
     await db.admission_imports.create_index([("institute_id", 1), ("expires_at", 1)])
-    await db.admission_imports.create_index(
-        [("institute_id", 1), ("idempotency_key", 1)], unique=True, sparse=True
-    )
+    await _unique_string_idempotency(db.admission_imports)
     await db.admission_mappings.create_index([("institute_id", 1), ("owner_id", 1), ("name_key", 1)])
     await db.intake_operations.create_index("created_at")
     await db.admissions.create_index([("institute_id", 1), ("status", 1), ("created_at", -1)])

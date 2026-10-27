@@ -24,9 +24,25 @@ from app.calculating import (
 )
 
 
-async def policy_for(db, institute_id: str) -> dict:
+async def policy_for(db, institute_id: str, course_id: str | None = None) -> dict:
     policy = await db.policies.find_one({"institute_id": institute_id}, sort=[("version", -1)])
-    return policy or {"version": 1, "bands": _default_band_rows(), "aggregate": "maximum-marks-weighted", "passing_threshold": None}
+    base = policy or {"version": 1, "bands": _default_band_rows(), "aggregate": "maximum-marks-weighted", "passing_threshold": None}
+    if not course_id:
+        return base
+    course = await db.courses.find_one({"_id": course_id, "institute_id": institute_id})
+    if course and course.get("bands"):
+        return {**base, "bands": course["bands"]}
+    return base
+
+
+async def policy_for_rows(db, institute_id: str, rows: list[dict], course_id: str | None = None) -> dict:
+    """Prefer an explicit course, else the single course shared by these rows."""
+    if course_id:
+        return await policy_for(db, institute_id, course_id)
+    course_ids = {row.get("course_id") for row in rows if row.get("course_id")}
+    if len(course_ids) == 1:
+        return await policy_for(db, institute_id, next(iter(course_ids)))
+    return await policy_for(db, institute_id)
 
 
 async def hydrate(db, results: list[dict]) -> list[dict]:
@@ -35,11 +51,23 @@ async def hydrate(db, results: list[dict]) -> list[dict]:
     if sheet_ids:
         for sheet in await db.marksheets.find({"_id": {"$in": sheet_ids}}).to_list(length=len(sheet_ids)):
             sheets[sheet["_id"]] = sheet
+    course_ids = {
+        item.get("course_id") or sheets.get(item.get("marksheet_id"), {}).get("course_id")
+        for item in results
+    }
+    course_ids = {item for item in course_ids if item}
+    courses = {}
+    if course_ids:
+        for course in await db.courses.find({"_id": {"$in": list(course_ids)}}).to_list(length=len(course_ids)):
+            courses[course["_id"]] = course
     rows = []
     for result in results:
         sheet = sheets.get(result.get("marksheet_id"), {})
+        course_id = result.get("course_id") or sheet.get("course_id")
+        course = courses.get(course_id) or {}
         row = dict(result)
         row["id"] = result["_id"]
+        row["course_id"] = course_id
         row["exam_date"] = result.get("exam_date") or sheet.get("exam_date")
         row["title"] = result.get("title") or sheet.get("title") or sheet.get("status")
         row["assessment_id"] = result.get("assessment_id") or sheet.get("assessment_id")
@@ -51,6 +79,7 @@ async def hydrate(db, results: list[dict]) -> list[dict]:
         row["published"] = sheet.get("status") == "published" or result.get("active") is True
         row["policy_version"] = sheet.get("policy_version")
         row["bands"] = sheet.get("bands")
+        row["course_bands"] = course.get("bands")
         rows.append(row)
     return rows
 
@@ -178,6 +207,8 @@ async def attach_parts(db, rows: list[dict]) -> None:
 def row_policy(row: dict, policy: dict | None) -> dict | None:
     if row.get("bands"):
         return {"bands": row["bands"]}
+    if row.get("course_bands"):
+        return {"bands": row["course_bands"]}
     return policy
 
 
