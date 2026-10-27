@@ -184,8 +184,7 @@ function examLines(rows: Result[], kind: string, subjectName: (id?: string | nul
 }
 
 function resultMark(result: Result) {
-  if (result.status === "absent") return "Absent";
-  if (result.status === "missing") return "Missing";
+  if (result.status === "absent" || result.status === "missing") return "Absent";
   if (result.status === "exempt") return "Exempt";
   if (result.score == null) return "—";
   return `${result.score} of ${result.maximum ?? "—"}`;
@@ -760,8 +759,7 @@ export function CardsPage({ session }: { session: Session }) {
             <div className="academic-stats">
               <div><span>Weighted performance</span><strong>{performance?.percentage == null ? "—" : `${formatPercent(performance.percentage)}%`}</strong>{performance?.band ? <BandMark band={performance.band} name={performance.band_name} place={performance.band_place} color={performance.band_color} /> : <small>Scored marks ÷ corresponding maxima</small>}</div>
               <div><span>Scored results</span><strong>{performance?.scored ?? 0}<small> / {performance?.expected ?? 0}</small></strong><small>Latest published attempt in this report</small></div>
-              <div><span>Missing</span><strong>{performance?.missing ?? 0}</strong><small>No mark entered</small></div>
-              <div><span>Absent</span><strong>{performance?.absent ?? 0}</strong><small>Marked absent</small></div>
+              <div><span>Absent</span><strong>{(performance?.absent ?? 0) + (performance?.missing ?? 0)}</strong><small>No mark or marked absent</small></div>
             </div>
             {shown.partial ? <p className="meta">{shown.coverage_note || "Authorized subjects only."} Rank and the top mark stay hidden where this card does not include the whole cohort.</p> : null}
             <nav className="page-tabs academic-panels" role="tablist" aria-label="Progress card" onKeyDown={(event) => moveTab(event, cardTabs, activePanel, setPanel)}>
@@ -863,7 +861,7 @@ export function CardsPage({ session }: { session: Session }) {
             })}
             <div className={activePanel === "attention" ? "card-panel" : "card-panel is-hidden"}>
             <h2 className="sr-only">Needs attention</h2>
-            {danger.length === 0 && gaps.length === 0 ? <p>Nothing in this view is in the lowest band, missing, or absent.</p> : null}
+            {danger.length === 0 && gaps.length === 0 ? <p>Nothing in this view is in the lowest band or absent.</p> : null}
             {danger.length === 0 && gaps.length > 0 ? <p>No scored results in this view fall in the lowest band.</p> : null}
             {danger.length > 0 ? (
               <div className="table-wrap">
@@ -892,13 +890,13 @@ export function CardsPage({ session }: { session: Session }) {
             {gaps.length > 0 ? (
               <div className="table-wrap">
                 <table className="people-table">
-                  <caption className="sr-only">Missing and absent results for {shown.display_name}.</caption>
+                  <caption className="sr-only">Absent results for {shown.display_name}.</caption>
                   <thead><tr><th>Assessment</th><th>Status</th></tr></thead>
                   <tbody>
                     {gaps.map((result) => (
                       <tr key={result.id}>
                         <td>{result.marksheet_id ? <Link to={`/marksheets/${result.marksheet_id}?returnTo=${returnTo}`}>{result.title}</Link> : result.title}</td>
-                        <td>{result.status === "absent" ? "Absent" : "Missing"}</td>
+                        <td>Absent</td>
                       </tr>
                     ))}
                   </tbody>
@@ -943,7 +941,7 @@ export function CardsPage({ session }: { session: Session }) {
           <div><span>Weighted performance</span><strong>{summary.percentage == null ? "—" : `${formatPercent(summary.percentage)}%`}</strong>{summary.band ? <BandMark band={summary.band} name={summary.band_name} place={summary.band_place} color={summary.band_color} /> : <small>Scored marks ÷ corresponding maxima</small>}</div>
           <div><span>Students</span><strong>{summary.students}</strong><small>{summary.with_results} with published results</small></div>
           <div><span>Scored results</span><strong>{summary.scored}<small> / {summary.expected}</small></strong><small>Latest published attempt in this report</small></div>
-          <div><span>Incomplete results</span><strong>{summary.missing + summary.absent}</strong><small>{summary.missing} missing · {summary.absent} absent</small></div>
+          <div><span>Absent</span><strong>{summary.missing + summary.absent}</strong><small>No mark or marked absent</small></div>
         </div>
       ) : null}
       {!loading && total === 0 ? <p>{filtered ? "No students match." : "No students yet."}</p> : null}

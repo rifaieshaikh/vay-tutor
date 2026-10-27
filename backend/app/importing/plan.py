@@ -244,7 +244,7 @@ def _added_students(group: dict, added: dict) -> list[dict]:
                 "column": group["column"],
                 "display_name": name,
                 "name_key": name_key(name) if name else "",
-                "status": "missing",
+                "status": "absent",
                 "score": None,
                 "maximum": group["maximum"],
                 "percentage": None,
@@ -281,7 +281,7 @@ def _apply_correction(item: dict, group: dict, corrections: dict) -> None:
     status = override.get("status")
     score = override.get("score")
     if status in {"absent", "missing"} or score in {"A", "AB", "a", "ab"}:
-        item["status"] = "absent" if status == "absent" or score in {"A", "AB", "a", "ab"} else "missing"
+        item["status"] = "absent"
         item["score"] = None
         item["percentage"] = None
     elif score is not None and score != "":

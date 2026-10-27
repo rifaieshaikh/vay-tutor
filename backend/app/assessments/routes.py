@@ -77,7 +77,7 @@ class MarksheetCreate(BaseModel):
 
 class ResultCreate(BaseModel):
     student_id: str
-    status: str = "missing"
+    status: str = "absent"
     score: float | None = None
 
 
@@ -337,7 +337,7 @@ async def upload_corrections(request: Request, import_id: str, file: UploadFile 
             status = "absent"
             score = None
         elif score in (None, ""):
-            status = "missing"
+            status = "absent"
             score = None
         choice = decisions["sheets"].setdefault(sheet["id"], {})
         corrections = choice.setdefault("corrections", {})
@@ -827,9 +827,10 @@ async def add_result(request: Request, marksheet_id: str, body: ResultCreate) ->
     if sheet.get("status") not in {"draft", "submitted"}:
         raise AppError(422, "marksheet.state", "Add students on a draft. A published sheet uses a correction.")
     if body.status not in {"scored", "absent", "missing"}:
-        raise AppError(422, "import.invalid_mark", "Choose scored, absent, or missing.")
+        raise AppError(422, "import.invalid_mark", "Choose scored or absent.")
     score = body.score
-    if body.status == "scored":
+    status = "absent" if body.status == "missing" else body.status
+    if status == "scored":
         if score is None or score < 0 or (sheet.get("maximum") is not None and score > sheet["maximum"]):
             raise AppError(422, "import.invalid_mark", "The score must be from 0 through the maximum.")
     else:
@@ -855,7 +856,7 @@ async def add_result(request: Request, marksheet_id: str, body: ResultCreate) ->
             "student_id": body.student_id,
             "revision": revision,
             "active": False,
-            "status": body.status,
+            "status": status,
             "score": score,
             "maximum": sheet.get("maximum"),
             "exam_date": sheet.get("exam_date"),
@@ -1082,17 +1083,17 @@ async def patch_result(request: Request, marksheet_id: str, result_id: str, body
         raise AppError(404, "not_found", "That record was not found.")
     updates = {"previous_score": result.get("score")}
     if body.status in {"absent", "missing"}:
-        updates["status"] = body.status
+        updates["status"] = "absent"
         updates["score"] = None
     elif body.status == "scored" or body.score is not None:
         if body.score is None:
-            raise AppError(422, "import.invalid_mark", "Enter a score, or mark the row missing or absent.")
+            raise AppError(422, "import.invalid_mark", "Enter a score, or mark the row absent.")
         if body.score < 0 or (sheet.get("maximum") is not None and body.score > sheet["maximum"]):
             raise AppError(422, "import.invalid_mark", "The score must be from 0 through the maximum.")
         updates["score"] = body.score
         updates["status"] = "scored"
     elif body.status:
-        raise AppError(422, "import.invalid_mark", "Choose scored, absent, or missing.")
+        raise AppError(422, "import.invalid_mark", "Choose scored or absent.")
     version = sheet.get("edit_version", 0) + 1
     await db(request).results.update_one({"_id": result_id}, {"$set": updates})
     await db(request).marksheets.update_one({"_id": sheet["_id"]}, {"$set": {"edit_version": version}})

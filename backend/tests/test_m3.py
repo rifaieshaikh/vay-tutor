@@ -63,7 +63,7 @@ def test_parser_covers_every_sample_sheet():
     chapter = next(sheet for sheet in ratio["sheets"] if sheet["name"] == "CHAPTER -2 -2")
     assert chapter["groups"][0]["duplicate_of"] == "CHAPTER -2"
     assert chapter["groups"][1]["interpretation"] == "separate_assessment"
-    assert any(student["status"] == "missing" and student["display_name"] == "SHIBILIYA" for student in chapter["groups"][0]["students"])
+    assert any(student["status"] == "absent" and student["display_name"] == "SHIBILIYA" for student in chapter["groups"][0]["students"])
 
 
 def test_accounting_import_commits_drafts_and_publishes_dated_sheet(client):

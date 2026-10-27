@@ -415,7 +415,7 @@ def participation_summary(rows: list[dict], eligible_by_batch: dict[str, set[str
             continue
         assessment = row.get("assessment_id") or row.get("marksheet_id") or row.get("id")
         cohorts.setdefault((assessment, batch_id), {})[row.get("student_id")] = row.get("status")
-    scored = missing = absent = exempt = 0
+    scored = absent = exempt = 0
     for (_assessment, batch_id), statuses in cohorts.items():
         for student_id in eligible_by_batch[batch_id]:
             status = statuses.get(student_id)
@@ -423,17 +423,16 @@ def participation_summary(rows: list[dict], eligible_by_batch: dict[str, set[str
                 exempt += 1
             elif status == "scored":
                 scored += 1
-            elif status == "absent":
-                absent += 1
             else:
-                missing += 1
-    expected = scored + missing + absent
+                # Blank, missing, and marked absent all count as absent.
+                absent += 1
+    expected = scored + absent
     ratio = round(scored / expected, 4) if expected else None
     return {
         "participation": ratio,
         "participation_scored": scored,
         "participation_expected": expected,
-        "participation_missing": missing,
+        "participation_missing": 0,
         "participation_absent": absent,
         "participation_exempt": exempt,
         "participation_basis": "confirmed eligible students for each assessment in this report",
@@ -627,7 +626,7 @@ def _plain_number(value) -> str:
 
 
 def _status_label(status: str | None) -> str:
-    labels = {"missing": "Missing", "absent": "Absent", "exempt": "Exempt", "scored": "Scored"}
+    labels = {"missing": "Absent", "absent": "Absent", "exempt": "Exempt", "scored": "Scored"}
     return labels.get(status or "", status or "-")
 
 
@@ -946,7 +945,7 @@ def _student_block(
         if item["place"] == "low"
     ]
     gaps = [
-        [item["title"], "Absent" if item["status"] == "absent" else "Missing"]
+        [item["title"], "Absent"]
         for item in exams
         if item["status"] in {"missing", "absent"}
     ]
@@ -1264,12 +1263,12 @@ class _PdfCard:
         cards = [
             ("Weighted performance", student.get("performance") or "-", ""),
             ("Scored results", student.get("scored") or "-", "Latest published attempt"),
-            ("Missing", student.get("missing") or "0", "No mark entered"),
-            ("Absent", student.get("absent") or "0", "Marked absent"),
+            ("Absent", str(int(student.get("absent") or 0) + int(student.get("missing") or 0)), "No mark or marked absent"),
         ]
         gap = 8
         height = 48
-        width = (_CONTENT_W - gap * 3) / 4
+        columns = max(len(cards), 1)
+        width = (_CONTENT_W - gap * (columns - 1)) / columns
         self._need(height + 8)
         top = self.y
         fill = (0.973, 0.980, 0.976)
@@ -1519,12 +1518,11 @@ def _write_student_sheet(sheet, row: int, student: dict, named: bool) -> int:
             sheet.cell(row - 1, 4).font = _LABEL_FONT
             sheet.cell(row - 1, 5).font = Font(bold=True, name="Calibri", size=11, color="1C2430")
     row += 1
-    labels = ["Weighted performance", "Scored results", "Missing", "Absent"]
+    labels = ["Weighted performance", "Scored results", "Absent"]
     values = [
         f"{student.get('performance') or '-'}  {student.get('band') or ''}".strip(),
         student.get("scored") or "-",
-        student.get("missing") or "0",
-        student.get("absent") or "0",
+        str(int(student.get("absent") or 0) + int(student.get("missing") or 0)),
     ]
     row = _write_row(sheet, row, labels, font=_LABEL_FONT, fill=_STAT_FILL)
     sheet.row_dimensions[row].height = 24

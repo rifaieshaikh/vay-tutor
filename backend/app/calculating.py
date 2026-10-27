@@ -226,13 +226,13 @@ def aggregate(rows: list[dict], policy: dict | None = None) -> dict:
         row for row in chosen
         if row.get("status") == "scored" and row.get("score") is not None and row.get("maximum")
     ]
-    missing = [row for row in chosen if row.get("status") == "missing"]
-    absent = [row for row in chosen if row.get("status") == "absent"]
+    # Blank and explicitly marked absent are the same incomplete outcome.
+    absent = [row for row in chosen if row.get("status") in {"absent", "missing"}]
     exempt = [row for row in chosen if row.get("status") == "exempt"]
     obtained = sum((Decimal(str(row["score"])) for row in scored), Decimal(0))
     maximum = sum((Decimal(str(row["maximum"])) for row in scored), Decimal(0))
     exact = (obtained / maximum) * Decimal(100) if maximum else None
-    expected = len(scored) + len(missing) + len(absent)
+    expected = len(scored) + len(absent)
     threshold = (policy or {}).get("passing_threshold")
     passing = None
     if threshold is not None and scored:
@@ -248,7 +248,7 @@ def aggregate(rows: list[dict], policy: dict | None = None) -> dict:
         "band_place": detail["band_place"],
         "band_color": detail["band_color"],
         "scored": len(scored),
-        "missing": len(missing),
+        "missing": 0,
         "absent": len(absent),
         "exempt": len(exempt),
         "expected": expected,

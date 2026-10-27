@@ -83,7 +83,8 @@ def test_academic_sections_follow_custom_policy_and_report_missing_results():
     assert section["percentage"] == 75
     assert section["band"] == aggregate(rows, policy)["band"] == "danger"
     assert section["coverage"] == "1/3"
-    assert section["missing"] == section["absent"] == 1
+    assert section["missing"] == 0
+    assert section["absent"] == 2
     assert section["marksheet_ids"] == ["sheet"]
 
 
@@ -428,7 +429,7 @@ def test_cleared_score_card_filters_and_owned_export(client):
     )
     assert cleared.status_code == 200, cleared.text
     missing = client.get(f"/api/v1/marksheets/{sheet_id}").json()
-    assert missing["results"][0]["status"] == "missing"
+    assert missing["results"][0]["status"] == "absent"
     assert missing["results"][0]["score"] is None
     assert missing["results"][0]["percentage"] is None
     zero = client.patch(
@@ -689,14 +690,15 @@ def test_participation_counts_confirmed_students_who_have_no_row():
     assert summary["participation"] == 0.8
     assert summary["participation_scored"] == 8
     assert summary["participation_expected"] == 10
-    assert summary["participation_missing"] == 2
+    assert summary["participation_missing"] == 0
+    assert summary["participation_absent"] == 2
     rows.append(_result("iam", _id="absent", student_id="s6", batch_id="sept", assessment_id="law", subject_id="law", status="absent", score=None))
     rows.append(_result("iam", _id="exempt", student_id="s7", batch_id="sept", assessment_id="law", subject_id="law", status="exempt", score=None))
     for student in students[2:6]:
         rows.append(_result("iam", _id=f"law-{student}", student_id=student, batch_id="sept", assessment_id="law", subject_id="law"))
     law = participation_summary([row for row in rows if row["subject_id"] == "law"], eligible)
     assert law["participation_scored"] == 4
-    assert law["participation_absent"] == 1
+    assert law["participation_absent"] == 5
     assert law["participation_exempt"] == 1
     assert law["participation_expected"] == 9
     assert law["participation"] == round(4 / 9, 4)
@@ -989,7 +991,7 @@ def test_academic_view_participation_uses_the_confirmed_roster(client):
     assert accounting["performance"]["participation_expected"] == 10
     law = client.get("/api/v1/views/batch", params={"batch_id": "batch-sept", "subject_id": "law"}).json()
     assert law["performance"]["participation_scored"] == 6
-    assert law["performance"]["participation_absent"] == 1
+    assert law["performance"]["participation_absent"] == 3
     assert law["performance"]["participation_exempt"] == 1
     assert law["performance"]["participation_expected"] == 9
     dated = client.get(

@@ -166,7 +166,7 @@ function cardReturn(value: string | null) {
 function scoreProblem(draft: Draft | undefined, maximum: number | null) {
   if (!draft || draft.status !== "scored") return "";
   const text = draft.score.trim();
-  if (!text) return "Enter a score, or mark the row missing or absent.";
+  if (!text) return "Enter a score, or mark the row absent.";
   const score = Number(text);
   if (!Number.isFinite(score)) return "Enter a number.";
   if (score < 0 || (maximum != null && score > maximum)) {
@@ -911,8 +911,11 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
   const viewStatus = (result: Result) => (editing && drafts[result.id] ? drafts[result.id].status : result.status);
   const counts = {
     scored: detail?.results.filter((result) => viewStatus(result) === "scored").length || 0,
-    missing: detail?.results.filter((result) => viewStatus(result) === "missing").length || 0,
-    absent: detail?.results.filter((result) => viewStatus(result) === "absent").length || 0,
+    missing: 0,
+    absent: detail?.results.filter((result) => {
+      const status = viewStatus(result);
+      return status === "absent" || status === "missing";
+    }).length || 0,
   };
   if (!detail) {
     return (
@@ -1037,7 +1040,6 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
       <div className="stat-line">
         <span><strong>{detail.results.length}</strong> Students</span>
         <span><strong>{counts.scored}</strong> Scored</span>
-        <span><strong>{counts.missing}</strong> Missing</span>
         <span><strong>{counts.absent}</strong> Absent</span>
       </div>
       {editing && detail.status === "published" ? (
@@ -1052,8 +1054,8 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
               {changed.map((result) => (
                 <tr key={result.id}>
                   <td>{result.display_name || "Student"}</td>
-                  <td>{result.score ?? "—"} · {({ scored: "Scored", absent: "Absent", missing: "Missing" }[result.status] || result.status)}</td>
-                  <td>{drafts[result.id].status === "scored" ? drafts[result.id].score || "—" : "—"} · {({ scored: "Scored", absent: "Absent", missing: "Missing" }[drafts[result.id].status] || drafts[result.id].status)}</td>
+                  <td>{result.score ?? "—"} · {({ scored: "Scored", absent: "Absent", missing: "Absent" }[result.status] || result.status)}</td>
+                  <td>{drafts[result.id].status === "scored" ? drafts[result.id].score || "—" : "—"} · {({ scored: "Scored", absent: "Absent", missing: "Absent" }[drafts[result.id].status] || drafts[result.id].status)}</td>
                 </tr>
               ))}
             </tbody>
@@ -1073,12 +1075,11 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
                     <td>{result.source?.row ?? "—"}</td>
                     <td>
                       {editing ? (
-                        <select aria-label={`Status for ${result.display_name || "student"}`} value={drafts[result.id]?.status || result.status} onChange={(event) => updateDraft(result, { status: event.target.value })}>
+                        <select aria-label={`Status for ${result.display_name || "student"}`} value={(drafts[result.id]?.status || result.status) === "missing" ? "absent" : (drafts[result.id]?.status || result.status)} onChange={(event) => updateDraft(result, { status: event.target.value })}>
                           <option value="scored">Scored</option>
                           <option value="absent">Absent</option>
-                          <option value="missing">Missing</option>
                         </select>
-                      ) : ({ scored: "Scored", absent: "Absent", missing: "Missing" }[result.status] || result.status)}
+                      ) : ({ scored: "Scored", absent: "Absent", missing: "Absent" }[result.status] || result.status)}
                     </td>
                     <td>
                       {editing && (drafts[result.id]?.status || result.status) === "scored" ? (
@@ -1087,7 +1088,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
                           aria-invalid={Boolean(scoreProblem(drafts[result.id], detail.maximum))}
                           className={scoreProblem(drafts[result.id], detail.maximum) ? "invalid" : undefined}
                           value={drafts[result.id]?.score ?? ""}
-                          onChange={(event) => updateDraft(result, { score: event.target.value, status: event.target.value.trim() === "" ? "missing" : "scored" })}
+                          onChange={(event) => updateDraft(result, { score: event.target.value, status: event.target.value.trim() === "" ? "absent" : "scored" })}
                         />
                       ) : (editing ? "—" : result.score ?? "—")}
                       {editing && scoreProblem(drafts[result.id], detail.maximum) ? <span className="field-error">{scoreProblem(drafts[result.id], detail.maximum)}</span> : null}
@@ -1122,7 +1123,6 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
                   <select value={rowStatus} onChange={(event) => setRowStatus(event.target.value)}>
                     <option value="scored">Scored</option>
                     <option value="absent">Absent</option>
-                    <option value="missing">Missing</option>
                   </select>
                 </label>
                 {rowStatus === "scored" ? <label>Score<input value={rowScore} onChange={(event) => setRowScore(event.target.value)} type="number" min="0" max={detail.maximum ?? undefined} step="0.01" required /></label> : null}

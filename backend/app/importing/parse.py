@@ -325,7 +325,7 @@ def _student(name: str, raw, source_rank, row_number: int, column: int, maximum:
 
 def _mark(raw, maximum: int | None) -> tuple[str, float | None]:
     if raw is None or (isinstance(raw, str) and not raw.strip()):
-        return "missing", None
+        return "absent", None
     if isinstance(raw, str) and raw.strip().upper() in {"A", "AB"}:
         return "absent", None
     if isinstance(raw, str):
