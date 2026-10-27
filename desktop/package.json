@@ -40,7 +40,11 @@
       "oneClick": false,
       "perMachine": true,
       "allowToChangeInstallationDirectory": false,
-      "artifactName": "VayTutorClient-Setup-${version}.${ext}"
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Vay Tutor Client",
+      "artifactName": "VayTutorClient-Setup-${version}.${ext}",
+      "include": "build/installer.nsh"
     },
     "mac": {
       "target": ["dmg"],

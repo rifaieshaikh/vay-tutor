@@ -1,15 +1,90 @@
 from __future__ import annotations
 
+import logging
+
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import ReturnDocument
+from pymongo.errors import ConfigurationError, InvalidOperation, OperationFailure
+from pymongo.synchronous.client_session import ClientSession
 
 from app.academics.curriculum import seed_curriculum_kinds, seed_exam_types
 from app.config import Settings
+
+log = logging.getLogger("vay")
+_standalone_transactions_patched = False
+
+
+class _StandaloneTransaction:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def _is_transaction_unsupported(error: BaseException) -> bool:
+    message = str(error).lower()
+    return any(
+        phrase in message
+        for phrase in (
+            "transaction numbers are only allowed",
+            "not started with replication",
+            "replication not enabled",
+            "transactions are not supported",
+        )
+    )
+
+
+def _patch_standalone_transactions() -> None:
+    """Motor starts transactions on the PyMongo session; skip them on standalone MongoDB."""
+    global _standalone_transactions_patched
+    if _standalone_transactions_patched:
+        return
+    original = ClientSession.start_transaction
+
+    def start_transaction(self, *args, **kwargs):
+        if getattr(self._client, "_vay_standalone", False):
+            return _StandaloneTransaction()
+        try:
+            return original(self, *args, **kwargs)
+        except (OperationFailure, InvalidOperation, ConfigurationError) as error:
+            if not _is_transaction_unsupported(error):
+                raise
+            self._client._vay_standalone = True
+            log.warning("MongoDB does not support transactions here; continuing without them.")
+            return _StandaloneTransaction()
+
+    ClientSession.start_transaction = start_transaction  # type: ignore[method-assign]
+    _standalone_transactions_patched = True
 
 
 def connect(settings: Settings) -> tuple[AsyncIOMotorClient, AsyncIOMotorDatabase]:
     client = AsyncIOMotorClient(settings.mongo_url)
     return client, client[settings.db_name]
+
+
+async def configure_mongo(client: AsyncIOMotorClient, settings: Settings | None = None) -> None:
+    """Allow local standalone MongoDB when this computer is not a replica set."""
+    _patch_standalone_transactions()
+    use_standalone = False
+    if settings is not None and "replicaset=" not in settings.mongo_url.lower():
+        use_standalone = True
+    try:
+        hello = await client.admin.command("hello")
+        if not hello.get("setName"):
+            use_standalone = True
+    except Exception:
+        use_standalone = True
+    if not use_standalone:
+        return
+    client.delegate._vay_standalone = True
+    log.info("MongoDB is standalone; local writes continue without a replica set.")
 
 
 async def ensure_schema(db: AsyncIOMotorDatabase) -> None:

@@ -72,7 +72,6 @@ function publishTabs() {
   }
   const active = tabs.snapshot().find((tab) => tab.active);
   if (windowRef) windowRef.setTitle(active ? active.title : "Vay Tutor Client");
-  installMenu();
 }
 
 function closeContents(view) {
@@ -195,81 +194,7 @@ function showInstitute(origin) {
 }
 
 function installMenu() {
-  const connected = mode === "institute";
-  const several = tabs.length > 1;
-  const template = [];
-  if (process.platform === "darwin") {
-    template.push({
-      label: app.name,
-      submenu: [
-        { role: "about" },
-        { type: "separator" },
-        { role: "hide" },
-        { role: "hideOthers" },
-        { role: "unhide" },
-        { type: "separator" },
-        { role: "quit" },
-      ],
-    });
-  }
-  template.push(
-    {
-      label: "File",
-      submenu: [
-        {
-          label: "New Tab",
-          accelerator: "CmdOrCtrl+T",
-          enabled: connected,
-          click: () => oncePerShortcut(() => openTab(`${hostOrigin}/`)),
-        },
-        {
-          label: "Close Tab",
-          accelerator: "CmdOrCtrl+W",
-          enabled: connected && several,
-          click: () => oncePerShortcut(() => closeTab(tabs.activeId)),
-        },
-        {
-          label: "Next Tab",
-          accelerator: "CmdOrCtrl+Tab",
-          enabled: connected && several,
-          click: () => oncePerShortcut(() => {
-            tabs.cycle(false);
-            showActive();
-          }),
-        },
-        {
-          label: "Previous Tab",
-          accelerator: "CmdOrCtrl+Shift+Tab",
-          enabled: connected && several,
-          click: () => oncePerShortcut(() => {
-            tabs.cycle(true);
-            showActive();
-          }),
-        },
-        { type: "separator" },
-        { label: "Change Host", enabled: connected, click: () => showConnect() },
-        { type: "separator" },
-        process.platform === "darwin" ? { role: "close" } : { role: "quit" },
-      ],
-    },
-    { role: "editMenu" },
-    {
-      label: "View",
-      submenu: [
-        {
-          label: "Reload",
-          accelerator: "CmdOrCtrl+R",
-          enabled: connected,
-          click: () => {
-            const view = views.get(tabs.activeId);
-            if (view && !view.webContents.isDestroyed()) view.webContents.reload();
-          },
-        },
-        { role: "togglefullscreen" },
-      ],
-    },
-  );
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  Menu.setApplicationMenu(null);
 }
 
 async function readSavedHost() {

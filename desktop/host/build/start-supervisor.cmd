@@ -1,2 +1,2 @@
 @echo off
-"%~dp0..\Vay Tutor.exe" --supervisor
+start "" /b "%~dp0..\Vay Tutor.exe" --supervisor

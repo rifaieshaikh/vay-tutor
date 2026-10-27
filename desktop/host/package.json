@@ -7,7 +7,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test src/supervisor.test.js",
+    "test": "node --test src/supervisor.test.js src/tabs.test.js",
     "dist": "electron-builder --win --x64"
   },
   "dependencies": {
@@ -26,6 +26,9 @@
     "files": [
       "src/main.js",
       "src/supervisor.js",
+      "src/tabs.js",
+      "src/preload.js",
+      "ui/**",
       "package.json"
     ],
     "extraResources": [
@@ -46,6 +49,9 @@
       "perMachine": true,
       "allowToChangeInstallationDirectory": true,
       "allowElevation": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Vay Tutor",
       "deleteAppDataOnUninstall": false,
       "artifactName": "VayTutor-Setup-${version}.${ext}",
       "include": "build/installer.nsh"

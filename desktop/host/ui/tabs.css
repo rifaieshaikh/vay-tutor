@@ -1,0 +1,98 @@
+:root {
+  color: #1c2430;
+  background: #f4f1ea;
+  font-family: "Segoe UI", "Noto Sans", sans-serif;
+  font-size: 14px;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+.bar {
+  box-sizing: border-box;
+  height: 44px;
+  display: flex;
+  align-items: stretch;
+  gap: 0.35rem;
+  padding: 6px 8px;
+  border-bottom: 1px solid #e4ddd0;
+  background: #f4f1ea;
+}
+
+.tabs {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  gap: 0.35rem;
+  overflow-x: auto;
+}
+
+.tab {
+  display: flex;
+  align-items: stretch;
+  max-width: 14rem;
+  min-width: 7rem;
+  border: 1px solid #e4ddd0;
+  border-radius: 8px 8px 0 0;
+  background: #ebe6dc;
+}
+
+.tab.active {
+  background: #ffffff;
+  border-bottom-color: #ffffff;
+}
+
+.title,
+.close,
+.bar > button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.title {
+  min-width: 0;
+  flex: 1;
+  padding: 0 0.35rem 0 0.7rem;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tab.active .title {
+  font-weight: 700;
+}
+
+.close {
+  width: 1.8rem;
+  border-radius: 8px;
+  color: #5d6b66;
+  cursor: pointer;
+}
+
+.close:disabled {
+  visibility: hidden;
+}
+
+.bar > button {
+  border-radius: 8px;
+  padding: 0 0.7rem;
+  font-weight: 700;
+  color: #0f6e6b;
+  cursor: pointer;
+}
+
+.title:hover,
+.close:hover,
+.bar > button:hover {
+  background: rgba(15, 110, 107, 0.08);
+}

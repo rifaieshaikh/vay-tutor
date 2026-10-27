@@ -21,7 +21,7 @@ from app.assessments.review import router as review_router
 from app.assessments.routes import router as assessment_router
 from app.config import load_settings
 from app.dashboard.routes import router as dashboard_router
-from app.db import connect, ensure_schema
+from app.db import configure_mongo, connect, ensure_schema
 from app.errors import AppError, app_error_handler, error_body
 from app.jobs import process_due_jobs
 from app.reports.routes import router as reports_router
@@ -48,6 +48,7 @@ async def lifespan(app: FastAPI):
     client, database = connect(settings)
     app.state.client = client
     app.state.db = database
+    await configure_mongo(client, settings)
     await ensure_schema(database)
     stop = asyncio.Event()
     worker = None

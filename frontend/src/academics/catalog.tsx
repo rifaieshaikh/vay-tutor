@@ -1349,8 +1349,8 @@ function ItemForm({ subject, kinds, onClose, onSaved }: { subject: Row; kinds: C
         <label>Name
           <input value={name} aria-label="Item name" onChange={(event) => setName(event.target.value)} />
         </label>
-        <label>Subject partition
-          <select value={kind} aria-label="Subject partition" onChange={(event) => setKind(event.target.value)}>
+        <label>Sub part type
+          <select value={kind} aria-label="Sub part type" onChange={(event) => setKind(event.target.value)}>
             {active.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
           </select>
         </label>

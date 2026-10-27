@@ -1,6 +1,7 @@
-"""Subject partition types and exam types.
+"""Sub part types (curriculum kinds) and exam types.
 
-Paper stays numbered. Every other partition is a named item on the subject.
+Paper stays numbered. Every other sub part type is a named item on the subject.
+The type key drives which value list appears when that type is chosen on import.
 Exam types name the sitting, such as a test series or a module exam.
 """
 

@@ -273,21 +273,22 @@ function CurriculumKinds({ canEdit }: { canEdit: boolean }) {
     <>
       <div className="title-row">
         <div>
-          <h2>Subject partition types</h2>
-          <p className="meta">Paper, part, chapter, and module divide a subject. Paper stays numbered. Archiving hides a partition from new items and leaves existing ones in place.</p>
+          <h2>Sub part types</h2>
+          <p className="meta">Unit, chapter, part, paper, and any custom types divide a subject. Each type’s key drives which values appear when that type is chosen on import. Paper stays numbered. Archiving hides a type from new items and leaves existing ones in place.</p>
         </div>
-        {canEdit ? <button type="button" onClick={() => setAdding(true)}>Add subject partition</button> : null}
+        {canEdit ? <button type="button" onClick={() => setAdding(true)}>Add sub part type</button> : null}
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
-      {kinds.length === 0 ? <p>Loading subject partitions…</p> : (
+      {kinds.length === 0 ? <p>Loading sub part types…</p> : (
         <div className="table-wrap">
           <table className="people-table">
-            <caption className="sr-only">Subject partition types</caption>
-            <thead><tr><th>Name</th><th>Status</th>{canEdit ? <th>Actions</th> : null}</tr></thead>
+            <caption className="sr-only">Sub part types</caption>
+            <thead><tr><th>Name</th><th>Key</th><th>Status</th>{canEdit ? <th>Actions</th> : null}</tr></thead>
             <tbody>
               {kinds.map((kind) => (
                 <tr key={kind.key}>
                   <td>{kind.label}</td>
+                  <td><code>{kind.key}</code></td>
                   <td>{kind.archived ? "Archived" : "Active"}{kind.locked ? " · Numbered" : ""}</td>
                   {canEdit ? (
                     <td>
@@ -305,9 +306,9 @@ function CurriculumKinds({ canEdit }: { canEdit: boolean }) {
       )}
       {adding ? (
         <KindDialog
-          title="Add subject partition"
-          submitLabel="Add subject partition"
-          nameLabel="Subject partition type"
+          title="Add sub part type"
+          submitLabel="Add sub part type"
+          nameLabel="Sub part type"
           onClose={() => setAdding(false)}
           onSubmit={async (label) => {
             await api("/api/v1/curriculum-kinds", { method: "POST", body: JSON.stringify({ label }) });
@@ -319,9 +320,9 @@ function CurriculumKinds({ canEdit }: { canEdit: boolean }) {
       ) : null}
       {editing ? (
         <KindDialog
-          title="Rename subject partition"
+          title="Rename sub part type"
           submitLabel="Save"
-          nameLabel="Subject partition type"
+          nameLabel="Sub part type"
           initial={editing.label}
           onClose={() => setEditing(null)}
           onSubmit={async (label) => {
@@ -368,7 +369,7 @@ function ExamTypes({ canEdit }: { canEdit: boolean }) {
       <div className="title-row">
         <div>
           <h2>Exam types</h2>
-          <p className="meta">An exam type names the sitting, such as a test series or a module exam. It does not divide the subject. A lower weight is shown first on the progress card. The part heading is the column name on that exam type's tab and on import.</p>
+          <p className="meta">An exam type names the sitting, such as a test series or a module exam. It does not divide the subject—sub part types do that. A lower weight is shown first on the progress card. The part heading is the column name on that exam type's progress tab.</p>
         </div>
         {canEdit ? <button type="button" onClick={() => setAdding(true)}>Add exam type</button> : null}
       </div>

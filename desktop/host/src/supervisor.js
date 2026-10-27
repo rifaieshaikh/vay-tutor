@@ -18,6 +18,13 @@ function dataDirectory() {
   return path.join(os.homedir(), ".local", "share", "vay-tutor");
 }
 
+function supervisorProfileDirectory() {
+  if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+    return path.join(process.env.LOCALAPPDATA, "Vay Tutor Supervisor");
+  }
+  return path.join(dataDirectory(), "supervisor-profile");
+}
+
 function certificateNames() {
   const names = [
     { type: 2, value: "localhost" },
@@ -33,21 +40,31 @@ function certificateNames() {
   return names;
 }
 
-function mongoArguments(dataDir) {
+function mongoArguments(dataDir, port = MONGO_PORT) {
   return [
     "--dbpath", path.join(dataDir, "db"),
     "--bind_ip", "127.0.0.1",
-    "--port", String(MONGO_PORT),
-    "--replSet", "rs0",
+    "--port", String(port),
     "--logpath", path.join(dataDir, "logs", "mongo.log"),
     "--logappend",
   ];
 }
 
-function serviceEnvironment(paths, port) {
-  return {
+function mongoUrl(port) {
+  return `mongodb://127.0.0.1:${port}/?directConnection=true`;
+}
+
+function withBinaryPath(bin, env) {
+  const directory = path.dirname(bin);
+  const separator = process.platform === "win32" ? ";" : ":";
+  const current = env.PATH || env.Path || "";
+  return { ...env, PATH: `${directory}${separator}${current}` };
+}
+
+function serviceEnvironment(paths, port, mongoPort = MONGO_PORT) {
+  return withBinaryPath(paths.pythonBin, {
     ...process.env,
-    MONGO_URL: `mongodb://127.0.0.1:${MONGO_PORT}/?replicaSet=rs0`,
+    MONGO_URL: mongoUrl(mongoPort),
     DB_NAME: "vay_tutor",
     DATA_DIR: paths.dataDir,
     STATIC_DIR: paths.frontendDir,
@@ -56,8 +73,10 @@ function serviceEnvironment(paths, port) {
     WORKER_ENABLED: "1",
     PYTHONPATH: paths.backendDir,
     PYTHONNOUSERSITE: "1",
+    PYTHONHOME: path.dirname(paths.pythonBin),
     VAY_PORT: String(port),
-  };
+    VAY_MONGO_PORT: String(mongoPort),
+  });
 }
 
 function apiArguments(paths, port) {
@@ -91,7 +110,7 @@ function portOpen(port, host = "127.0.0.1") {
   });
 }
 
-function waitForPort(port, attempts = 120) {
+function waitForPort(port, attempts = 80) {
   return new Promise((resolve, reject) => {
     let left = attempts;
     const tick = () => {
@@ -100,7 +119,7 @@ function waitForPort(port, attempts = 120) {
         else if (left === 0) reject(new Error(`Nothing answered on port ${port}.`));
         else {
           left -= 1;
-          setTimeout(tick, 250);
+          setTimeout(tick, 100);
         }
       });
     };
@@ -109,7 +128,38 @@ function waitForPort(port, attempts = 120) {
 }
 
 function ensureLayout(dataDir) {
+  fs.mkdirSync(dataDir, { recursive: true });
   for (const name of ["db", "logs", "files"]) fs.mkdirSync(path.join(dataDir, name), { recursive: true });
+}
+
+function appendLog(dataDir, message) {
+  try {
+    ensureLayout(dataDir);
+    fs.appendFileSync(path.join(dataDir, "logs", "host.log"), `${new Date().toISOString()} ${message}\n`);
+  } catch {
+    // The data folder may still be locked; the window will show what it can.
+  }
+}
+
+function readLogTail(dataDir, limit = 12) {
+  const files = ["host.log", "api.log", "mongo.log"].map((name) => path.join(dataDir, "logs", name));
+  for (const file of files) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const lines = fs.readFileSync(file, "utf8").trim().split(/\r?\n/).filter(Boolean);
+      if (lines.length === 0) continue;
+      return lines.slice(-limit).join("\n");
+    } catch {
+      // Try the next log.
+    }
+  }
+  return "";
+}
+
+function readinessError(dataDir, reason) {
+  const tail = readLogTail(dataDir);
+  if (tail) return new Error(`${reason}\n\n${tail}`);
+  return new Error(`${reason}\n\nNo log was written yet. Check that this account can write to ${dataDir}.`);
 }
 
 function ensureCertificate(dataDir) {
@@ -134,15 +184,15 @@ function ensureCertificate(dataDir) {
   return { certPath, keyPath };
 }
 
-function spawnLogged(command, args, env, logPath) {
+function spawnLogged(command, args, env, logPath, cwd) {
   const output = fs.openSync(logPath, "a");
   const child = spawn(command, args, {
     detached: true,
     windowsHide: true,
     stdio: ["ignore", output, output],
     env,
+    cwd,
   });
-  fs.closeSync(output);
   child.unref();
   return child.pid;
 }
@@ -156,6 +206,11 @@ function readPid(dataDir, name) {
   if (!fs.existsSync(file)) return null;
   const pid = Number(fs.readFileSync(file, "utf8"));
   return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+function clearPid(dataDir, name) {
+  const file = path.join(dataDir, `${name}.pid`);
+  if (fs.existsSync(file)) fs.unlinkSync(file);
 }
 
 function stopPid(pid) {
@@ -210,52 +265,91 @@ function health(port) {
   });
 }
 
+function rememberMongoPort(dataDir, port) {
+  fs.writeFileSync(path.join(dataDir, "mongo-port.txt"), String(port));
+}
+
+async function startPackagedMongo(paths, port) {
+  if (!fs.existsSync(paths.mongoBin)) {
+    throw new Error(
+      "MongoDB is not running on 127.0.0.1:27017, and the packaged MongoDB is missing. Start MongoDB or reinstall Vay Tutor.",
+    );
+  }
+  appendLog(paths.dataDir, `Starting the packaged MongoDB on 127.0.0.1:${port}.`);
+  const pid = spawnLogged(
+    paths.mongoBin,
+    mongoArguments(paths.dataDir, port),
+    withBinaryPath(paths.mongoBin, process.env),
+    path.join(paths.dataDir, "logs", "mongo.log"),
+    path.dirname(paths.mongoBin),
+  );
+  rememberPid(paths.dataDir, "mongo", pid);
+  await waitForPort(port);
+  rememberMongoPort(paths.dataDir, port);
+  return { owned: true, port };
+}
+
+async function ensureMongo(paths) {
+  if (await portOpen(MONGO_PORT)) {
+    appendLog(paths.dataDir, "Using the MongoDB already running on 127.0.0.1:27017.");
+    clearPid(paths.dataDir, "mongo");
+    rememberMongoPort(paths.dataDir, MONGO_PORT);
+    return { owned: false, port: MONGO_PORT };
+  }
+  return startPackagedMongo(paths, MONGO_PORT);
+}
+
 async function startHost(paths) {
   ensureLayout(paths.dataDir);
+  appendLog(paths.dataDir, "Starting the institute.");
+  appendLog(paths.dataDir, `Python binary: ${paths.pythonBin}`);
+  appendLog(paths.dataDir, `Backend: ${paths.backendDir}`);
+  appendLog(paths.dataDir, `Frontend: ${paths.frontendDir}`);
+  for (const file of [paths.pythonBin, path.join(paths.backendDir, "app", "main.py"), path.join(paths.frontendDir, "index.html")]) {
+    if (!fs.existsSync(file)) throw new Error(`Missing packaged file: ${file}`);
+  }
   const { certPath } = ensureCertificate(paths.dataDir);
   trustCertificate(certPath);
-  const mongoUp = await portOpen(MONGO_PORT);
-  if (!mongoUp) {
-    const pid = spawnLogged(
-      paths.mongoBin,
-      mongoArguments(paths.dataDir),
-      process.env,
-      path.join(paths.dataDir, "logs", "host.log"),
-    );
-    rememberPid(paths.dataDir, "mongo", pid);
-    await waitForPort(MONGO_PORT);
-  }
-  await runReplicaInit(paths, !mongoUp);
+  const mongo = await ensureMongo(paths);
   let port = API_PORT;
   if (!(await health(port))) {
     if (await portOpen(port)) port = await nextPort(port + 1);
+    appendLog(paths.dataDir, `Starting the API on port ${port}.`);
     const pid = spawnLogged(
       paths.pythonBin,
       apiArguments(paths, port),
-      serviceEnvironment(paths, port),
+      serviceEnvironment(paths, port, mongo.port),
       path.join(paths.dataDir, "logs", "api.log"),
+      path.dirname(paths.pythonBin),
     );
     rememberPid(paths.dataDir, "api", pid);
-    await waitUntilHealthy(port);
+    await waitUntilHealthy(paths.dataDir, port);
+  } else {
+    appendLog(paths.dataDir, `The API is already healthy on port ${port}.`);
   }
   const certificate = path.join(paths.dataDir, "vay-tutor.cer");
   fs.writeFileSync(path.join(paths.dataDir, "port.txt"), String(port));
-  writeConnectNote(paths.dataDir, port, certificate);
-  return { origin: `https://127.0.0.1:${port}`, port, certificate };
+  writeConnectNote(paths.dataDir, port, certificate, mongo);
+  appendLog(paths.dataDir, `Ready at https://127.0.0.1:${port}`);
+  return { origin: `https://127.0.0.1:${port}`, port, certificate, mongoOwned: mongo.owned, mongoPort: mongo.port };
 }
 
-function writeConnectNote(dataDir, port, certificate) {
+function writeConnectNote(dataDir, port, certificate, mongo) {
   const lines = [`This computer: https://127.0.0.1:${port}`];
   for (const name of certificateNames()) {
     if (name.ip && name.ip !== "127.0.0.1") lines.push(`Other computers: https://${name.ip}:${port}`);
   }
   lines.push(`Certificate for phones and tablets: ${certificate}`);
-  lines.push("MongoDB listens on this computer only.");
+  if (mongo.owned) {
+    lines.push(`MongoDB was started by Vay Tutor on 127.0.0.1:${mongo.port}.`);
+  } else {
+    lines.push(`MongoDB was already running on 127.0.0.1:${mongo.port}; Vay Tutor is using that instance.`);
+  }
   fs.writeFileSync(path.join(dataDir, "connect.txt"), `${lines.join("\r\n")}\r\n`);
 }
 
-async function whenReady(dataDir) {
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+async function whenReady(dataDir, attempts = 120, delayMs = 250) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const note = path.join(dataDir, "port.txt");
     if (fs.existsSync(note)) {
       const port = Number(fs.readFileSync(note, "utf8"));
@@ -267,28 +361,9 @@ async function whenReady(dataDir) {
         };
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
-  throw new Error("The institute did not become ready. See the log in the Vay Tutor data folder.");
-}
-
-function runReplicaInit(paths, initiate) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(paths.pythonBin, ["-c", REPLICA_INIT, initiate ? "initiate" : "reuse"], {
-      env: serviceEnvironment(paths, API_PORT),
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let error = "";
-    child.stderr.on("data", (chunk) => {
-      error += chunk.toString();
-    });
-    child.on("error", reject);
-    child.on("exit", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(error.trim() || "MongoDB did not become a replica set."));
-    });
-  });
+  throw readinessError(dataDir, "The institute did not become ready.");
 }
 
 async function nextPort(start) {
@@ -298,30 +373,13 @@ async function nextPort(start) {
   throw new Error("No free port is available for the institute.");
 }
 
-async function waitUntilHealthy(port) {
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+async function waitUntilHealthy(dataDir, port) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
     if (await health(port)) return;
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("The institute did not become ready. See the log in the Vay Tutor data folder.");
+  throw readinessError(dataDir, `The API on port ${port} did not become ready.`);
 }
-
-const REPLICA_INIT = `
-import sys
-from pymongo import MongoClient
-from pymongo.errors import OperationFailure
-initiate = sys.argv[1] == "initiate"
-client = MongoClient("mongodb://127.0.0.1:27017/?directConnection=true", serverSelectionTimeoutMS=8000)
-try:
-    status = client.admin.command("replSetGetStatus")
-except OperationFailure:
-    if not initiate:
-        raise SystemExit("MongoDB is already running on port 27017. Stop it so Vay Tutor can use its own database.")
-    client.admin.command("replSetInitiate", {"_id": "rs0", "members": [{"_id": 0, "host": "127.0.0.1:27017"}]})
-else:
-    if status.get("set") != "rs0":
-        raise SystemExit("MongoDB on port 27017 belongs to a different replica set.")
-`;
 
 module.exports = {
   API_PORT,
@@ -330,9 +388,13 @@ module.exports = {
   certificateNames,
   claimSupervisor,
   dataDirectory,
+  ensureMongo,
   mongoArguments,
+  mongoUrl,
+  readinessError,
   serviceEnvironment,
   startHost,
   stopHost,
+  supervisorProfileDirectory,
   whenReady,
 };
