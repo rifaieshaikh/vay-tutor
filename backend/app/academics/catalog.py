@@ -929,6 +929,7 @@ async def batch_workspace(
         "timings": batch.get("timings") or None,
         "archived": bool(batch.get("archived")),
         "closed": bool(batch.get("closed")),
+        "revision": int(batch.get("revision") or 0),
         "students": {"items": student_items, "total": student_total, "page": student_number, "pages": student_pages},
         "curriculum": curriculum,
         "assignments": assignments,

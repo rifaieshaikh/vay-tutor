@@ -60,10 +60,20 @@ type Workspace = {
   timings: string | null;
   archived?: boolean;
   closed: boolean;
+  revision?: number;
   students: Page<Person>;
   curriculum: Subject[];
   assignments: Assignment[];
   assessments: Page<Assessment>;
+};
+type BatchChange = {
+  name?: string;
+  archived?: boolean;
+  closed?: boolean;
+  started_on?: string;
+  ended_on?: string;
+  timings?: string;
+  expected_revision?: number;
 };
 type TeacherOption = { id: string; name: string };
 type StudentHit = { id: string; display_name: string; student_code: string };
@@ -115,6 +125,7 @@ export function BatchPage({ session }: { session: Session }) {
   const [enrolling, setEnrolling] = useState("");
   const [addingStudent, setAddingStudent] = useState(false);
   const [assigning, setAssigning] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [teacherQuery, setTeacherQuery] = useState("");
   const [teacherStatus, setTeacherStatus] = useState("");
   const [teacherSubject, setTeacherSubject] = useState("");
@@ -335,11 +346,31 @@ export function BatchPage({ session }: { session: Session }) {
           <p className="meta">{batchState(board)}{(board.closed || board.archived) ? ". New enrollments and assignments stay out." : ""}</p>
         </div>
         <div className="row-actions">
+          {canCorrect ? <button type="button" onClick={() => { setEditing(true); setError(""); }}>Edit batch</button> : null}
           {canCorrect ? <button type="button" className="secondary" disabled={saving} onClick={() => void setClosed(!board.closed)}>{board.closed ? "Reopen batch" : "Close batch"}</button> : null}
           <Link to={`/views?level=batch&${reportQuery.toString()}`}>View performance</Link>
         </div>
       </div>
       {error ? <p className="error" role="alert">{error}</p> : null}
+      {editing ? (
+        <BatchEditor
+          board={board}
+          onClose={() => setEditing(false)}
+          onSaved={async (body) => {
+            notify(
+              body.name
+                ? `Renamed ${board.name}. The previous name stays on the record.`
+                : body.archived
+                  ? `Archived ${board.name}.`
+                  : body.archived === false
+                    ? `Restored ${board.name}.`
+                    : `Saved ${board.name}.`,
+            );
+            setEditing(false);
+            await reload();
+          }}
+        />
+      ) : null}
       <dl className="facts">
         <div><dt>Branch</dt><dd>{board.branch_id ? <Link to={`/institute/branches/${board.branch_id}`}>{board.branch_name || "Branch"}</Link> : "Not recorded"}</dd></div>
         <div><dt>Course</dt><dd>{board.course_id ? <Link to={`/courses/${board.course_id}`}>{board.course_name || "Course"}</Link> : "Not recorded"}</dd></div>
@@ -618,5 +649,110 @@ export function BatchPage({ session }: { session: Session }) {
         </StudentDialog>
       ) : null}
     </section>
+  );
+}
+
+function BatchEditor({
+  board,
+  onClose,
+  onSaved,
+}: {
+  board: Workspace;
+  onClose: () => void;
+  onSaved: (body: BatchChange) => Promise<void>;
+}) {
+  const [name, setName] = useState(board.name);
+  const [archived, setArchived] = useState(Boolean(board.archived));
+  const [closed, setClosed] = useState(Boolean(board.closed));
+  const [startedOn, setStartedOn] = useState(board.started_on || "");
+  const [endedOn, setEndedOn] = useState(board.ended_on || "");
+  const [timings, setTimings] = useState(board.timings || "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const dirty =
+    name.trim() !== board.name
+    || archived !== Boolean(board.archived)
+    || closed !== Boolean(board.closed)
+    || startedOn !== (board.started_on || "")
+    || endedOn !== (board.ended_on || "")
+    || timings !== (board.timings || "");
+
+  function requestClose() {
+    if (dirty && !window.confirm("Discard the unsaved changes?")) return;
+    onClose();
+  }
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError("Enter a name.");
+      return;
+    }
+    const body: BatchChange = {};
+    if (trimmed !== board.name) body.name = trimmed;
+    if (archived !== Boolean(board.archived)) body.archived = archived;
+    if (startedOn !== (board.started_on || "")) body.started_on = startedOn;
+    if (endedOn !== (board.ended_on || "")) body.ended_on = endedOn;
+    if (timings !== (board.timings || "")) body.timings = timings;
+    if (closed !== Boolean(board.closed)) body.closed = closed;
+    if (!Object.keys(body).length) {
+      onClose();
+      return;
+    }
+    body.expected_revision = board.revision || 0;
+    setSaving(true);
+    setError("");
+    try {
+      await api(`/api/v1/catalog/batch/${board.id}`, { method: "PATCH", body: JSON.stringify(body) });
+      await onSaved(body);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save.");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <StudentDialog title="Edit batch" onClose={requestClose}>
+      <form onSubmit={save}>
+        <label>Name
+          <input value={name} aria-label="Batch name" onChange={(event) => setName(event.target.value)} />
+        </label>
+        <label>Status
+          <select value={archived ? "archived" : "active"} aria-label="Status" onChange={(event) => setArchived(event.target.value === "archived")}>
+            <option value="active">Active</option>
+            <option value="archived">Archived</option>
+          </select>
+        </label>
+        {archived !== Boolean(board.archived) ? (
+          <p className="meta">
+            {archived
+              ? "Archiving keeps the batch, its enrollments, assignments, and results. New enrollments and assignments stay out until this record is restored."
+              : "Restoring allows new enrollments and assignments again."}
+          </p>
+        ) : null}
+        <label>
+          <input type="checkbox" checked={closed} aria-label="Closed" onChange={(event) => setClosed(event.target.checked)} /> Closed
+        </label>
+        <p className="meta">Closing the batch keeps new enrollments out. The end date stays a date on the batch.</p>
+        <div className="form-grid">
+          <label>Start date
+            <input type="date" value={startedOn} aria-label="Start date" onChange={(event) => setStartedOn(event.target.value)} />
+          </label>
+          <label>End date
+            <input type="date" value={endedOn} aria-label="End date" onChange={(event) => setEndedOn(event.target.value)} />
+          </label>
+        </div>
+        <p className="meta">An end date, including a future date, closes new enrollments immediately. Intake stays on the batch name.</p>
+        <label>Schedule
+          <input value={timings} aria-label="Schedule" onChange={(event) => setTimings(event.target.value)} />
+        </label>
+        {error ? <p className="error" role="alert">{error}</p> : null}
+        <div className="dialog-actions">
+          <button type="button" className="quiet" onClick={requestClose}>Cancel</button>
+          <button type="submit" disabled={saving || !name.trim()}>{saving ? "Saving…" : "Save"}</button>
+        </div>
+      </form>
+    </StudentDialog>
   );
 }
