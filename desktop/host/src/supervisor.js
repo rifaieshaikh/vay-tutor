@@ -61,6 +61,15 @@ function withBinaryPath(bin, env) {
   return { ...env, PATH: `${directory}${separator}${current}` };
 }
 
+function pythonHome(pythonBin) {
+  const directory = path.dirname(pythonBin);
+  if (path.basename(directory) === "bin") {
+    const root = path.dirname(directory);
+    if (fs.existsSync(path.join(root, "lib"))) return root;
+  }
+  return directory;
+}
+
 function serviceEnvironment(paths, port, mongoPort = MONGO_PORT) {
   return withBinaryPath(paths.pythonBin, {
     ...process.env,
@@ -73,7 +82,7 @@ function serviceEnvironment(paths, port, mongoPort = MONGO_PORT) {
     WORKER_ENABLED: "1",
     PYTHONPATH: paths.backendDir,
     PYTHONNOUSERSITE: "1",
-    PYTHONHOME: path.dirname(paths.pythonBin),
+    PYTHONHOME: pythonHome(paths.pythonBin),
     VAY_PORT: String(port),
     VAY_MONGO_PORT: String(mongoPort),
   });
@@ -244,11 +253,101 @@ function stopHost(dataDir) {
   stopPid(readPid(dataDir, "mongo"));
   const supervisor = readPid(dataDir, "supervisor");
   if (supervisor && supervisor !== process.pid) stopPid(supervisor);
+  removeLoginAgent(dataDir);
 }
 
 function trustCertificate(certPath) {
-  if (process.platform !== "win32") return;
-  spawn("certutil", ["-addstore", "-user", "Root", certPath], { windowsHide: true, stdio: "ignore" }).unref();
+  if (process.platform === "win32") {
+    spawn("certutil", ["-addstore", "-user", "Root", certPath], { windowsHide: true, stdio: "ignore" }).unref();
+    return;
+  }
+  if (process.platform === "darwin") {
+    const keychain = path.join(os.homedir(), "Library", "Keychains", "login.keychain-db");
+    const child = spawn(
+      "security",
+      ["add-trusted-cert", "-d", "-r", "trustRoot", "-k", keychain, certPath],
+      { stdio: "ignore" },
+    );
+    child.on("error", (error) => {
+      appendLog(path.dirname(certPath), `Certificate trust skipped: ${error.message}`);
+    });
+    child.on("exit", (code) => {
+      if (code && code !== 0) {
+        appendLog(path.dirname(certPath), `Certificate trust exited with code ${code}.`);
+      }
+    });
+    child.unref();
+  }
+}
+
+const LAUNCH_AGENT_LABEL = "com.vaytutor.host";
+
+function launchAgentPlistPath() {
+  return path.join(os.homedir(), "Library", "LaunchAgents", `${LAUNCH_AGENT_LABEL}.plist`);
+}
+
+function packagedMacExecutable() {
+  const marker = `${path.sep}Contents${path.sep}MacOS${path.sep}`;
+  if (!process.execPath.includes(marker)) return null;
+  return process.execPath;
+}
+
+function installLoginAgent(dataDir) {
+  if (process.platform !== "darwin") return;
+  const executable = packagedMacExecutable();
+  if (!executable) return;
+  const plistPath = launchAgentPlistPath();
+  const body = [
+    `<?xml version="1.0" encoding="UTF-8"?>`,
+    `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">`,
+    `<plist version="1.0">`,
+    `<dict>`,
+    `  <key>Label</key>`,
+    `  <string>${LAUNCH_AGENT_LABEL}</string>`,
+    `  <key>ProgramArguments</key>`,
+    `  <array>`,
+    `    <string>${executable}</string>`,
+    `    <string>--supervisor</string>`,
+    `  </array>`,
+    `  <key>RunAtLoad</key>`,
+    `  <true/>`,
+    `  <key>KeepAlive</key>`,
+    `  <false/>`,
+    `</dict>`,
+    `</plist>`,
+    ``,
+  ].join("\n");
+  fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+  const previous = fs.existsSync(plistPath) ? fs.readFileSync(plistPath, "utf8") : "";
+  if (previous !== body) fs.writeFileSync(plistPath, body);
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (uid == null) return;
+  const domain = `gui/${uid}`;
+  spawn("launchctl", ["bootout", domain, plistPath], { stdio: "ignore" }).on("close", () => {
+    spawn("launchctl", ["bootstrap", domain, plistPath], { stdio: "ignore" }).on("error", (error) => {
+      appendLog(dataDir, `LaunchAgent bootstrap skipped: ${error.message}`);
+    });
+  });
+  appendLog(dataDir, `Login agent registered at ${plistPath}.`);
+}
+
+function removeLoginAgent(dataDir) {
+  if (process.platform !== "darwin") return;
+  const plistPath = launchAgentPlistPath();
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (uid != null && fs.existsSync(plistPath)) {
+    try {
+      spawn("launchctl", ["bootout", `gui/${uid}`, plistPath], { stdio: "ignore" }).unref();
+    } catch {
+      // Best-effort unload.
+    }
+  }
+  try {
+    fs.unlinkSync(plistPath);
+    if (dataDir) appendLog(dataDir, `Login agent removed from ${plistPath}.`);
+  } catch {
+    // Already absent.
+  }
 }
 
 function health(port) {
@@ -331,6 +430,7 @@ async function startHost(paths) {
   fs.writeFileSync(path.join(paths.dataDir, "port.txt"), String(port));
   writeConnectNote(paths.dataDir, port, certificate, mongo);
   appendLog(paths.dataDir, `Ready at https://127.0.0.1:${port}`);
+  installLoginAgent(paths.dataDir);
   return { origin: `https://127.0.0.1:${port}`, port, certificate, mongoOwned: mongo.owned, mongoPort: mongo.port };
 }
 
@@ -389,9 +489,12 @@ module.exports = {
   claimSupervisor,
   dataDirectory,
   ensureMongo,
+  installLoginAgent,
   mongoArguments,
   mongoUrl,
+  pythonHome,
   readinessError,
+  removeLoginAgent,
   serviceEnvironment,
   startHost,
   stopHost,

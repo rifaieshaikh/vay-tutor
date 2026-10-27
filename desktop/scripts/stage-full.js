@@ -10,6 +10,19 @@ const resources = path.join(host, "resources");
 const cache = path.join(host, ".cache");
 const pythonVersion = "3.12.8";
 const mongoVersions = ["8.0.13", "8.0.12", "8.0.11", "8.0.10", "8.0.4"];
+// python-build-standalone install_only builds for macOS Apple Silicon.
+const standalonePythonTag = "20261026";
+const standalonePythonUrl =
+  `https://github.com/astral-sh/python-build-standalone/releases/download/${standalonePythonTag}/` +
+  `cpython-3.12.16+${standalonePythonTag}-aarch64-apple-darwin-install_only.tar.gz`;
+
+function parsePlatform() {
+  const flag = process.argv.find((arg) => arg.startsWith("--platform="));
+  if (flag) return flag.slice("--platform=".length);
+  const index = process.argv.indexOf("--platform");
+  if (index >= 0 && process.argv[index + 1]) return process.argv[index + 1];
+  return process.platform === "darwin" ? "darwin" : "win32";
+}
 
 function pythonLauncher() {
   if (process.platform === "win32") return "python";
@@ -32,13 +45,13 @@ async function download(url, destination) {
   return destination;
 }
 
-async function firstAvailable(urls) {
+async function firstAvailable(urls, label) {
   for (const url of urls) {
     const response = await fetch(url, { headers: { Range: "bytes=0-0" } });
     await response.body?.cancel();
     if (response.ok || response.status === 206) return url;
   }
-  throw new Error("MongoDB Community for Windows could not be downloaded.");
+  throw new Error(`${label} could not be downloaded.`);
 }
 
 function extractZip(archive, destination) {
@@ -46,6 +59,11 @@ function extractZip(archive, destination) {
   const python = pythonLauncher();
   const script = "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])";
   run(python, ["-c", script, archive, destination]);
+}
+
+function extractTarGz(archive, destination) {
+  fs.mkdirSync(destination, { recursive: true });
+  run("tar", ["-xzf", archive, "-C", destination]);
 }
 
 function findFile(directory, name) {
@@ -70,13 +88,31 @@ function copyTree(source, destination, skip) {
   }
 }
 
-async function stageMongo() {
+function clearWrongPlatform(platform) {
+  const mongoWin = path.join(resources, "mongo", "mongod.exe");
+  const mongoMac = path.join(resources, "mongo", "mongod");
+  const pythonWin = path.join(resources, "python", "python.exe");
+  const wrong =
+    platform === "darwin"
+      ? fs.existsSync(mongoWin) || fs.existsSync(pythonWin)
+      : (fs.existsSync(mongoMac) && !fs.existsSync(mongoWin)) ||
+        (fs.existsSync(path.join(resources, "python", "bin", "python3")) && !fs.existsSync(pythonWin));
+  if (wrong) {
+    fs.rmSync(path.join(resources, "mongo"), { recursive: true, force: true });
+    fs.rmSync(path.join(resources, "python"), { recursive: true, force: true });
+  }
+  if (platform === "darwin") {
+    fs.rmSync(path.join(resources, "redist"), { recursive: true, force: true });
+  }
+}
+
+async function stageMongoWindows() {
   const target = path.join(resources, "mongo", "mongod.exe");
   if (fs.existsSync(target)) return;
   const urls = mongoVersions.map((version) => `https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-${version}.zip`);
-  const url = await firstAvailable(urls);
+  const url = await firstAvailable(urls, "MongoDB Community for Windows");
   const archive = await download(url, path.join(cache, path.basename(url)));
-  const extracted = path.join(cache, "mongo");
+  const extracted = path.join(cache, "mongo-win");
   fs.rmSync(extracted, { recursive: true, force: true });
   extractZip(archive, extracted);
   const binary = findFile(extracted, "mongod.exe");
@@ -94,7 +130,33 @@ async function stageMongo() {
   }
 }
 
-async function stagePython() {
+async function stageMongoDarwin() {
+  const target = path.join(resources, "mongo", "mongod");
+  if (fs.existsSync(target)) {
+    fs.chmodSync(target, 0o755);
+    return;
+  }
+  const urls = mongoVersions.map((version) => `https://fastdl.mongodb.org/osx/mongodb-macos-arm64-${version}.tgz`);
+  const url = await firstAvailable(urls, "MongoDB Community for macOS");
+  const archive = await download(url, path.join(cache, path.basename(url)));
+  const extracted = path.join(cache, "mongo-mac");
+  fs.rmSync(extracted, { recursive: true, force: true });
+  extractTarGz(archive, extracted);
+  const binary = findFile(extracted, "mongod");
+  if (!binary) throw new Error("The MongoDB archive has no mongod.");
+  fs.mkdirSync(path.join(resources, "mongo"), { recursive: true });
+  fs.copyFileSync(binary, target);
+  fs.chmodSync(target, 0o755);
+  const licenseRoot = path.dirname(path.dirname(binary));
+  for (const name of fs.readdirSync(licenseRoot)) {
+    const from = path.join(licenseRoot, name);
+    if (name.toLowerCase().includes("license") && fs.statSync(from).isFile()) {
+      fs.copyFileSync(from, path.join(resources, "mongo", name));
+    }
+  }
+}
+
+async function stagePythonWindows() {
   const target = path.join(resources, "python", "python.exe");
   if (!fs.existsSync(target)) {
     const archive = await download(
@@ -108,7 +170,7 @@ async function stagePython() {
   const pth = fs.readdirSync(path.join(resources, "python")).find((name) => name.endsWith("._pth"));
   if (!pth) throw new Error("The embedded Python has no path file.");
   fs.writeFileSync(path.join(resources, "python", pth), "python312.zip\n.\nLib\\site-packages\nimport site\n");
-  const wheels = path.join(cache, "wheels");
+  const wheels = path.join(cache, "wheels-win");
   fs.rmSync(wheels, { recursive: true, force: true });
   fs.mkdirSync(wheels, { recursive: true });
   run(pythonLauncher(), [
@@ -119,6 +181,61 @@ async function stagePython() {
     wheels,
     "--platform",
     "win_amd64",
+    "--python-version",
+    "312",
+    "--implementation",
+    "cp",
+    "--only-binary=:all:",
+    "--requirement",
+    path.join(host, "requirements.txt"),
+  ]);
+  for (const name of fs.readdirSync(wheels)) {
+    if (name.endsWith(".whl")) extractZip(path.join(wheels, name), site);
+  }
+}
+
+async function stagePythonDarwin() {
+  const pythonRoot = path.join(resources, "python");
+  const launcher = path.join(pythonRoot, "python");
+  const nested = path.join(pythonRoot, "bin", "python3");
+  if (!fs.existsSync(nested) && !fs.existsSync(launcher)) {
+    const archive = await download(standalonePythonUrl, path.join(cache, path.basename(standalonePythonUrl)));
+    const extracted = path.join(cache, "python-mac");
+    fs.rmSync(extracted, { recursive: true, force: true });
+    extractTarGz(archive, extracted);
+    const installRoot = fs.existsSync(path.join(extracted, "python", "bin", "python3"))
+      ? path.join(extracted, "python")
+      : extracted;
+    fs.rmSync(pythonRoot, { recursive: true, force: true });
+    copyTree(installRoot, pythonRoot, () => false);
+  }
+  const binary = fs.existsSync(nested) ? nested : findFile(pythonRoot, "python3");
+  if (!binary) throw new Error("The standalone Python archive has no python3.");
+  fs.chmodSync(binary, 0o755);
+  fs.mkdirSync(pythonRoot, { recursive: true });
+  try {
+    fs.unlinkSync(launcher);
+  } catch {
+    // Replace any previous launcher.
+  }
+  fs.symlinkSync(path.relative(pythonRoot, binary) || binary, launcher);
+  fs.chmodSync(launcher, 0o755);
+
+  const site = path.join(pythonRoot, "lib", "python3.12", "site-packages");
+  fs.mkdirSync(site, { recursive: true });
+  const wheels = path.join(cache, "wheels-mac");
+  fs.rmSync(wheels, { recursive: true, force: true });
+  fs.mkdirSync(wheels, { recursive: true });
+  run(pythonLauncher(), [
+    "-m",
+    "pip",
+    "download",
+    "--dest",
+    wheels,
+    "--platform",
+    "macosx_11_0_arm64",
+    "--platform",
+    "macosx_10_9_universal2",
     "--python-version",
     "312",
     "--implementation",
@@ -146,12 +263,22 @@ async function stageRedist() {
 }
 
 async function main() {
+  const platform = parsePlatform();
+  if (platform !== "win32" && platform !== "darwin") {
+    throw new Error(`Unsupported platform ${platform}. Use win32 or darwin.`);
+  }
   fs.mkdirSync(cache, { recursive: true });
-  await stageMongo();
-  await stagePython();
+  clearWrongPlatform(platform);
+  if (platform === "darwin") {
+    await stageMongoDarwin();
+    await stagePythonDarwin();
+  } else {
+    await stageMongoWindows();
+    await stagePythonWindows();
+    await stageRedist();
+  }
   stageApp();
-  await stageRedist();
-  console.log(`Staged the full installation in ${resources}`);
+  console.log(`Staged the full ${platform} installation in ${resources}`);
 }
 
 main().catch((error) => {

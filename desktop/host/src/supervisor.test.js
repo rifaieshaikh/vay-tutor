@@ -6,6 +6,7 @@ const {
   certificateNames,
   mongoArguments,
   mongoUrl,
+  pythonHome,
   serviceEnvironment,
 } = require("./supervisor");
 
@@ -43,4 +44,9 @@ test("the host certificate names this computer and localhost", () => {
   const names = certificateNames();
   assert.equal(names.some((item) => item.value === "localhost"), true);
   assert.equal(names.some((item) => item.ip === "127.0.0.1"), true);
+});
+
+test("PYTHONHOME follows the standalone layout under bin", () => {
+  assert.equal(pythonHome(path.join("python", "python.exe")), path.join("python"));
+  assert.equal(pythonHome(path.join("python", "python")), path.join("python"));
 });

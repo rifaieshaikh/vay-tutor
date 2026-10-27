@@ -94,7 +94,7 @@ jobs:
         run: npm test
 
       - name: Stage MongoDB, Python, the API, and the UI
-        run: node desktop/scripts/stage-full.js
+        run: node desktop/scripts/stage-full.js --platform win32
 
       - name: Build the full installer
         working-directory: desktop/host
@@ -107,4 +107,50 @@ jobs:
         with:
           name: vay-tutor-full-windows
           path: desktop/release/VayTutor-Setup-*.exe
+          if-no-files-found: error
+
+  full-installation-macos:
+    name: Full installation (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            desktop/host/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the institute UI
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install the full-installation toolchain
+        working-directory: desktop/host
+        run: npm ci
+
+      - name: Test the supervisor
+        working-directory: desktop/host
+        run: npm test
+
+      - name: Stage MongoDB, Python, the API, and the UI
+        run: node desktop/scripts/stage-full.js --platform darwin
+
+      - name: Build the full disk image
+        working-directory: desktop/host
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npx electron-builder --mac
+
+      - name: Publish the full disk image
+        uses: actions/upload-artifact@v4
+        with:
+          name: vay-tutor-full-macos
+          path: desktop/release/VayTutor-*.dmg
           if-no-files-found: error

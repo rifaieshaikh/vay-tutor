@@ -8,7 +8,9 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test src/supervisor.test.js src/tabs.test.js",
-    "dist": "electron-builder --win --x64"
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win --x64",
+    "dist:mac": "electron-builder --mac"
   },
   "dependencies": {
     "selfsigned": "2.4.1"
@@ -35,14 +37,16 @@
       { "from": "resources/mongo", "to": "mongo" },
       { "from": "resources/python", "to": "python" },
       { "from": "resources/backend", "to": "backend" },
-      { "from": "resources/frontend", "to": "frontend" },
-      { "from": "resources/redist", "to": "redist" },
-      { "from": "build/start-supervisor.cmd", "to": "start-supervisor.cmd" }
+      { "from": "resources/frontend", "to": "frontend" }
     ],
     "asar": true,
     "win": {
       "target": [{ "target": "nsis", "arch": ["x64"] }],
-      "icon": "../build/icon.ico"
+      "icon": "../build/icon.ico",
+      "extraResources": [
+        { "from": "resources/redist", "to": "redist" },
+        { "from": "build/start-supervisor.cmd", "to": "start-supervisor.cmd" }
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -55,6 +59,15 @@
       "deleteAppDataOnUninstall": false,
       "artifactName": "VayTutor-Setup-${version}.${ext}",
       "include": "build/installer.nsh"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "icon": "../build/icon.icns",
+      "category": "public.app-category.education",
+      "identity": null
+    },
+    "dmg": {
+      "artifactName": "VayTutor-${version}.${ext}"
     }
   }
 }

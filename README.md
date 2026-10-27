@@ -53,26 +53,39 @@ The workflow attaches two artifacts:
 
 ## Full installation
 
-One computer uses this installation. It includes the API, the institute UI, and a packaged MongoDB Community for when none is already running. If MongoDB is already listening on `127.0.0.1:27017`, Vay Tutor uses that instance and leaves it running when the program stops. If nothing is listening there, it starts the packaged MongoDB on that address. Local installation does not require a replica set. The institute is served at `https://127.0.0.1:8443`, and on this computer’s other addresses at port 8443, so the client-only installation on another computer can connect. Records, the database, and the certificate stay in `C:\ProgramData\Vay Tutor`. Removing the program leaves that folder in place. The installer offers a desktop shortcut.
+One computer uses this installation. It includes the API, the institute UI, and a packaged MongoDB Community for when none is already running. If MongoDB is already listening on `127.0.0.1:27017`, Vay Tutor uses that instance and leaves it running when the program stops. If nothing is listening there, it starts the packaged MongoDB on that address. Local installation does not require a replica set. The institute is served at `https://127.0.0.1:8443`, and on this computer’s other addresses at port 8443, so the client-only installation on another computer can connect.
 
-The installed program is named Vay Tutor. A sign-in task starts it again at the next Windows sign-in. Closing the window leaves MongoDB and the API running. Vay Tutor Client on another computer needs only the host address. A phone or tablet browser needs `vay-tutor.cer` installed once; on Windows that file is `C:\ProgramData\Vay Tutor\vay-tutor.cer`, and `connect.txt` in that folder lists the address. MongoDB Community’s license is included beside `mongod.exe`. Redistribution of MongoDB Community has to be confirmed by the release owner.
+On Windows, records, the database, and the certificate stay in `C:\ProgramData\Vay Tutor`. Removing the program leaves that folder in place. The installer offers a desktop shortcut. A sign-in task starts the institute again at the next Windows sign-in.
 
-Build both Windows installers from a checkout:
+On Apple Silicon Macs, the same role is a disk image. After you copy Vay Tutor into Applications and open it once, records stay in `~/Library/Application Support/Vay Tutor`, and a user LaunchAgent (`com.vaytutor.host`) starts the institute again at the next login. Closing the window leaves MongoDB and the API running. To stop them and remove the login agent, run the packaged app with `--stop` (or delete `~/Library/LaunchAgents/com.vaytutor.host.plist` and unload it).
+
+Vay Tutor Client on another computer needs only the host address. A phone or tablet browser needs `vay-tutor.cer` installed once; on Windows that file is under `C:\ProgramData\Vay Tutor`, on Mac under `~/Library/Application Support/Vay Tutor`, and `connect.txt` in that folder lists the address. MongoDB Community’s license is included beside `mongod`. Redistribution of MongoDB Community has to be confirmed by the release owner.
+
+Build the Windows client and full installer from a checkout:
 
 ```bash
 cd desktop && npm ci && CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --x64
-node desktop/scripts/stage-full.js
+node desktop/scripts/stage-full.js --platform win32
 cd desktop/host && npm ci && CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --x64
 ```
 
-Both Windows installers are written to `desktop/release`:
+Build the Mac full disk image (Apple Silicon) from a checkout on an arm64 Mac:
+
+```bash
+node desktop/scripts/stage-full.js --platform darwin
+cd desktop/host && npm ci && CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac
+```
+
+Installers are written to `desktop/release`:
 
 | File | Installation |
 | --- | --- |
-| `VayTutorClient-Setup-0.2.0.exe` | Client-only, for the other computers |
-| `VayTutor-Setup-0.2.0.exe` | Full installation, for the computer that keeps MongoDB, the API, and the institute UI |
+| `VayTutorClient-Setup-0.2.0.exe` | Client-only, Windows |
+| `VayTutorClient-0.2.0.dmg` | Client-only, macOS |
+| `VayTutor-Setup-0.2.0.exe` | Full installation, Windows |
+| `VayTutor-0.2.0.dmg` | Full installation, Apple Silicon macOS |
 
-The workflow also publishes the full installation as `vay-tutor-full-windows`. The installers are unsigned, so Windows SmartScreen asks for confirmation.
+The workflow publishes full builds as `vay-tutor-full-windows` and `vay-tutor-full-macos`. The installers are unsigned, so Windows SmartScreen and Gatekeeper ask for confirmation.
 
 ## Where to change a workflow
 
