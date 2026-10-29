@@ -51,7 +51,18 @@ type Catalog = { branches: Row[]; courses: Row[]; batches: Row[]; subjects: Row[
 
 const KIND = { branches: "branch", courses: "course", batches: "batch", subjects: "subject", students: "student", papers: "paper" } as const;
 type CatalogKind = "branches" | "courses" | "batches" | "subjects" | "papers";
-type CatalogChange = { name?: string; archived?: boolean; closed?: boolean; notes?: string; started_on?: string; ended_on?: string; timings?: string; expected_revision?: number };
+type CatalogChange = {
+  name?: string;
+  archived?: boolean;
+  closed?: boolean;
+  notes?: string;
+  started_on?: string;
+  ended_on?: string;
+  timings?: string;
+  branch_id?: string;
+  course_id?: string;
+  expected_revision?: number;
+};
 
 function byName(rows: Row[]) {
   return [...rows].sort((left, right) => left.name.localeCompare(right.name));
@@ -79,7 +90,19 @@ function useCatalog() {
   return { catalog, error, correct, reload: load, setError };
 }
 
-function CatalogEditor({ kind, row, onClose, onSave }: { kind: CatalogKind; row: Row; onClose: () => void; onSave: (body: CatalogChange) => Promise<void> }) {
+function CatalogEditor({
+  kind,
+  row,
+  catalog,
+  onClose,
+  onSave,
+}: {
+  kind: CatalogKind;
+  row: Row;
+  catalog?: Catalog | null;
+  onClose: () => void;
+  onSave: (body: CatalogChange) => Promise<void>;
+}) {
   const label = KIND[kind];
   const [name, setName] = useState(row.name);
   const [archived, setArchived] = useState(row.archived);
@@ -88,11 +111,28 @@ function CatalogEditor({ kind, row, onClose, onSave }: { kind: CatalogKind; row:
   const [endedOn, setEndedOn] = useState(row.ended_on || "");
   const [timings, setTimings] = useState(row.timings || "");
   const [closed, setClosed] = useState(Boolean(row.closed));
+  const [courseId, setCourseId] = useState(row.course_id || "");
+  const [branchId, setBranchId] = useState(row.branch_id || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const schedule = kind === "batches";
   const withNotes = kind === "courses";
-  const dirty = name.trim() !== row.name || archived !== row.archived || (schedule && closed !== Boolean(row.closed)) || (withNotes && notes !== (row.notes || "")) || (schedule && (startedOn !== (row.started_on || "") || endedOn !== (row.ended_on || "") || timings !== (row.timings || "")));
+  const courses = catalog ? byName(catalog.courses.filter((item) => !item.archived || item.id === (row.course_id || ""))) : [];
+  const branchesForCourse = catalog
+    ? byName(
+      catalog.branches.filter((branch) => {
+        if (branch.archived && branch.id !== (row.branch_id || "")) return false;
+        return catalog.offerings.some((item) => item.course_id === courseId && item.branch_id === branch.id);
+      }),
+    )
+    : [];
+  const dirty = name.trim() !== row.name || archived !== row.archived || (schedule && closed !== Boolean(row.closed)) || (withNotes && notes !== (row.notes || "")) || (schedule && (startedOn !== (row.started_on || "") || endedOn !== (row.ended_on || "") || timings !== (row.timings || "") || courseId !== (row.course_id || "") || branchId !== (row.branch_id || "")));
+
+  function chooseCourse(id: string) {
+    setCourseId(id);
+    const offered = catalog?.offerings.filter((item) => item.course_id === id).map((item) => item.branch_id) || [];
+    if (!offered.includes(branchId)) setBranchId(offered.find(Boolean) || "");
+  }
 
   function requestClose() {
     if (dirty && !window.confirm("Discard the unsaved changes?")) return;
@@ -106,6 +146,10 @@ function CatalogEditor({ kind, row, onClose, onSave }: { kind: CatalogKind; row:
       setError("Enter a name.");
       return;
     }
+    if (schedule && (!courseId || !branchId)) {
+      setError("Choose a course and a branch.");
+      return;
+    }
     const body: CatalogChange = {};
     if (trimmed !== row.name) body.name = trimmed;
     if (archived !== row.archived) body.archived = archived;
@@ -114,6 +158,8 @@ function CatalogEditor({ kind, row, onClose, onSave }: { kind: CatalogKind; row:
     if (schedule && endedOn !== (row.ended_on || "")) body.ended_on = endedOn;
     if (schedule && timings !== (row.timings || "")) body.timings = timings;
     if (schedule && closed !== Boolean(row.closed)) body.closed = closed;
+    if (schedule && courseId !== (row.course_id || "")) body.course_id = courseId;
+    if (schedule && branchId !== (row.branch_id || "")) body.branch_id = branchId;
     if (!Object.keys(body).length) {
       onClose();
       return;
@@ -136,6 +182,22 @@ function CatalogEditor({ kind, row, onClose, onSave }: { kind: CatalogKind; row:
         <label>Name
           <input value={name} aria-label={`${label} name`} onChange={(event) => setName(event.target.value)} />
         </label>
+        {schedule && catalog ? (
+          <>
+            <label>Course
+              <select value={courseId} aria-label="Course" onChange={(event) => chooseCourse(event.target.value)}>
+                {courses.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+            </label>
+            <label>Branch
+              <select value={branchId} aria-label="Branch" onChange={(event) => setBranchId(event.target.value)}>
+                {branchesForCourse.length ? null : <option value="">Offer this course at a branch first</option>}
+                {branchesForCourse.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+            </label>
+            <p className="meta">Moving the batch updates enrollments and related records to the chosen branch and course. End teaching assignments before changing course.</p>
+          </>
+        ) : null}
         <label>Status
           <select value={archived ? "archived" : "active"} aria-label="Status" onChange={(event) => setArchived(event.target.value === "archived")}>
             <option value="active">Active</option>
@@ -177,7 +239,7 @@ function CatalogEditor({ kind, row, onClose, onSave }: { kind: CatalogKind; row:
         {error ? <p className="error" role="alert">{error}</p> : null}
         <div className="dialog-actions">
           <button type="button" className="quiet" onClick={requestClose}>Cancel</button>
-          <button type="submit" disabled={saving || !name.trim()}>{saving ? "Saving…" : "Save"}</button>
+          <button type="submit" disabled={saving || !name.trim() || (schedule && (!courseId || !branchId))}>{saving ? "Saving…" : "Save"}</button>
         </div>
       </form>
     </StudentDialog>
@@ -834,7 +896,7 @@ export function CoursePage({ session }: { session: Session }) {
         </>
       ) : null}
       {editing ? (
-        <CatalogEditor kind={editing.kind} row={editing.row} onClose={() => setEditing(null)} onSave={(body) => correct(editing.kind, editing.row, body)} />
+        <CatalogEditor kind={editing.kind} row={editing.row} catalog={catalog} onClose={() => setEditing(null)} onSave={(body) => correct(editing.kind, editing.row, body)} />
       ) : null}
       {addingItemFor ? (
         <ItemForm subject={addingItemFor} kinds={kinds} onClose={() => setAddingItemFor(null)} onSaved={async (label) => { notify(`Added ${label} to ${addingItemFor.name}.`); setAddingItemFor(null); await reload(); }} />
@@ -1137,7 +1199,7 @@ export function BatchesPage({ session }: { session: Session }) {
       )}
       <Pager from={view.from} to={view.to} total={view.total} page={view.page} pages={view.pages} onPage={(page) => write({ page: page <= 1 ? "" : String(page) }, false)} />
       {editing ? (
-        <CatalogEditor kind="batches" row={editing} onClose={() => setEditing(null)} onSave={(body) => correct("batches", editing, body)} />
+        <CatalogEditor kind="batches" row={editing} catalog={catalog} onClose={() => setEditing(null)} onSave={(body) => correct("batches", editing, body)} />
       ) : null}
       {adding ? (
         <BatchForm

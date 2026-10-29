@@ -263,3 +263,99 @@ def test_academics_story_locks_identity_archive_scope_and_revision(client):
     _login(client, "reader@iam.test")
     denied = client.post(f"/api/v1/courses/{course_id}/subjects", json={"name": "History"})
     assert denied.status_code == 403
+
+
+def test_batch_edit_can_move_branch_and_course(client):
+    bootstrap(client)
+    database = sync_db(client)
+    institute_id = database.institutes.find_one()["_id"]
+
+    north = client.post("/api/v1/branches", json={"name": "North"})
+    south = client.post("/api/v1/branches", json={"name": "South"})
+    science = client.post("/api/v1/courses", json={"name": "Science"})
+    commerce = client.post("/api/v1/courses", json={"name": "Commerce"})
+    assert north.status_code == south.status_code == science.status_code == commerce.status_code == 200
+    north_id = north.json()["id"]
+    south_id = south.json()["id"]
+    science_id = science.json()["id"]
+    commerce_id = commerce.json()["id"]
+    for branch_id, course_id in (
+        (north_id, science_id),
+        (south_id, science_id),
+        (south_id, commerce_id),
+    ):
+        offered = client.post(f"/api/v1/branches/{branch_id}/courses", json={"course_id": course_id})
+        assert offered.status_code == 200, offered.text
+
+    batch = client.post(
+        f"/api/v1/branches/{north_id}/batches",
+        json={"course_id": science_id, "name": "September 2026 morning"},
+    )
+    assert batch.status_code == 200, batch.text
+    batch_id = batch.json()["id"]
+    student_id = str(ObjectId())
+    database.students.insert_one({
+        "_id": student_id,
+        "institute_id": institute_id,
+        "display_name": "Meera Nair",
+        "student_code": "IAM-000020",
+        "name_key": "meera nair",
+    })
+    database.enrollments.insert_one({
+        "_id": str(ObjectId()),
+        "institute_id": institute_id,
+        "student_id": student_id,
+        "branch_id": north_id,
+        "course_id": science_id,
+        "batch_id": batch_id,
+        "started_on": "2026-09-01",
+    })
+
+    moved_branch = client.patch(
+        f"/api/v1/catalog/batch/{batch_id}",
+        json={"branch_id": south_id, "expected_revision": 0},
+    )
+    assert moved_branch.status_code == 200, moved_branch.text
+    stored = database.batches.find_one({"_id": batch_id})
+    assert stored["branch_id"] == south_id
+    assert stored["course_id"] == science_id
+    enrollment = database.enrollments.find_one({"batch_id": batch_id})
+    assert enrollment["branch_id"] == south_id
+    assert enrollment["course_id"] == science_id
+
+    physics = client.post(f"/api/v1/courses/{science_id}/subjects", json={"name": "Physics"})
+    assert physics.status_code == 200
+    teacher = client.post("/api/v1/teachers", json={"name": "Desk teacher"})
+    assert teacher.status_code == 200
+    assigned = client.post(
+        f"/api/v1/batches/{batch_id}/assignments",
+        json={"teacher_id": teacher.json()["id"], "subject_id": physics.json()["id"], "started_on": "2026-09-01"},
+    )
+    assert assigned.status_code == 200, assigned.text
+    blocked = client.patch(
+        f"/api/v1/catalog/batch/{batch_id}",
+        json={"course_id": commerce_id, "expected_revision": 1},
+    )
+    assert blocked.status_code == 422
+    assert blocked.json()["error"]["code"] == "batch.course"
+
+    ended = client.post(
+        f"/api/v1/batches/{batch_id}/assignments/{assigned.json()['id']}/end",
+        json={"ended_on": "2026-09-30"},
+    )
+    assert ended.status_code == 200, ended.text
+    moved_course = client.patch(
+        f"/api/v1/catalog/batch/{batch_id}",
+        json={"course_id": commerce_id, "expected_revision": 1},
+    )
+    assert moved_course.status_code == 200, moved_course.text
+    stored = database.batches.find_one({"_id": batch_id})
+    assert stored["branch_id"] == south_id
+    assert stored["course_id"] == commerce_id
+    enrollment = database.enrollments.find_one({"batch_id": batch_id})
+    assert enrollment["branch_id"] == south_id
+    assert enrollment["course_id"] == commerce_id
+    workspace = client.get(f"/api/v1/batches/{batch_id}")
+    assert workspace.status_code == 200, workspace.text
+    assert workspace.json()["branch_id"] == south_id
+    assert workspace.json()["course_id"] == commerce_id

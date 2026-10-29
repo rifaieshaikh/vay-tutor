@@ -73,10 +73,15 @@ type BatchChange = {
   started_on?: string;
   ended_on?: string;
   timings?: string;
+  branch_id?: string;
+  course_id?: string;
   expected_revision?: number;
 };
 type TeacherOption = { id: string; name: string };
 type StudentHit = { id: string; display_name: string; student_code: string };
+type CatalogOption = { id: string; name: string; archived?: boolean };
+type CatalogOffering = { branch_id?: string; course_id?: string };
+type PlacementCatalog = { branches: CatalogOption[]; courses: CatalogOption[]; offerings: CatalogOffering[] };
 
 function contextQuery(board: Workspace, extra: Record<string, string> = {}) {
   const next = new URLSearchParams();
@@ -667,15 +672,69 @@ function BatchEditor({
   const [startedOn, setStartedOn] = useState(board.started_on || "");
   const [endedOn, setEndedOn] = useState(board.ended_on || "");
   const [timings, setTimings] = useState(board.timings || "");
+  const [courseId, setCourseId] = useState(board.course_id || "");
+  const [branchId, setBranchId] = useState(board.branch_id || "");
+  const [catalog, setCatalog] = useState<PlacementCatalog | null>(null);
+  const [catalogError, setCatalogError] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const currentCourse = board.course_id
+    ? { id: board.course_id, name: board.course_name || "Current course" }
+    : null;
+  const currentBranch = board.branch_id
+    ? { id: board.branch_id, name: board.branch_name || "Current branch" }
+    : null;
+  const courses = (() => {
+    const rows = [...(catalog?.courses || [])].filter((item) => !item.archived || item.id === board.course_id);
+    if (currentCourse && !rows.some((item) => item.id === currentCourse.id)) rows.push(currentCourse);
+    return rows.sort((left, right) => left.name.localeCompare(right.name));
+  })();
+  const branchesForCourse = (() => {
+    const offered = new Set(
+      (catalog?.offerings || [])
+        .filter((item) => item.course_id === courseId)
+        .map((item) => item.branch_id || ""),
+    );
+    const rows = [...(catalog?.branches || [])].filter((branch) => {
+      if (branch.archived && branch.id !== board.branch_id) return false;
+      return offered.has(branch.id);
+    });
+    if (branchId && !rows.some((item) => item.id === branchId)) {
+      const named = (catalog?.branches || []).find((item) => item.id === branchId)
+        || (currentBranch && currentBranch.id === branchId ? currentBranch : null);
+      rows.push(named || { id: branchId, name: "Selected branch" });
+    }
+    return rows.sort((left, right) => left.name.localeCompare(right.name));
+  })();
   const dirty =
     name.trim() !== board.name
     || archived !== Boolean(board.archived)
     || closed !== Boolean(board.closed)
     || startedOn !== (board.started_on || "")
     || endedOn !== (board.ended_on || "")
-    || timings !== (board.timings || "");
+    || timings !== (board.timings || "")
+    || courseId !== (board.course_id || "")
+    || branchId !== (board.branch_id || "");
+
+  useEffect(() => {
+    let cancelled = false;
+    api<PlacementCatalog>("/api/v1/catalog")
+      .then((next) => {
+        if (cancelled) return;
+        setCatalog(next);
+        setCatalogError("");
+      })
+      .catch((reason: Error) => {
+        if (!cancelled) setCatalogError(reason.message || "Could not load courses and branches.");
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  function chooseCourse(id: string) {
+    setCourseId(id);
+    const offered = (catalog?.offerings || []).filter((item) => item.course_id === id).map((item) => item.branch_id || "");
+    if (offered.length && !offered.includes(branchId)) setBranchId(offered.find(Boolean) || "");
+  }
 
   function requestClose() {
     if (dirty && !window.confirm("Discard the unsaved changes?")) return;
@@ -689,6 +748,10 @@ function BatchEditor({
       setError("Enter a name.");
       return;
     }
+    if (!courseId || !branchId) {
+      setError("Choose a course and a branch.");
+      return;
+    }
     const body: BatchChange = {};
     if (trimmed !== board.name) body.name = trimmed;
     if (archived !== Boolean(board.archived)) body.archived = archived;
@@ -696,6 +759,8 @@ function BatchEditor({
     if (endedOn !== (board.ended_on || "")) body.ended_on = endedOn;
     if (timings !== (board.timings || "")) body.timings = timings;
     if (closed !== Boolean(board.closed)) body.closed = closed;
+    if (courseId !== (board.course_id || "")) body.course_id = courseId;
+    if (branchId !== (board.branch_id || "")) body.branch_id = branchId;
     if (!Object.keys(body).length) {
       onClose();
       return;
@@ -718,6 +783,20 @@ function BatchEditor({
         <label>Name
           <input value={name} aria-label="Batch name" onChange={(event) => setName(event.target.value)} />
         </label>
+        <label>Course
+          <select value={courseId} aria-label="Course" onChange={(event) => chooseCourse(event.target.value)}>
+            {!courses.length ? <option value={courseId || ""}>{catalog ? "Add a course first" : "Loading courses…"}</option> : null}
+            {courses.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+        </label>
+        <label>Branch
+          <select value={branchId} aria-label="Branch" onChange={(event) => setBranchId(event.target.value)}>
+            {branchesForCourse.length ? null : <option value="">{catalog ? "Offer this course at a branch first" : "Loading branches…"}</option>}
+            {branchesForCourse.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+        </label>
+        <p className="meta">Moving the batch updates enrollments and related records to the chosen branch and course. End teaching assignments before changing course.</p>
+        {catalogError ? <p className="error" role="alert">{catalogError}</p> : null}
         <label>Status
           <select value={archived ? "archived" : "active"} aria-label="Status" onChange={(event) => setArchived(event.target.value === "archived")}>
             <option value="active">Active</option>
@@ -733,8 +812,7 @@ function BatchEditor({
         ) : null}
         <label>
           <input type="checkbox" checked={closed} aria-label="Closed" onChange={(event) => setClosed(event.target.checked)} /> Closed
-        </label>
-        <p className="meta">Closing the batch keeps new enrollments out. The end date stays a date on the batch.</p>
+        </label>        <p className="meta">Closing the batch keeps new enrollments out. The end date stays a date on the batch.</p>
         <div className="form-grid">
           <label>Start date
             <input type="date" value={startedOn} aria-label="Start date" onChange={(event) => setStartedOn(event.target.value)} />
@@ -750,7 +828,7 @@ function BatchEditor({
         {error ? <p className="error" role="alert">{error}</p> : null}
         <div className="dialog-actions">
           <button type="button" className="quiet" onClick={requestClose}>Cancel</button>
-          <button type="submit" disabled={saving || !name.trim()}>{saving ? "Saving…" : "Save"}</button>
+          <button type="submit" disabled={saving || !name.trim() || !courseId || !branchId}>{saving ? "Saving…" : "Save"}</button>
         </div>
       </form>
     </StudentDialog>

@@ -1065,6 +1065,8 @@ class CatalogPatch(BaseModel):
     started_on: str | None = None
     ended_on: str | None = None
     timings: str | None = None
+    branch_id: str | None = None
+    course_id: str | None = None
     expected_revision: int | None = None
     bands: list[BandBody] | None = None
 
@@ -1264,6 +1266,7 @@ async def patch_catalog(request: Request, kind: str, record_id: str, body: Catal
                     unsets["timings"] = ""
         if "closed" in sent and bool(body.closed) != bool(record.get("closed")):
             updates["closed"] = bool(body.closed)
+        await _apply_batch_placement(request, user, record, body, sent, updates)
     if not updates and not unsets:
         raise AppError(422, "catalog.empty", "Nothing changed to save.")
     updates["revision"] = int(record.get("revision") or 0) + 1
@@ -1276,6 +1279,8 @@ async def patch_catalog(request: Request, kind: str, record_id: str, body: Catal
         await db(request)[collection].update_one({"_id": record_id}, change)
     except DuplicateKeyError:
         raise AppError(409, "catalog.exists", "That name is already used.") from None
+    if kind == "batch":
+        await _cascade_batch_placement(request, record_id, updates)
     await db(request).audit_events.insert_one(
         {
             "_id": str(ObjectId()),
@@ -1294,6 +1299,90 @@ async def patch_catalog(request: Request, kind: str, record_id: str, body: Catal
         payload["bands"] = public_bands(updates["bands"]) if "bands" in updates else None
         await refresh_course_marksheets(db(request), user["institute_id"], record_id)
     return payload
+
+
+async def _apply_batch_placement(
+    request: Request,
+    user: dict,
+    record: dict,
+    body: CatalogPatch,
+    sent: set[str],
+    updates: dict,
+) -> None:
+    if "branch_id" not in sent and "course_id" not in sent:
+        return
+    branch_id = str(body.branch_id or "").strip() if "branch_id" in sent else str(record.get("branch_id") or "")
+    course_id = str(body.course_id or "").strip() if "course_id" in sent else str(record.get("course_id") or "")
+    if not branch_id or not course_id:
+        raise AppError(422, "enrollment.context", "Choose a branch and a course.")
+    if branch_id == str(record.get("branch_id") or "") and course_id == str(record.get("course_id") or ""):
+        return
+    database = db(request)
+    branch = await database.branches.find_one({"_id": branch_id, "institute_id": user["institute_id"]})
+    course = await database.courses.find_one({"_id": course_id, "institute_id": user["institute_id"]})
+    offering = await database.offerings.find_one({
+        "institute_id": user["institute_id"],
+        "branch_id": branch_id,
+        "course_id": course_id,
+    })
+    if branch is None or course is None or offering is None:
+        raise AppError(422, "enrollment.context", "Offer the course at this branch before moving the batch.")
+    _reject_archived(branch, "This branch is archived. Move the batch to an active branch.")
+    _reject_archived(course, "This course is archived. Move the batch to an active course.")
+    target = {
+        "institute_id": user["institute_id"],
+        "branch_id": branch_id,
+        "course_id": course_id,
+        "batch_id": record["_id"],
+    }
+    if not _grant_edits(user, target, block_subject=True, block_paper=True):
+        raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
+    if course_id != str(record.get("course_id") or ""):
+        teachers = await database.teachers.find({
+            "institute_id": user["institute_id"],
+            "assignments": {
+                "$elemMatch": {
+                    "batch_id": record["_id"],
+                    "status": {"$ne": "ended"},
+                }
+            },
+        }).to_list(length=500)
+        subject_ids = {
+            str(item.get("subject_id") or "")
+            for teacher in teachers
+            for item in teacher.get("assignments") or []
+            if item.get("batch_id") == record["_id"] and item.get("status") != "ended" and item.get("subject_id")
+        }
+        if subject_ids:
+            subjects = await database.subjects.find({"_id": {"$in": list(subject_ids)}}).to_list(length=500)
+            foreign = [row for row in subjects if row.get("course_id") != course_id]
+            if foreign:
+                raise AppError(
+                    422,
+                    "batch.course",
+                    "End teaching assignments for this batch before moving it to another course.",
+                )
+    updates["branch_id"] = branch_id
+    updates["course_id"] = course_id
+    updates["offering_id"] = offering["_id"]
+
+
+async def _cascade_batch_placement(request: Request, batch_id: str, updates: dict) -> None:
+    placement = {key: updates[key] for key in ("branch_id", "course_id") if key in updates}
+    if not placement:
+        return
+    database = db(request)
+    await database.enrollments.update_many({"batch_id": batch_id}, {"$set": placement})
+    await database.admissions.update_many({"batch_id": batch_id}, {"$set": placement})
+    sole = {"batch_ids": [batch_id]}
+    await database.marksheets.update_many(sole, {"$set": placement})
+    await database.assessments.update_many(sole, {"$set": placement})
+    await database.exams.update_many(sole, {"$set": placement})
+    await database.teachers.update_many(
+        {"assignments.batch_id": batch_id},
+        {"$set": {f"assignments.$[item].{key}": value for key, value in placement.items()}},
+        array_filters=[{"item.batch_id": batch_id}],
+    )
 
 
 def _catalog_row(item: dict) -> dict:
