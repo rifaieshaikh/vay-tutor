@@ -1019,19 +1019,17 @@ async def withdraw_route(request: Request, marksheet_id: str, body: ReasonBody) 
 @router.patch("/marksheets/{marksheet_id}")
 async def patch_marksheet(request: Request, marksheet_id: str, body: MarksheetPatch) -> dict:
     wants_bands = "bands" in body.model_fields_set
-    if body.exam_date and wants_bands:
-        _user, sheet = await _editable(request, marksheet_id, "marksheet.edit_draft")
-    elif wants_bands:
-        sheet = await db(request).marksheets.find_one({"_id": marksheet_id})
-        action = "marksheet.edit_draft" if sheet and sheet.get("status") == "draft" else "marksheet.correct"
+    wants_date = bool(body.exam_date)
+    sheet = await db(request).marksheets.find_one({"_id": marksheet_id})
+    draft = bool(sheet and sheet.get("status") == "draft")
+    if wants_bands or wants_date:
+        action = "marksheet.edit_draft" if draft else "marksheet.correct"
         _user, sheet = await _editable(request, marksheet_id, action)
     else:
         _user, sheet = await _editable(request, marksheet_id, "marksheet.edit_draft")
     updates = {}
     unset = {}
-    if body.exam_date:
-        if sheet.get("status") != "draft":
-            raise AppError(422, "marksheet.state", "Only a draft can be edited.")
+    if wants_date:
         updates["exam_date"] = body.exam_date
     if wants_bands:
         if body.bands is None:
@@ -1044,14 +1042,22 @@ async def patch_marksheet(request: Request, marksheet_id: str, body: MarksheetPa
             except ValueError as error:
                 raise AppError(422, "policy.bands", str(error)) from None
     if updates or unset:
-        if body.exam_date:
+        if wants_date:
             updates["edit_version"] = sheet.get("edit_version", 0) + 1
         change = {}
         if updates:
             change["$set"] = updates
         if unset:
             change["$unset"] = unset
-        await db(request).marksheets.update_one({"_id": sheet["_id"]}, change)
+        database = db(request)
+        await database.marksheets.update_one({"_id": sheet["_id"]}, change)
+        if wants_date:
+            dated = {"exam_date": body.exam_date}
+            if sheet.get("exam_id"):
+                await database.exams.update_one({"_id": sheet["exam_id"]}, {"$set": dated})
+            if sheet.get("assessment_id"):
+                await database.assessments.update_one({"_id": sheet["assessment_id"]}, {"$set": dated})
+            await database.results.update_many({"marksheet_id": sheet["_id"]}, {"$set": dated})
     from app.assessments.marks import refresh_sheet_marks
     from app.calculating import public_bands
 

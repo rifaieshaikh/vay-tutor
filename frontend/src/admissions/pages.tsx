@@ -557,7 +557,7 @@ export function AdmissionPage({ session }: { session: Session }) {
           {canManage && open && !editing ? <button type="button" className="secondary" onClick={() => setEditing(true)}>Edit</button> : null}
           {canManage && open ? <button type="button" className="secondary" onClick={() => setClosing(true)}>Close</button> : null}
           {canManage && admission.status === "closed" ? <button type="button" onClick={() => setReopening(true)}>Reopen</button> : null}
-          {canManage && admission.status === "converted" ? <button type="button" className="secondary" onClick={() => { setCorrecting(true); setEditing(true); }}>Correct source record</button> : null}
+          {canManage && admission.status === "converted" ? <button type="button" className="secondary" onClick={() => { setCorrecting(true); setEditing(true); setFocusField("note"); }}>Correct source record</button> : null}
           {admission.student_id ? <Link to={`/students/${admission.student_id}`}>Open student</Link> : null}
           {admission.batch_id ? <Link to={`/batches/${admission.batch_id}?branch_id=${admission.branch_id || ""}&course_id=${admission.course_id}&batch_id=${admission.batch_id}`}>Open batch</Link> : null}
         </div>
@@ -888,6 +888,11 @@ function AdmissionForm({ courses, initial, onSaved, onCancel, focusField = "", c
 
   return (
       <form className="form-grid" onSubmit={save}>
+        {correction ? (
+          <label className="span-2">What this correction changes
+            <textarea id="field-note" required value={correctionNote} aria-label="What this correction changes" onChange={(event) => setCorrectionNote(event.target.value)} placeholder="Required. Short note of what you are correcting." />
+          </label>
+        ) : null}
         <h2 className="span-2">Contact</h2>
         <label>Name
           <input value={name} required onChange={(event) => setName(event.target.value)} />
@@ -975,13 +980,11 @@ function AdmissionForm({ courses, initial, onSaved, onCancel, focusField = "", c
         <div className="span-2">
           <button type="button" className="quiet" onClick={() => setRecords((current) => [...current, { ...EMPTY_RECORD }])}>Add academic record</button>
         </div>
-        {correction ? <label className="span-2">What this correction changes
-          <textarea id="field-note" required value={correctionNote} onChange={(event) => setCorrectionNote(event.target.value)} />
-        </label> : null}
         <label className="span-2">Why this is another application
           <input id="field-episode_note" value={episodeNote} onChange={(event) => setEpisodeNote(event.target.value)} />
         </label>
         {error ? <p className="error span-2" role="alert">{error}</p> : null}
+        {correction && !correctionNote.trim() ? <p className="meta span-2" role="status">Enter what this correction changes before saving.</p> : null}
         <div className="dialog-actions span-2">
           {onCancel ? <button type="button" className="secondary" onClick={() => { if (confirmDiscard(dirty)) onCancel(); }}>Cancel</button> : <Link className="secondary" to="/students/admissions">Cancel</Link>}
           <button type="submit" disabled={saving || !name.trim() || !courseId || questionsFailed || businessFailed || (correction && !correctionNote.trim())}>{saving ? "Saving…" : correction ? "Save correction" : "Save"}</button>

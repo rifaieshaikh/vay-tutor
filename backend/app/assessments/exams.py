@@ -613,6 +613,11 @@ async def patch_exam(request: Request, exam_id: str, body: ExamPatch) -> dict:
     await database.exams.update_one({"_id": exam_id}, {"$set": changes})
     await database.marksheets.update_one({"_id": exam.get("marksheet_id")}, {"$set": changes})
     await database.assessments.update_one({"_id": exam.get("assessment_id")}, {"$set": changes})
+    if "exam_date" in changes and exam.get("marksheet_id"):
+        await database.results.update_many(
+            {"marksheet_id": exam["marksheet_id"]},
+            {"$set": {"exam_date": changes["exam_date"]}},
+        )
     if "maximum" in changes:
         await database.attempts.update_one({"_id": exam.get("attempt_id")}, {"$set": {"maximum": changes["maximum"]}})
     return {"id": exam_id, **changes}

@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const {
@@ -46,7 +48,24 @@ test("the host certificate names this computer and localhost", () => {
   assert.equal(names.some((item) => item.ip === "127.0.0.1"), true);
 });
 
-test("PYTHONHOME follows the standalone layout under bin", () => {
-  assert.equal(pythonHome(path.join("python", "python.exe")), path.join("python"));
-  assert.equal(pythonHome(path.join("python", "python")), path.join("python"));
+test("PYTHONHOME is only set for the standalone layout under bin", () => {
+  assert.equal(pythonHome(path.join("python", "python.exe")), null);
+  assert.equal(pythonHome(path.join("python", "python")), null);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "vay-py-"));
+  fs.mkdirSync(path.join(root, "bin"));
+  fs.mkdirSync(path.join(root, "lib"));
+  assert.equal(pythonHome(path.join(root, "bin", "python3")), root);
+  assert.equal(serviceEnvironment({
+    dataDir: "/data",
+    frontendDir: "/frontend",
+    backendDir: "/backend",
+    pythonBin: path.join("python", "python.exe"),
+  }, 8443).PYTHONHOME, undefined);
+  assert.equal(serviceEnvironment({
+    dataDir: "/data",
+    frontendDir: "/frontend",
+    backendDir: "/backend",
+    pythonBin: path.join(root, "bin", "python3"),
+  }, 8443).PYTHONHOME, root);
+  fs.rmSync(root, { recursive: true, force: true });
 });

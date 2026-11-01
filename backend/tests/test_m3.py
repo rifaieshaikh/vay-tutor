@@ -3,6 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from bson import ObjectId
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
@@ -479,3 +480,69 @@ def test_modernization_acceptance_covers_preview_counts_cancel_and_scope(client)
     )
     assert forbidden.status_code == 403
     assert client.post(f"/api/v1/imports/{retry_id}/commit").status_code == 403
+
+
+def test_exam_date_can_be_changed_after_publish(client):
+    bootstrap(client)
+    database = sync_db(client)
+    institute_id = database.institutes.find_one()["_id"]
+    branch = client.post("/api/v1/branches", json={"name": "Tirur"})
+    course = client.post("/api/v1/courses", json={"name": "CA Foundation"})
+    assert client.post(f"/api/v1/branches/{branch.json()['id']}/courses", json={"course_id": course.json()["id"]}).status_code == 200
+    batch = client.post(
+        f"/api/v1/branches/{branch.json()['id']}/batches",
+        json={"course_id": course.json()["id"], "name": "September 2026"},
+    )
+    subject = client.post(f"/api/v1/courses/{course.json()['id']}/subjects", json={"name": "Accounting"})
+    paper = client.post(f"/api/v1/subjects/{subject.json()['id']}/items", json={"kind": "paper", "name": "Paper 1"})
+    assert batch.status_code == subject.status_code == paper.status_code == 200
+    student_id = str(ObjectId())
+    database.students.insert_one({
+        "_id": student_id,
+        "institute_id": institute_id,
+        "display_name": "Meera Nair",
+        "student_code": "IAM-000099",
+        "name_key": "meera nair",
+    })
+    database.enrollments.insert_one({
+        "_id": str(ObjectId()),
+        "institute_id": institute_id,
+        "student_id": student_id,
+        "branch_id": branch.json()["id"],
+        "course_id": course.json()["id"],
+        "batch_id": batch.json()["id"],
+    })
+    exam = client.post(
+        "/api/v1/exams",
+        json={
+            "title": "Unit 1",
+            "exam_date": "2026-10-01",
+            "maximum": 20,
+            "subject_id": subject.json()["id"],
+            "scope": {"kind": "subject", "item_ids": []},
+            "batch_ids": [batch.json()["id"]],
+        },
+    )
+    assert exam.status_code == 200, exam.text
+    sheet_id = exam.json()["marksheet_id"]
+    exam_id = exam.json()["id"]
+    assert client.post(
+        f"/api/v1/marksheets/{sheet_id}/results",
+        json={"student_id": student_id, "status": "scored", "score": 16},
+    ).status_code == 200
+    assert client.post(f"/api/v1/marksheets/{sheet_id}/publish").status_code == 200
+
+    moved = client.patch(f"/api/v1/exams/{exam_id}", json={"exam_date": "2026-10-15"})
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["exam_date"] == "2026-10-15"
+    detail = client.get(f"/api/v1/marksheets/{sheet_id}").json()
+    assert detail["status"] == "published"
+    assert detail["exam_date"] == "2026-10-15"
+    assert database.exams.find_one({"_id": exam_id})["exam_date"] == "2026-10-15"
+    assert database.assessments.find_one({"_id": database.marksheets.find_one({"_id": sheet_id})["assessment_id"]})["exam_date"] == "2026-10-15"
+    assert all(row["exam_date"] == "2026-10-15" for row in database.results.find({"marksheet_id": sheet_id}))
+
+    again = client.patch(f"/api/v1/marksheets/{sheet_id}", json={"exam_date": "2026-10-20"})
+    assert again.status_code == 200, again.text
+    assert again.json()["exam_date"] == "2026-10-20"
+    assert database.exams.find_one({"_id": exam_id})["exam_date"] == "2026-10-20"

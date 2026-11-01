@@ -58,20 +58,24 @@ function withBinaryPath(bin, env) {
   const directory = path.dirname(bin);
   const separator = process.platform === "win32" ? ";" : ":";
   const current = env.PATH || env.Path || "";
-  return { ...env, PATH: `${directory}${separator}${current}` };
+  const next = { ...env, PATH: `${directory}${separator}${current}` };
+  if (process.platform === "win32") delete next.Path;
+  return next;
 }
 
 function pythonHome(pythonBin) {
+  // Standalone (Mac) layout keeps lib/ under the install root. Windows embeddable
+  // Python uses pythonXY._pth; setting PYTHONHOME there breaks imports.
   const directory = path.dirname(pythonBin);
   if (path.basename(directory) === "bin") {
     const root = path.dirname(directory);
     if (fs.existsSync(path.join(root, "lib"))) return root;
   }
-  return directory;
+  return null;
 }
 
 function serviceEnvironment(paths, port, mongoPort = MONGO_PORT) {
-  return withBinaryPath(paths.pythonBin, {
+  const env = withBinaryPath(paths.pythonBin, {
     ...process.env,
     MONGO_URL: mongoUrl(mongoPort),
     DB_NAME: "vay_tutor",
@@ -82,10 +86,19 @@ function serviceEnvironment(paths, port, mongoPort = MONGO_PORT) {
     WORKER_ENABLED: "1",
     PYTHONPATH: paths.backendDir,
     PYTHONNOUSERSITE: "1",
-    PYTHONHOME: pythonHome(paths.pythonBin),
     VAY_PORT: String(port),
     VAY_MONGO_PORT: String(mongoPort),
   });
+  for (const key of Object.keys(env)) {
+    if (key === "ELECTRON_RUN_AS_NODE" || key.startsWith("ELECTRON_")) delete env[key];
+  }
+  const home = pythonHome(paths.pythonBin);
+  if (home) env.PYTHONHOME = home;
+  else {
+    delete env.PYTHONHOME;
+    delete env.PythonHome;
+  }
+  return env;
 }
 
 function apiArguments(paths, port) {
@@ -150,19 +163,20 @@ function appendLog(dataDir, message) {
   }
 }
 
-function readLogTail(dataDir, limit = 12) {
-  const files = ["host.log", "api.log", "mongo.log"].map((name) => path.join(dataDir, "logs", name));
-  for (const file of files) {
+function readLogTail(dataDir, limit = 20) {
+  const chunks = [];
+  for (const name of ["api.log", "mongo.log", "host.log"]) {
+    const file = path.join(dataDir, "logs", name);
     try {
       if (!fs.existsSync(file)) continue;
       const lines = fs.readFileSync(file, "utf8").trim().split(/\r?\n/).filter(Boolean);
       if (lines.length === 0) continue;
-      return lines.slice(-limit).join("\n");
+      chunks.push(`--- ${name} ---\n${lines.slice(-limit).join("\n")}`);
     } catch {
       // Try the next log.
     }
   }
-  return "";
+  return chunks.join("\n\n");
 }
 
 function readinessError(dataDir, reason) {
@@ -194,6 +208,7 @@ function ensureCertificate(dataDir) {
 }
 
 function spawnLogged(command, args, env, logPath, cwd) {
+  fs.mkdirSync(path.dirname(logPath), { recursive: true });
   const output = fs.openSync(logPath, "a");
   const child = spawn(command, args, {
     detached: true,
@@ -202,8 +217,15 @@ function spawnLogged(command, args, env, logPath, cwd) {
     env,
     cwd,
   });
+  const state = { pid: child.pid, exitCode: null, spawnError: null };
+  child.once("error", (error) => {
+    state.spawnError = error;
+  });
+  child.once("exit", (code) => {
+    state.exitCode = code;
+  });
   child.unref();
-  return child.pid;
+  return state;
 }
 
 function rememberPid(dataDir, name, pid) {
@@ -375,15 +397,25 @@ async function startPackagedMongo(paths, port) {
     );
   }
   appendLog(paths.dataDir, `Starting the packaged MongoDB on 127.0.0.1:${port}.`);
-  const pid = spawnLogged(
+  const child = spawnLogged(
     paths.mongoBin,
     mongoArguments(paths.dataDir, port),
     withBinaryPath(paths.mongoBin, process.env),
     path.join(paths.dataDir, "logs", "mongo.log"),
     path.dirname(paths.mongoBin),
   );
-  rememberPid(paths.dataDir, "mongo", pid);
-  await waitForPort(port);
+  rememberPid(paths.dataDir, "mongo", child.pid);
+  try {
+    await waitForPort(port, 150);
+  } catch (error) {
+    if (child.spawnError) throw readinessError(paths.dataDir, `MongoDB failed to start: ${child.spawnError.message}`);
+    if (child.exitCode !== null) {
+      throw readinessError(paths.dataDir, `MongoDB exited before it became ready (code ${child.exitCode}).`);
+    }
+    throw readinessError(paths.dataDir, error instanceof Error ? error.message : String(error));
+  }
+  // Port open is not the same as accepting commands; give WiredTiger a moment on first boot.
+  await new Promise((resolve) => setTimeout(resolve, 750));
   rememberMongoPort(paths.dataDir, port);
   return { owned: true, port };
 }
@@ -414,15 +446,16 @@ async function startHost(paths) {
   if (!(await health(port))) {
     if (await portOpen(port)) port = await nextPort(port + 1);
     appendLog(paths.dataDir, `Starting the API on port ${port}.`);
-    const pid = spawnLogged(
+    appendLog(paths.dataDir, `API command: ${paths.pythonBin} ${apiArguments(paths, port).join(" ")}`);
+    const child = spawnLogged(
       paths.pythonBin,
       apiArguments(paths, port),
       serviceEnvironment(paths, port, mongo.port),
       path.join(paths.dataDir, "logs", "api.log"),
       path.dirname(paths.pythonBin),
     );
-    rememberPid(paths.dataDir, "api", pid);
-    await waitUntilHealthy(paths.dataDir, port);
+    rememberPid(paths.dataDir, "api", child.pid);
+    await waitUntilHealthy(paths.dataDir, port, child);
   } else {
     appendLog(paths.dataDir, `The API is already healthy on port ${port}.`);
   }
@@ -473,10 +506,17 @@ async function nextPort(start) {
   throw new Error("No free port is available for the institute.");
 }
 
-async function waitUntilHealthy(dataDir, port) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+async function waitUntilHealthy(dataDir, port, child = null) {
+  // First Windows boot can spend tens of seconds importing wheels and creating indexes.
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    if (child?.spawnError) {
+      throw readinessError(dataDir, `The API failed to start: ${child.spawnError.message}`);
+    }
+    if (child && child.exitCode !== null) {
+      throw readinessError(dataDir, `The API exited before it became ready (code ${child.exitCode}).`);
+    }
     if (await health(port)) return;
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw readinessError(dataDir, `The API on port ${port} did not become ready.`);
 }

@@ -846,11 +846,13 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
   async function saveDate(event: FormEvent<HTMLFormElement>, sheet: Detail) {
     event.preventDefault();
     setError("");
+    const examDate = String(new FormData(event.currentTarget).get("exam_date") || "");
     try {
-      await api(`/api/v1/marksheets/${sheet.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ exam_date: new FormData(event.currentTarget).get("exam_date") }),
-      });
+      if (sheet.exam_id) {
+        await api(`/api/v1/exams/${sheet.exam_id}`, { method: "PATCH", body: JSON.stringify({ exam_date: examDate }) });
+      } else {
+        await api(`/api/v1/marksheets/${sheet.id}`, { method: "PATCH", body: JSON.stringify({ exam_date: examDate }) });
+      }
       await reload();
     } catch (reasonText) {
       setError(reasonText instanceof Error ? reasonText.message : "Could not save the date.");
@@ -990,15 +992,13 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
             ) : (examTypes.find((item) => item.key === detail.exam_kind)?.label || "—")}
           </dd>
         </div>
-        <div className={detail.exam_date || detail.status !== "draft" ? undefined : "span-2"}>
+        <div className="span-2">
           <dt>Exam date</dt>
           <dd>
-            {detail.exam_date ? formatDate(detail.exam_date) : detail.status === "draft" ? (
-              <form className="inline-date" onSubmit={(event) => saveDate(event, detail)}>
-                <input name="exam_date" type="date" aria-label="Exam date" required />
-                <button type="submit">Save</button>
-              </form>
-            ) : "—"}
+            <form className="inline-date" onSubmit={(event) => saveDate(event, detail)}>
+              <input name="exam_date" type="date" aria-label="Exam date" defaultValue={detail.exam_date || ""} required key={`${detail.id}:${detail.exam_date || ""}`} />
+              <button type="submit">Save</button>
+            </form>
           </dd>
         </div>
       </dl>
