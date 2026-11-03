@@ -56,23 +56,53 @@ def _clean_color(value, strict: bool = False) -> str | None:
     return None
 
 
+_ATTENTION_DEFAULT_NAMES = {"emerging", "progressing", "danger", "fifty-fifty"}
+
+
 def _default_band_rows() -> list[dict]:
     return [
-        {"name": "Emerging", "through": 40, "color": "#d6453d"},
-        {"name": "Progressing", "through": 60, "color": "#e07a2f"},
-        {"name": "Developing", "through": 75, "color": "#e6b325"},
-        {"name": "Proficient", "through": 90, "color": "#8fce6a"},
-        {"name": "Outstanding", "color": "#1b7f4a"},
+        {"name": "Emerging", "through": 40, "color": "#d6453d", "needs_attention": True},
+        {"name": "Progressing", "through": 60, "color": "#e07a2f", "needs_attention": True},
+        {"name": "Developing", "through": 75, "color": "#e6b325", "needs_attention": False},
+        {"name": "Proficient", "through": 90, "color": "#8fce6a", "needs_attention": False},
+        {"name": "Outstanding", "color": "#1b7f4a", "needs_attention": False},
     ]
+
+
+BAND_DESCRIPTIONS = {
+    "emerging": "Beginning to understand new concepts and needing regular one to one guidance",
+    "progressing": "Building understanding and completing tasks with some support and doubt clearing",
+    "developing": "Applying learning more independently and improving through practice of more questions",
+    "proficient": "Demonstrating strong understanding and practice more advanced questions including previous exam questions independently and consistently",
+    "outstanding": "Applying learning to unfamiliar challenges, explain reasoning, and explore deeper ideas.",
+}
+
+
+def band_description(name_or_key: str | None) -> str | None:
+    folded = " ".join(str(name_or_key or "").casefold().split())
+    if not folded:
+        return None
+    return BAND_DESCRIPTIONS.get(folded) or BAND_DESCRIPTIONS.get(folded.replace(" ", "-"))
+
+
+def _default_needs_attention(name: str, explicit, index: int = 0) -> bool:
+    if explicit is not None:
+        return bool(explicit)
+    folded = name.casefold()
+    if folded in _ATTENTION_DEFAULT_NAMES:
+        return True
+    if folded in {"developing", "proficient", "outstanding", "safe", "strong"}:
+        return False
+    return index in {0, 1}
 
 
 def normalize_bands(raw) -> list[dict]:
     rows = raw
     if isinstance(raw, dict):
         rows = [
-            {"name": "Danger", "through": raw.get("danger_below", 40)},
-            {"name": "Fifty-fifty", "through": raw.get("safe_above", 60)},
-            {"name": "Safe"},
+            {"name": "Danger", "through": raw.get("danger_below", 40), "needs_attention": True},
+            {"name": "Fifty-fifty", "through": raw.get("safe_above", 60), "needs_attention": True},
+            {"name": "Safe", "needs_attention": False},
         ]
     if not isinstance(rows, list) or len(rows) < 2:
         rows = _default_band_rows()
@@ -83,7 +113,7 @@ def normalize_bands(raw) -> list[dict]:
         name = " ".join(str(item.get("name") or "").split())
         if not name:
             continue
-        entry = {"name": name}
+        entry = {"name": name, "needs_attention": item.get("needs_attention")}
         if item.get("through") is not None:
             entry["through"] = item.get("through")
         color = _clean_color(item.get("color"))
@@ -96,6 +126,7 @@ def normalize_bands(raw) -> list[dict]:
     used: set[str] = set()
     for index, item in enumerate(cleaned):
         item["key"] = _band_key(item["name"], index, len(cleaned), used)
+        item["needs_attention"] = _default_needs_attention(item["name"], item.get("needs_attention"), index)
     return cleaned
 
 
@@ -117,7 +148,15 @@ def public_bands(raw) -> list[dict]:
     bands = normalize_bands(raw)
     items = []
     for index, item in enumerate(bands):
-        shown = {"key": item["key"], "name": item["name"], "phrase": band_phrase(bands, index)}
+        shown = {
+            "key": item["key"],
+            "name": item["name"],
+            "phrase": band_phrase(bands, index),
+            "needs_attention": bool(item.get("needs_attention")),
+        }
+        description = band_description(item.get("key")) or band_description(item.get("name"))
+        if description:
+            shown["description"] = description
         if index < len(bands) - 1:
             shown["through"] = item["through"]
         if item.get("color"):
@@ -148,8 +187,9 @@ def prepare_bands(rows: list[dict]) -> list[dict]:
             raise ValueError("Each band needs its own name.")
         seen.add(folded)
         last = index == len(rows) - 1
+        attention = _default_needs_attention(name, item.get("needs_attention"), index)
         if last:
-            stored.append({"name": name, **_color_field(item)})
+            stored.append({"name": name, "needs_attention": attention, **_color_field(item)})
             continue
         if item.get("through") is None:
             raise ValueError(f"Choose the line for {name}.")
@@ -162,7 +202,7 @@ def prepare_bands(rows: list[dict]) -> list[dict]:
         if previous is not None and through <= previous:
             raise ValueError("Each line must be higher than the one before it.")
         previous = through
-        stored.append({"name": name, "through": through, **_color_field(item)})
+        stored.append({"name": name, "through": through, "needs_attention": attention, **_color_field(item)})
     return stored
 
 
@@ -185,10 +225,22 @@ def band_detail(value: Decimal | None, policy: dict | None = None) -> dict:
     raw = policy.get("bands") if isinstance(policy, dict) else None
     bands = normalize_bands(raw)
     if key is None:
-        return {"band": None, "band_name": None, "band_place": None, "band_color": None}
+        return {
+            "band": None,
+            "band_name": None,
+            "band_place": None,
+            "band_color": None,
+            "needs_attention": False,
+        }
     index = next(position for position, item in enumerate(bands) if item["key"] == key)
     place = "low" if index == 0 else "high" if index == len(bands) - 1 else "middle"
-    return {"band": key, "band_name": bands[index]["name"], "band_place": place, "band_color": bands[index].get("color")}
+    return {
+        "band": key,
+        "band_name": bands[index]["name"],
+        "band_place": place,
+        "band_color": bands[index].get("color"),
+        "needs_attention": bool(bands[index].get("needs_attention")),
+    }
 
 
 def dense_ranks(rows: list[dict]) -> dict[str, int]:
@@ -256,6 +308,29 @@ def aggregate(rows: list[dict], policy: dict | None = None) -> dict:
         "passing": passing,
         "passing_threshold": threshold,
     }
+
+
+def aggregates_by_exam_kind(rows: list[dict], policy: dict | None = None) -> list[dict]:
+    """Weighted performance, coverage, and subject bands for each exam type."""
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(row.get("exam_kind") or "", []).append(row)
+    sections = []
+    for kind, kind_rows in grouped.items():
+        by_subject: dict[str, list[dict]] = {}
+        for row in kind_rows:
+            by_subject.setdefault(row.get("subject_id") or "", []).append(row)
+        sections.append(
+            {
+                "exam_kind": kind or None,
+                "performance": aggregate(kind_rows, policy),
+                "subjects": [
+                    {"subject_id": subject_id or None, **aggregate(subject_rows, policy)}
+                    for subject_id, subject_rows in by_subject.items()
+                ],
+            }
+        )
+    return sections
 
 
 def percentage_change(earlier, later) -> float | None:

@@ -55,9 +55,11 @@ class BandBody(BaseModel):
     name: str = ""
     through: float | None = None
     color: str | None = None
+    needs_attention: bool | None = None
 
 
 class MarksheetPatch(BaseModel):
+    title: str | None = None
     exam_date: str | None = None
     bands: list[BandBody] | None = None
 
@@ -1019,18 +1021,27 @@ async def withdraw_route(request: Request, marksheet_id: str, body: ReasonBody) 
 @router.patch("/marksheets/{marksheet_id}")
 async def patch_marksheet(request: Request, marksheet_id: str, body: MarksheetPatch) -> dict:
     wants_bands = "bands" in body.model_fields_set
-    wants_date = bool(body.exam_date)
+    wants_date = body.exam_date is not None
+    wants_title = body.title is not None
     sheet = await db(request).marksheets.find_one({"_id": marksheet_id})
     draft = bool(sheet and sheet.get("status") == "draft")
-    if wants_bands or wants_date:
+    if wants_bands or wants_date or wants_title:
         action = "marksheet.edit_draft" if draft else "marksheet.correct"
         _user, sheet = await _editable(request, marksheet_id, action)
     else:
         _user, sheet = await _editable(request, marksheet_id, "marksheet.edit_draft")
     updates = {}
     unset = {}
+    result_updates = {}
+    if wants_title:
+        title = " ".join((body.title or "").split())
+        if not title:
+            raise AppError(422, "marksheet.title", "Enter a title.")
+        updates["title"] = title
+        result_updates["title"] = title
     if wants_date:
         updates["exam_date"] = body.exam_date
+        result_updates["exam_date"] = body.exam_date
     if wants_bands:
         if body.bands is None:
             unset["bands"] = ""
@@ -1042,7 +1053,7 @@ async def patch_marksheet(request: Request, marksheet_id: str, body: MarksheetPa
             except ValueError as error:
                 raise AppError(422, "policy.bands", str(error)) from None
     if updates or unset:
-        if wants_date:
+        if wants_date or wants_title:
             updates["edit_version"] = sheet.get("edit_version", 0) + 1
         change = {}
         if updates:
@@ -1051,13 +1062,20 @@ async def patch_marksheet(request: Request, marksheet_id: str, body: MarksheetPa
             change["$unset"] = unset
         database = db(request)
         await database.marksheets.update_one({"_id": sheet["_id"]}, change)
-        if wants_date:
-            dated = {"exam_date": body.exam_date}
-            if sheet.get("exam_id"):
-                await database.exams.update_one({"_id": sheet["exam_id"]}, {"$set": dated})
+        if result_updates:
+            from app.security import name_key
+
             if sheet.get("assessment_id"):
-                await database.assessments.update_one({"_id": sheet["assessment_id"]}, {"$set": dated})
-            await database.results.update_many({"marksheet_id": sheet["_id"]}, {"$set": dated})
+                assessment_set = dict(result_updates)
+                if wants_title:
+                    assessment_set["title_key"] = name_key(updates["title"])
+                await database.assessments.update_one({"_id": sheet["assessment_id"]}, {"$set": assessment_set})
+            if sheet.get("exam_id"):
+                exam_set = dict(result_updates)
+                if wants_title:
+                    exam_set["title_key"] = name_key(updates["title"])
+                await database.exams.update_one({"_id": sheet["exam_id"]}, {"$set": exam_set})
+            await database.results.update_many({"marksheet_id": sheet["_id"]}, {"$set": result_updates})
     from app.assessments.marks import refresh_sheet_marks
     from app.calculating import public_bands
 

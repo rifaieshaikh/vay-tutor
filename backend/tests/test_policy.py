@@ -4,9 +4,9 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from app.calculating import aggregate, band
+from app.calculating import aggregate, band, band_detail
 from app.main import create_app
-from app.reporting import present
+from app.reporting import attention, present
 from tests.test_m2 import bootstrap, sync_db
 
 
@@ -25,12 +25,12 @@ def client(tmp_path, monkeypatch):
 def test_a_new_institute_starts_with_five_mark_bands(client):
     bootstrap(client)
     bands = client.get("/api/v1/policies/active").json()["bands"]
-    assert [(item["name"], item.get("through"), item["color"]) for item in bands] == [
-        ("Emerging", 40, "#d6453d"),
-        ("Progressing", 60, "#e07a2f"),
-        ("Developing", 75, "#e6b325"),
-        ("Proficient", 90, "#8fce6a"),
-        ("Outstanding", None, "#1b7f4a"),
+    assert [(item["name"], item.get("through"), item["color"], item.get("needs_attention")) for item in bands] == [
+        ("Emerging", 40, "#d6453d", True),
+        ("Progressing", 60, "#e07a2f", True),
+        ("Developing", 75, "#e6b325", False),
+        ("Proficient", 90, "#8fce6a", False),
+        ("Outstanding", None, "#1b7f4a", False),
     ]
     assert [item["phrase"] for item in bands] == [
         "Below 40%",
@@ -109,6 +109,33 @@ def test_saving_settings_starts_the_next_policy_version(client):
     assert cleared.status_code == 200, cleared.text
     assert cleared.json()["version"] == 3
     assert cleared.json()["passing_threshold"] is None
+
+
+def test_needs_attention_defaults_to_emerging_and_progressing(client):
+    bootstrap(client)
+    policy = client.get("/api/v1/policies/active").json()
+    assert band_detail(Decimal("35"), policy)["needs_attention"] is True
+    assert band_detail(Decimal("50"), policy)["needs_attention"] is True
+    assert band_detail(Decimal("70"), policy)["needs_attention"] is False
+    rows = [
+        {"id": "a", "status": "scored", "score": 35, "maximum": 100, "title": "Emerging paper", "student_id": "s1"},
+        {"id": "b", "status": "scored", "score": 55, "maximum": 100, "title": "Progressing paper", "student_id": "s1"},
+        {"id": "c", "status": "scored", "score": 80, "maximum": 100, "title": "Strong paper", "student_id": "s1"},
+    ]
+    flagged = attention(rows, policy)
+    assert [item["title"] for item in flagged] == ["Emerging paper", "Progressing paper"]
+    narrowed = client.post(
+        "/api/v1/policies",
+        json={
+            "bands": [
+                {**item, "needs_attention": item["key"] == "emerging"}
+                for item in policy["bands"]
+            ]
+        },
+    )
+    assert narrowed.status_code == 200, narrowed.text
+    only_emerging = attention(rows, narrowed.json())
+    assert [item["title"] for item in only_emerging] == ["Emerging paper"]
 
 
 def test_a_course_can_keep_its_own_bands(client):

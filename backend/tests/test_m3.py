@@ -526,9 +526,11 @@ def test_exam_date_can_be_changed_after_publish(client):
     assert exam.status_code == 200, exam.text
     sheet_id = exam.json()["marksheet_id"]
     exam_id = exam.json()["id"]
-    assert client.post(
-        f"/api/v1/marksheets/{sheet_id}/results",
-        json={"student_id": student_id, "status": "scored", "score": 16},
+    detail = client.get(f"/api/v1/marksheets/{sheet_id}").json()
+    result = next(row for row in detail["results"] if row.get("student_code") == "IAM-000099" or row.get("display_name") == "Meera Nair")
+    assert client.patch(
+        f"/api/v1/marksheets/{sheet_id}/results/{result['id']}",
+        json={"student_id": student_id, "status": "scored", "score": 16, "edit_version": detail["edit_version"]},
     ).status_code == 200
     assert client.post(f"/api/v1/marksheets/{sheet_id}/publish").status_code == 200
 

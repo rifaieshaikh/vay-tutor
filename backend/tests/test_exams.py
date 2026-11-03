@@ -264,3 +264,77 @@ def test_curriculum_types_part_items_and_exam_register(client):
     assert names == {"Meera Nair"}
     first_names = {row["display_name"] for row in client.get(f"/api/v1/marksheets/{marksheet_id}").json()["results"]}
     assert first_names == {"Risha Fathima"}
+
+
+def test_exam_create_seeds_roster_and_metadata_patch(client):
+    bootstrap(client)
+    course = client.post("/api/v1/courses", json={"name": "CA Foundation"}).json()["id"]
+    subject = client.post(f"/api/v1/courses/{course}/subjects", json={"name": "Accounting"}).json()["id"]
+    paper = client.post(f"/api/v1/subjects/{subject}/items", json={"name": "Paper 1", "kind": "paper"}).json()["id"]
+    exam_type = client.post("/api/v1/exam-types", json={"label": "Unit test"}).json()["key"]
+    branch = client.post("/api/v1/branches", json={"name": "North"}).json()["id"]
+    assert client.post(f"/api/v1/branches/{branch}/courses", json={"course_id": course}).status_code == 200
+    batch = client.post(f"/api/v1/branches/{branch}/batches", json={"course_id": course, "name": "Morning"}).json()["id"]
+    database = sync_db(client)
+    institute_id = database.institutes.find_one({})["_id"]
+    _enroll(database, institute_id, batch, branch, course, "Ada Lovelace")
+    _enroll(database, institute_id, batch, branch, course, "Grace Hopper")
+
+    created = client.post("/api/v1/exams", json={
+        "title": "Morning unit",
+        "exam_date": "2026-11-01",
+        "maximum": 50,
+        "subject_id": subject,
+        "scope": {"kind": "subject", "item_ids": []},
+        "exam_kind": exam_type,
+        "batch_ids": [batch],
+    })
+    assert created.status_code == 200, created.text
+    assert created.json()["roster"] == 2
+    marksheet_id = created.json()["marksheet_id"]
+    exam_id = created.json()["id"]
+    sheet = client.get(f"/api/v1/marksheets/{marksheet_id}")
+    assert sheet.status_code == 200, sheet.text
+    body = sheet.json()
+    assert body["scope"]["kind"] == "subject"
+    assert {row["display_name"] for row in body["results"]} == {"Ada Lovelace", "Grace Hopper"}
+    assert all(row["status"] == "absent" for row in body["results"])
+
+    patched = client.patch(f"/api/v1/exams/{exam_id}", json={
+        "title": "Morning unit revised",
+        "exam_date": "2026-11-02",
+        "maximum": 60,
+        "exam_kind": exam_type,
+    })
+    assert patched.status_code == 200, patched.text
+    refreshed = client.get(f"/api/v1/marksheets/{marksheet_id}").json()
+    assert refreshed["title"] == "Morning unit revised"
+    assert refreshed["exam_date"] == "2026-11-02"
+    assert refreshed["maximum"] == 60
+    assert refreshed["exam_kind"] == exam_type
+
+    result_id = refreshed["results"][0]["id"]
+    scored = client.patch(
+        f"/api/v1/marksheets/{marksheet_id}/results/{result_id}",
+        json={"score": 40, "status": "scored", "edit_version": refreshed["edit_version"]},
+    )
+    assert scored.status_code == 200, scored.text
+    blocked = client.patch(f"/api/v1/exams/{exam_id}", json={"maximum": 70})
+    assert blocked.status_code == 422
+    assert blocked.json()["error"]["code"] == "exam.maximum"
+
+    paper_exam = client.post("/api/v1/exams", json={
+        "title": "Paper morning",
+        "exam_date": "2026-11-03",
+        "maximum": 25,
+        "subject_id": subject,
+        "scope": {"kind": "paper", "item_ids": [paper]},
+        "exam_kind": exam_type,
+        "batch_ids": [batch],
+    })
+    assert paper_exam.status_code == 200, paper_exam.text
+    paper_sheet = client.get(f"/api/v1/marksheets/{paper_exam.json()['marksheet_id']}").json()
+    assert paper_sheet["scope"]["kind"] == "paper"
+    assert paper_sheet["scope"]["item_ids"] == [paper]
+    assert paper_sheet["paper_id"] == paper
+    assert "Paper 1" in (paper_sheet.get("scope_item_names") or [])

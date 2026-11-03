@@ -1,19 +1,41 @@
 import { CSSProperties } from "react";
 import { Icon } from "./ui";
 
-export type Band = { key?: string; name: string; through?: number | null; phrase?: string; color?: string | null };
-export type BandDraft = { name: string; through: string; color: string };
+export type Band = { key?: string; name: string; through?: number | null; phrase?: string; description?: string | null; color?: string | null; needs_attention?: boolean };
+export type BandDraft = { name: string; through: string; color: string; needsAttention: boolean };
 
 const LEGACY: Record<string, string> = { danger: "Danger", "fifty-fifty": "Fifty-fifty", safe: "Safe" };
 const PALETTE = ["#d6453d", "#e07a2f", "#e6b325", "#8fce6a", "#1b7f4a"];
+const ATTENTION_DEFAULTS = new Set(["emerging", "progressing", "danger", "fifty-fifty"]);
+
+export const BAND_DESCRIPTIONS: Record<string, string> = {
+  emerging: "Beginning to understand new concepts and needing regular one to one guidance",
+  progressing: "Building understanding and completing tasks with some support and doubt clearing",
+  developing: "Applying learning more independently and improving through practice of more questions",
+  proficient: "Demonstrating strong understanding and practice more advanced questions including previous exam questions independently and consistently",
+  outstanding: "Applying learning to unfamiliar challenges, explain reasoning, and explore deeper ideas.",
+};
 
 export const DEFAULT_BANDS: Band[] = [
-  { key: "emerging", name: "Emerging", through: 40, phrase: "Below 40%", color: "#d6453d" },
-  { key: "progressing", name: "Progressing", through: 60, phrase: "40% through 60%", color: "#e07a2f" },
-  { key: "developing", name: "Developing", through: 75, phrase: "Above 60% through 75%", color: "#e6b325" },
-  { key: "proficient", name: "Proficient", through: 90, phrase: "Above 75% through 90%", color: "#8fce6a" },
-  { key: "outstanding", name: "Outstanding", phrase: "Above 90%", color: "#1b7f4a" },
+  { key: "emerging", name: "Emerging", through: 40, phrase: "Below 40%", description: BAND_DESCRIPTIONS.emerging, color: "#d6453d", needs_attention: true },
+  { key: "progressing", name: "Progressing", through: 60, phrase: "40% through 60%", description: BAND_DESCRIPTIONS.progressing, color: "#e07a2f", needs_attention: true },
+  { key: "developing", name: "Developing", through: 75, phrase: "Above 60% through 75%", description: BAND_DESCRIPTIONS.developing, color: "#e6b325", needs_attention: false },
+  { key: "proficient", name: "Proficient", through: 90, phrase: "Above 75% through 90%", description: BAND_DESCRIPTIONS.proficient, color: "#8fce6a", needs_attention: false },
+  { key: "outstanding", name: "Outstanding", phrase: "Above 90%", description: BAND_DESCRIPTIONS.outstanding, color: "#1b7f4a", needs_attention: false },
 ];
+
+export function bandDescription(band: Band | null | undefined) {
+  if (!band) return "";
+  if (band.description) return band.description;
+  const key = (band.key || band.name || "").trim().toLowerCase().replace(/\s+/g, "-");
+  return BAND_DESCRIPTIONS[key] || BAND_DESCRIPTIONS[(band.name || "").trim().toLowerCase()] || "";
+}
+
+function defaultNeedsAttention(item: Band) {
+  if (item.needs_attention != null) return Boolean(item.needs_attention);
+  const key = (item.key || item.name || "").trim().toLowerCase();
+  return ATTENTION_DEFAULTS.has(key);
+}
 
 function draftColor(item: Band, index: number, total: number) {
   if (item.color && /^#[0-9a-fA-F]{6}$/.test(item.color)) return item.color;
@@ -27,6 +49,7 @@ export function draftsFrom(bands: Band[] | null | undefined): BandDraft[] {
     name: item.name,
     through: index === source.length - 1 || item.through == null ? "" : String(item.through),
     color: draftColor(item, index, source.length),
+    needsAttention: defaultNeedsAttention(item),
   }));
 }
 
@@ -49,8 +72,8 @@ export function bandsReady(rows: BandDraft[]) {
 export function bandsPayload(rows: BandDraft[]) {
   return rows.map((item, index) => (
     index === rows.length - 1
-      ? { name: item.name.trim(), color: item.color }
-      : { name: item.name.trim(), through: Number(item.through), color: item.color }
+      ? { name: item.name.trim(), color: item.color, needs_attention: item.needsAttention }
+      : { name: item.name.trim(), through: Number(item.through), color: item.color, needs_attention: item.needsAttention }
   ));
 }
 
@@ -113,6 +136,26 @@ export function BandMark({ band, name, place, color }: { band?: string | null; n
   return <span className={`chip ${bandClass(band, place, color)}`} style={bandStyle(color)}>{label}</span>;
 }
 
+export function BandKey({ bands }: { bands?: Band[] | null }) {
+  const rows = (bands && bands.length ? bands : DEFAULT_BANDS)
+    .map((item) => ({ ...item, description: bandDescription(item) }))
+    .filter((item) => item.description);
+  if (rows.length === 0) return null;
+  return (
+    <section className="band-key" aria-label="Band key">
+      <h2>Band key</h2>
+      <ul>
+        {rows.map((item) => (
+          <li key={item.key || item.name}>
+            <BandMark band={item.key || item.name} name={item.name} color={item.color} />
+            <p>{item.description}</p>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function BandFields({ rows, onChange }: { rows: BandDraft[]; onChange: (rows: BandDraft[]) => void }) {
   function edit(index: number, patch: Partial<BandDraft>) {
     onChange(rows.map((item, position) => position === index ? { ...item, ...patch } : item));
@@ -121,7 +164,7 @@ export function BandFields({ rows, onChange }: { rows: BandDraft[]; onChange: (r
     const next = rows.slice();
     const used = new Set(rows.map((item) => item.color.toLowerCase()));
     const color = PALETTE.find((item) => !used.has(item)) || "#0f6e6b";
-    next.splice(Math.max(rows.length - 1, 0), 0, { name: "", through: "", color });
+    next.splice(Math.max(rows.length - 1, 0), 0, { name: "", through: "", color, needsAttention: false });
     onChange(next);
   }
   function remove(index: number) {
@@ -144,6 +187,15 @@ export function BandFields({ rows, onChange }: { rows: BandDraft[]; onChange: (r
             <label>Color
               <input type="color" aria-label={`Color for ${item.name || `band ${index + 1}`}`} value={item.color} onChange={(event) => edit(index, { color: event.target.value })} />
             </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={item.needsAttention}
+                aria-label={`Needs attention for ${item.name || `band ${index + 1}`}`}
+                onChange={(event) => edit(index, { needsAttention: event.target.checked })}
+              />
+              Needs attention
+            </label>
             {rows.length > 2 && !last ? (
               <div className="icon-actions">
                 <button type="button" aria-label={`Remove ${item.name || "band"}`} title="Remove" onClick={() => remove(index)}><Icon name="clear" /></button>
@@ -152,6 +204,7 @@ export function BandFields({ rows, onChange }: { rows: BandDraft[]; onChange: (r
           </div>
         );
       })}
+      <p className="meta">Bands marked Needs attention appear on the progress-card Needs attention tab.</p>
       <button type="button" onClick={add}>Add band</button>
     </div>
   );

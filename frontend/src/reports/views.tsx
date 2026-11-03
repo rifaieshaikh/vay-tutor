@@ -248,7 +248,7 @@ function AttentionBoards({ shown, cardSuffix, returnTo }: { shown: View; cardSuf
   const pages = Math.max(1, Math.ceil(matched.length / 20));
   const current = Math.min(page, pages);
   useEffect(() => { setPage(1); }, [selected, needle, order]);
-  if (!board) return <p>No scored results in this view fall in the danger band.</p>;
+  if (!board) return <p>No scored results in this view fall in a Needs attention band.</p>;
   const slice = matched.slice((current - 1) * 20, current * 20);
   const from = matched.length === 0 ? 0 : (current - 1) * 20 + 1;
   const to = from + slice.length - 1;
@@ -263,7 +263,7 @@ function AttentionBoards({ shown, cardSuffix, returnTo }: { shown: View; cardSuf
       {slice.length === 0 ? <p>No results match this search.</p> : (
         <div className="table-wrap">
           <table className="people-table">
-            <caption className="sr-only">Scored results in the danger band for {board.label}.</caption>
+            <caption className="sr-only">Scored results that need attention for {board.label}.</caption>
             <thead><tr><th className="place">#</th><th>Student</th><th>Performance</th><th>Results</th><th>Band</th></tr></thead>
             <tbody>
               {slice.map((item, index) => (

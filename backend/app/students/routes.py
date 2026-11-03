@@ -179,8 +179,12 @@ async def merge_preview(request: Request, body: MergeBody) -> dict:
     source_rows = await db(request).enrollments.find({"student_id": source["_id"]}).to_list(length=100)
     target_rows = await db(request).enrollments.find({"student_id": target["_id"]}).to_list(length=100)
     target_batches = {item["batch_id"] for item in target_rows}
+    target_by_batch = {item["batch_id"]: item for item in target_rows}
     moving = [item for item in source_rows if item["batch_id"] not in target_batches]
     kept = [item for item in source_rows if item["batch_id"] in target_batches]
+    fill, kept_result_ids = await _overlap_result_plan(
+        db(request), user["institute_id"], source["_id"], target["_id"], kept, target_by_batch
+    )
     facts = await directory_facts(db(request), user["institute_id"])
     return {
         "source": source.get("display_name"),
@@ -191,6 +195,7 @@ async def merge_preview(request: Request, body: MergeBody) -> dict:
         "kept_separate": [item["_id"] for item in kept],
         "moves": enrollment_context(moving, facts),
         "kept": enrollment_context(kept, facts),
+        "fill": fill,
         "alias": source.get("name_key"),
         "admissions": await db(request).admissions.count_documents(
             {"institute_id": user["institute_id"], "student_id": source["_id"]}
@@ -198,13 +203,15 @@ async def merge_preview(request: Request, body: MergeBody) -> dict:
         "results_moving": await db(request).results.count_documents(
             {"institute_id": user["institute_id"], "student_id": source["_id"], "batch_id": {"$in": [item["batch_id"] for item in moving] or [""]}}
         ),
-        "results_kept": await db(request).results.count_documents(
-            {"institute_id": user["institute_id"], "student_id": source["_id"], "batch_id": {"$in": [item["batch_id"] for item in kept] or [""]}}
-        ),
+        "results_filling": len(fill),
+        "results_kept": len(kept_result_ids),
         "recoverable": False,
         "recovery": (
             "This merge cannot be undone. The source student is archived and linked to the student you keep. "
-            "Enrollments that already exist on the student you keep stay on the archived source, with their results. "
+            "Enrollments that already exist on the student you keep stay on the archived source. "
+            "On those shared batches, results for exams the kept student does not already have move onto that enrollment; "
+            "a present mark from the source also replaces an absent result on the kept student for the same exam; "
+            "other results for exams already present stay on the archived source. "
             "Application links and results on enrollments that move follow the student you keep."
         ),
     }
@@ -233,6 +240,7 @@ async def merge_students(request: Request, body: MergeBody) -> dict:
     existing_alias = await db(request).aliases.find_one(
         {"student_id": target["_id"], "name_key": source.get("name_key")}
     )
+    fill = preview.get("fill") or []
     async with await request.app.state.client.start_session() as session:
         async with session.start_transaction():
             if preview["move"]:
@@ -250,6 +258,19 @@ async def merge_students(request: Request, body: MergeBody) -> dict:
                 await db(request).results.update_many(
                     {"institute_id": user["institute_id"], "student_id": source["_id"], "batch_id": {"$in": moving_batches}},
                     {"$set": {"student_id": target["_id"]}},
+                    session=session,
+                )
+            for item in fill:
+                replace_id = item.get("replace_id")
+                if replace_id:
+                    # Free marksheet+enrollment uniqueness before moving the present mark across.
+                    await db(request).results.delete_one(
+                        {"_id": replace_id, "student_id": target["_id"]},
+                        session=session,
+                    )
+                await db(request).results.update_one(
+                    {"_id": item["id"], "student_id": source["_id"]},
+                    {"$set": {"student_id": target["_id"], "enrollment_id": item["enrollment_id"]}},
                     session=session,
                 )
             await db(request).admissions.update_many(
@@ -271,10 +292,20 @@ async def merge_students(request: Request, body: MergeBody) -> dict:
             "action": "student.merge",
             "actor_id": user["_id"],
             "at": _now(),
-            "context": {"source_id": source["_id"], "target_id": target["_id"], "moved": preview["move"]},
+            "context": {
+                "source_id": source["_id"],
+                "target_id": target["_id"],
+                "moved": preview["move"],
+                "filled": [item["id"] for item in fill],
+            },
         }
     )
-    return {"id": target["_id"], "moved": len(preview["move"]), "archived_id": source["_id"]}
+    return {
+        "id": target["_id"],
+        "moved": len(preview["move"]),
+        "filled": len(fill),
+        "archived_id": source["_id"],
+    }
 
 
 @router.get("/students/{student_id}/enrollments")
@@ -1142,6 +1173,93 @@ async def _reject_shared_name(
             "student.identity",
             "Another student in the same batch already uses that name. Merge them only from the merge action.",
         )
+
+
+def _exam_key(row: dict) -> str | None:
+    if row.get("marksheet_id"):
+        return f"marksheet:{row['marksheet_id']}"
+    if row.get("assessment_id"):
+        return f"assessment:{row['assessment_id']}"
+    return None
+
+
+def _result_absent(row: dict) -> bool:
+    status = row.get("status")
+    if status in {"absent", "missing"}:
+        return True
+    if status in {"scored", "exempt"}:
+        return False
+    return row.get("score") is None
+
+
+def _result_present(row: dict) -> bool:
+    status = row.get("status")
+    if status in {"absent", "missing"}:
+        return False
+    if status == "scored":
+        return row.get("score") is not None
+    if status == "exempt":
+        return False
+    return row.get("score") is not None
+
+
+async def _overlap_result_plan(
+    database,
+    institute_id: str,
+    source_id: str,
+    target_id: str,
+    kept_enrollments: list[dict],
+    target_by_batch: dict[str, dict],
+) -> tuple[list[dict], list[str]]:
+    """On shared batches, move source results when the target lacks that exam or only has absent."""
+    kept_batch_ids = [item["batch_id"] for item in kept_enrollments]
+    if not kept_batch_ids:
+        return [], []
+    source_results = await database.results.find(
+        {
+            "institute_id": institute_id,
+            "student_id": source_id,
+            "batch_id": {"$in": kept_batch_ids},
+            "active": {"$ne": False},
+        }
+    ).to_list(length=5000)
+    target_results = await database.results.find(
+        {
+            "institute_id": institute_id,
+            "student_id": target_id,
+            "batch_id": {"$in": kept_batch_ids},
+            "active": {"$ne": False},
+        }
+    ).to_list(length=5000)
+    target_by_exam: dict[tuple[str, str], dict] = {}
+    for row in target_results:
+        key = _exam_key(row)
+        if key:
+            target_by_exam[(row["batch_id"], key)] = row
+    fill: list[dict] = []
+    kept_ids: list[str] = []
+    for row in source_results:
+        batch_id = row.get("batch_id") or ""
+        target_enrollment = target_by_batch.get(batch_id)
+        if target_enrollment is None:
+            kept_ids.append(row["_id"])
+            continue
+        key = _exam_key(row)
+        existing = target_by_exam.get((batch_id, key)) if key else None
+        if existing is None:
+            fill.append({"id": row["_id"], "enrollment_id": target_enrollment["_id"]})
+            continue
+        if _result_absent(existing) and _result_present(row):
+            fill.append(
+                {
+                    "id": row["_id"],
+                    "enrollment_id": target_enrollment["_id"],
+                    "replace_id": existing["_id"],
+                }
+            )
+            continue
+        kept_ids.append(row["_id"])
+    return fill, kept_ids
 
 
 async def _merge_pair(request: Request, institute_id: str, body: MergeBody) -> tuple[dict, dict]:

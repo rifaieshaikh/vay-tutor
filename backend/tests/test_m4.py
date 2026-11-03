@@ -5,7 +5,7 @@ import pytest
 from bson import ObjectId
 from fastapi.testclient import TestClient
 
-from app.calculating import aggregate, band, dense_ranks, display_percentage, percentage, selected_attempts
+from app.calculating import aggregate, aggregates_by_exam_kind, band, dense_ranks, display_percentage, percentage, selected_attempts
 from app.main import create_app
 from app.reporting import export_bytes, participation_summary, student_boards, view_sections
 from tests.test_m2 import bootstrap, sync_db
@@ -50,6 +50,32 @@ def test_weighted_aggregate_bands_and_dense_rank():
         ]
     )
     assert ranks == {"one": 1, "two": 1, "three": 2}
+
+
+def test_public_bands_include_pedagogical_descriptions():
+    from app.calculating import band_description, public_bands
+
+    assert "one to one guidance" in (band_description("Emerging") or "")
+    bands = {item["key"]: item for item in public_bands(None)}
+    assert "doubt clearing" in bands["progressing"]["description"]
+    assert "unfamiliar challenges" in bands["outstanding"]["description"]
+
+
+def test_aggregates_by_exam_kind_separate_performance_and_subject_bands():
+    rows = [
+        {"id": "u1", "student_id": "s", "assessment_id": "unit-a", "exam_kind": "unit", "subject_id": "acc", "status": "scored", "score": 18, "maximum": 20},
+        {"id": "u2", "student_id": "s", "assessment_id": "unit-b", "exam_kind": "unit", "subject_id": "law", "status": "absent", "score": None, "maximum": 20},
+        {"id": "c1", "student_id": "s", "assessment_id": "chapter-a", "exam_kind": "chapter", "subject_id": "acc", "status": "scored", "score": 8, "maximum": 20},
+    ]
+    sections = {item["exam_kind"]: item for item in aggregates_by_exam_kind(rows)}
+    assert sections["unit"]["performance"]["percentage"] == 90
+    assert sections["unit"]["performance"]["scored"] == 1
+    assert sections["unit"]["performance"]["absent"] == 1
+    assert sections["chapter"]["performance"]["percentage"] == 40
+    acc = next(item for item in sections["unit"]["subjects"] if item["subject_id"] == "acc")
+    law = next(item for item in sections["unit"]["subjects"] if item["subject_id"] == "law")
+    assert acc["band"] in {"safe", "proficient"}
+    assert law["absent"] == 1
 
 
 def test_top_mark_uses_the_highest_scored_result():
@@ -118,6 +144,13 @@ def test_published_card_uses_the_active_revision(client):
     match = next(item for item in body["results"] if item["id"] == scored["id"])
     assert match["percentage"] == display_percentage(percentage(scored["score"], detail["maximum"]))
     assert body["performance"]["passing"] is None
+    assert body["by_exam_kind"]
+    kind = next(
+        item for item in body["by_exam_kind"]
+        if (item.get("exam_kind") or "") == (match.get("exam_kind") or "")
+    )
+    assert kind["performance"]["scored"] >= 1
+    assert any((subject.get("subject_id") or "") == (match.get("subject_id") or "") for subject in kind["subjects"])
     overview = client.get("/api/v1/views/institute")
     assert overview.status_code == 200, overview.text
     assert overview.json()["roster_confirmed"] is False
@@ -170,6 +203,10 @@ def test_pdf_report_spans_pages_and_names_the_policy():
             "One active revision is included.",
             "The total uses the latest published attempt, weighted by each maximum.",
         ],
+        "band_key": [
+            {"name": "Emerging", "description": "Beginning to understand new concepts and needing regular one to one guidance"},
+            {"name": "Outstanding", "description": "Applying learning to unfamiliar challenges, explain reasoning, and explore deeper ideas."},
+        ],
         "students": [
             {
                 "name": "Amina Khan",
@@ -196,7 +233,8 @@ def test_pdf_report_spans_pages_and_names_the_policy():
     assert b"Page 2 of 2" in payload
     assert b"Amina Khan" in payload
     assert b"Policy version" not in payload
-    assert b"Band" not in payload
+    assert b"Band key" in payload
+    assert b"one to one guidance" in payload
     assert b"Subjects and papers" in payload
     sheet_report = {**report, "filename": "Amina Khan STU-1042 September 2026 progress card.xlsx"}
     sheet, name = export_bytes("report_xlsx", sheet_report)
@@ -386,6 +424,12 @@ def test_progress_card_reports_the_exam_top_mark(client):
     contents = open(database.files.find_one({"job_id": queued.json()["id"]})["path"], "rb").read()
     assert b"Exam Top Mark" in contents
     assert b"18 of 20" in contents
+    assert b"Needs attention" in contents
+    assert b"Subject" in contents
+    assert b"Batch Rank" in contents
+    assert b"Exam Rank" in contents
+    assert b"60.00%" in contents
+    assert b"Progressing" in contents or b"Progres" in contents
 
 
 def test_cleared_score_card_filters_and_owned_export(client):

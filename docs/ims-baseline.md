@@ -151,7 +151,7 @@ The academic period is the batch `session_key`. September 2026 is `2026-09`. Jan
 
 **Admission.** Status is `open`, then `converted`. An open admission can be edited. Conversion asks for a branch and a batch of the admission’s course. The batch must belong to that branch and course. On success the admission stores `student_id` and status `converted`, and it is no longer editable. The student profile is filled only into empty fields when the person already exists.
 
-**Student.** One institute identity, code `IAM-` plus six digits, allocated once. Profile, academic records, and course answers hang off that identity. Archive and merge keep the surviving student. A merged source is archived and points at `merged_into`. Archived students are excluded from admission name-and-phone matches.
+**Student.** One institute identity, code `IAM-` plus six digits, allocated once. Profile, academic records, and course answers hang off that identity. Archive and merge keep the surviving student. A merged source is archived and points at `merged_into`. On shared batches, merge moves source results onto the kept enrollment for exams the kept student does not already have, and also when the kept student is absent and the source has a present mark for that exam. Archived students are excluded from admission name-and-phone matches.
 
 **Enrollment.** One student in one batch. A second batch is a second enrollment, not a second student. `started_on` and `ended_on` are optional. An `ended_on` makes the enrollment historical. Results stay on the enrollment that sat the assessment.
 

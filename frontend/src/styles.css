@@ -936,10 +936,19 @@ table.people-table caption:not(.sr-only) { caption-side: top; text-align: left; 
 .standing-group h3 { margin: 0 0 0.35rem; }
 .academic-levels button[aria-current="page"] { background: #0f6e6b; color: white; font-weight: 700; }
 .academic-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; margin: 1rem 0; }
+.card-panel .academic-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .academic-stats > div { background: #f8faf9; border: 1px solid #dce5e1; border-radius: 12px; padding: 1rem; display: flex; flex-direction: column; gap: 0.35rem; }
 .academic-stats span, .academic-stats small { color: #52665e; font-size: 0.82rem; }
 .academic-stats strong { font-size: 1.8rem; line-height: 1.2; color: #143f3d; }
 .academic-stats strong small { font-size: 1rem; font-weight: 400; }
+.subject-band-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.subject-band-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.5rem; }
+.subject-band-list li > span:first-child { color: #143f3d; font-size: 0.92rem; font-weight: 600; }
+.band-key { margin: 1.25rem 0 0; padding-top: 0.85rem; border-top: 1px solid #dce5e1; }
+.band-key h2 { margin: 0 0 0.65rem; color: #0f6e6b; font-size: 1rem; }
+.band-key ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.55rem; }
+.band-key li { display: grid; grid-template-columns: minmax(7rem, 9rem) minmax(0, 1fr); gap: 0.55rem 0.85rem; align-items: start; }
+.band-key p { margin: 0; color: #52665e; font-size: 0.9rem; line-height: 1.35; }
 .comparison-controls { align-items: end; flex-wrap: wrap; margin-bottom: 1rem; }
 .comparison-score { min-width: 8rem; display: grid; gap: 0.35rem; }
 .comparison-score .bar { height: 0.4rem; }
@@ -964,7 +973,7 @@ table.people-table.progress-grid { min-width: 0; width: 100%; table-layout: fixe
 @media (max-width: 480px) { .academic-stats { grid-template-columns: 1fr; } }
 
 @media print {
-  @page { size: A4; margin: 12mm 14mm 14mm; }
+  @page { size: A4 portrait; margin: 12mm 14mm 14mm; }
   :root, body, .app, .frame, main, .panel { background: white !important; }
   .frame { display: block !important; min-height: 0 !important; }
   main { padding: 0; min-height: 0; }
@@ -979,9 +988,14 @@ table.people-table.progress-grid { min-width: 0; width: 100%; table-layout: fixe
   .print-card .card-identity { display: grid; grid-template-columns: 1fr 1fr; gap: 0.28rem 1.25rem; margin-top: 0.45rem; }
   .print-card .student-photo { width: 3.6rem; }
   .print-card h1 { font-size: 1.45rem; }
-  .print-card .academic-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.45rem; margin: 0.2rem 0 0.85rem; }
+  .print-card .academic-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.45rem; margin: 0.2rem 0 0.85rem; }
+  .print-card .subject-band-list li > span:first-child { font-size: 0.78rem; }
   .print-card .academic-stats > div { padding: 0.55rem 0.65rem; break-inside: avoid; }
   .print-card .academic-stats strong { font-size: 1.25rem; }
+  .print-card .band-key { break-inside: avoid; margin-top: 0.85rem; padding-top: 0.65rem; }
+  .print-card .band-key h2 { font-size: 0.92rem; }
+  .print-card .band-key li { grid-template-columns: minmax(6rem, 7.5rem) minmax(0, 1fr); gap: 0.35rem 0.65rem; }
+  .print-card .band-key p { font-size: 0.78rem; }
   .print-card .card-panel.is-hidden { display: block; }
   .print-card .card-panel { break-inside: auto; }
   .print-card .card-panel > h2.sr-only { position: static; width: auto; height: auto; margin: 1rem 0 0.35rem; padding-bottom: 0.15rem; clip: auto; overflow: visible; border-bottom: 2px solid #0f6e6b; color: #0f6e6b; font-size: 0.95rem; font-weight: 700; }

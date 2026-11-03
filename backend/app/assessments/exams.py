@@ -39,6 +39,7 @@ class ExamCreate(BaseModel):
 
 class ExamPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    title: str | None = None
     maximum: float | None = Field(default=None, gt=0)
     exam_date: str | None = None
     exam_kind: str | None = None
@@ -373,6 +374,7 @@ async def create_exam(request: Request, body: ExamCreate) -> dict:
         "marksheet_id": sheet_id,
         "created_at": _now(),
     }
+    roster_count = 0
     client = request.app.state.client
     async with await client.start_session() as session:
         async with session.start_transaction():
@@ -436,12 +438,57 @@ async def create_exam(request: Request, body: ExamCreate) -> dict:
                 session=session,
             )
             await database.exams.insert_one(exam, session=session)
+            enrollments = await database.enrollments.find(
+                {
+                    "institute_id": user["institute_id"],
+                    "batch_id": {"$in": batch_ids},
+                    "student_id": {"$exists": True, "$ne": None},
+                    "$or": [{"ended_on": {"$exists": False}}, {"ended_on": None}, {"ended_on": ""}],
+                },
+                session=session,
+            ).to_list(length=5000)
+            seen_students: set[str] = set()
+            roster = []
+            for enrollment in enrollments:
+                student_id = enrollment.get("student_id")
+                if not student_id or student_id in seen_students:
+                    continue
+                seen_students.add(student_id)
+                roster.append(
+                    {
+                        "_id": str(ObjectId()),
+                        "institute_id": user["institute_id"],
+                        "marksheet_id": sheet_id,
+                        "enrollment_id": enrollment["_id"],
+                        "student_id": student_id,
+                        "revision": 1,
+                        "active": False,
+                        "status": "absent",
+                        "score": None,
+                        "maximum": body.maximum,
+                        "exam_date": exam_date,
+                        "title": title,
+                        "assessment_id": assessment_id,
+                        "attempt_kind": "original",
+                        "exam_type": scope_kind,
+                        "counts_in_aggregate": True,
+                        "branch_id": branch.get("branch_id"),
+                        "course_id": course_id,
+                        "batch_id": enrollment["batch_id"],
+                        "subject_id": subject["_id"],
+                        "paper_id": paper_id,
+                        "source": {"sheet": "Exam conduct register"},
+                    }
+                )
+            if roster:
+                await database.results.insert_many(roster, session=session)
+            roster_count = len(roster)
     await write_audit(
         request, user, "exam.create", None,
-        {"title": title, "batch_ids": batch_ids, "scope": exam["scope"]},
+        {"title": title, "batch_ids": batch_ids, "scope": exam["scope"], "roster": roster_count},
         _batch_resource(user, branch, subject["_id"], paper_id),
     )
-    return {"id": exam_id, "marksheet_id": sheet_id, "status": "draft"}
+    return {"id": exam_id, "marksheet_id": sheet_id, "status": "draft", "roster": roster_count}
 
 
 async def _load_exam(request: Request, user: dict, exam_id: str) -> tuple[dict, list[dict]]:
@@ -594,14 +641,26 @@ async def patch_exam(request: Request, exam_id: str, body: ExamPatch) -> dict:
     if not allowed:
         raise AppError(403, "auth.forbidden", "You do not have permission for that action.")
     database = db(request)
-    changes = {}
+    changes: dict = {}
+    result_updates: dict = {}
+    if body.title is not None:
+        title = " ".join(body.title.split())
+        if not title:
+            raise AppError(422, "exam.title", "Enter a title.", field="title")
+        changes["title"] = title
+        changes["title_key"] = name_key(title)
+        result_updates["title"] = title
     if body.exam_date is not None:
         changes["exam_date"] = _date(body.exam_date)
+        result_updates["exam_date"] = changes["exam_date"]
     if body.maximum is not None:
-        result_count = await database.results.count_documents({"marksheet_id": exam.get("marksheet_id")})
-        if result_count:
+        scored = await database.results.count_documents(
+            {"marksheet_id": exam.get("marksheet_id"), "status": "scored"}
+        )
+        if scored:
             raise AppError(422, "exam.maximum", "The maximum stays once a marklist has scores.")
         changes["maximum"] = body.maximum
+        result_updates["maximum"] = body.maximum
     if body.exam_kind is not None:
         exam_kind = body.exam_kind.strip()
         institute = await database.institutes.find_one({"_id": user["institute_id"]})
@@ -610,17 +669,19 @@ async def patch_exam(request: Request, exam_id: str, body: ExamPatch) -> dict:
         changes["exam_kind"] = exam_kind
     if not changes:
         return {"id": exam_id}
+    sheet_changes = {key: value for key, value in changes.items() if key != "title_key"}
     await database.exams.update_one({"_id": exam_id}, {"$set": changes})
-    await database.marksheets.update_one({"_id": exam.get("marksheet_id")}, {"$set": changes})
+    if sheet_changes:
+        await database.marksheets.update_one({"_id": exam.get("marksheet_id")}, {"$set": sheet_changes})
     await database.assessments.update_one({"_id": exam.get("assessment_id")}, {"$set": changes})
-    if "exam_date" in changes and exam.get("marksheet_id"):
+    if result_updates and exam.get("marksheet_id"):
         await database.results.update_many(
             {"marksheet_id": exam["marksheet_id"]},
-            {"$set": {"exam_date": changes["exam_date"]}},
+            {"$set": result_updates},
         )
     if "maximum" in changes:
         await database.attempts.update_one({"_id": exam.get("attempt_id")}, {"$set": {"maximum": changes["maximum"]}})
-    return {"id": exam_id, **changes}
+    return {"id": exam_id, **{key: value for key, value in changes.items() if key != "title_key"}}
 
 
 @router.post("/exams/{exam_id}/marklist")

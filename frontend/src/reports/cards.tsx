@@ -3,7 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { api, Session } from "../api";
 import { FilterActions, ListToolbar } from "../academics/lists";
 import { ExamType, useExamTypes } from "../academics/kinds";
-import { Band, BandMark, bandClass, bandStyle } from "../bands";
+import { Band, BandKey, BandMark, bandClass, bandStyle } from "../bands";
 import { periodLabel } from "../context";
 import { Option, optionFits, scopeOptions } from "../filters";
 import { studentRecordHref } from "../students";
@@ -55,6 +55,7 @@ type Result = {
   band_name?: string | null;
   band_place?: string | null;
   band_color?: string | null;
+  needs_attention?: boolean;
   rank: number | null;
   batch_rank: number | null;
   top_score: number | null;
@@ -67,6 +68,18 @@ type Result = {
   part_items?: { key: string; label: string }[];
   marksheet_id?: string | null;
   included_in_total?: boolean;
+};
+type PerformanceSummary = {
+  percentage: number | null;
+  scored: number;
+  expected: number;
+  missing: number;
+  absent: number;
+  label?: string;
+  band?: string | null;
+  band_name?: string | null;
+  band_place?: string | null;
+  band_color?: string | null;
 };
 type SubjectSummary = {
   subject_id: string | null;
@@ -81,6 +94,11 @@ type SubjectSummary = {
   band_place?: string | null;
   band_color?: string | null;
 };
+type ExamKindSummary = {
+  exam_kind: string | null;
+  performance: PerformanceSummary;
+  subjects: SubjectSummary[];
+};
 type Card = {
   student_code: string;
   display_name: string;
@@ -92,8 +110,9 @@ type Card = {
   bands?: Band[];
   result_count?: number;
   enrollments?: { branch_id?: string | null; course_id?: string | null; batch_id?: string | null }[];
-  performance: { percentage: number | null; scored: number; expected: number; missing: number; absent: number; label: string; band?: string | null; band_name?: string | null; band_place?: string | null; band_color?: string | null };
+  performance: PerformanceSummary;
   subjects?: SubjectSummary[];
+  by_exam_kind?: ExamKindSummary[];
   retests: { title: string | null; original_percentage: number | null; latest_percentage: number | null; change: number | null; baseline_outside_period?: boolean; batch_id?: string | null; exam_kind?: string }[];
   results: Result[];
 };
@@ -181,6 +200,54 @@ function examLines(rows: Result[], kind: string, subjectName: (id?: string | nul
     || (left.partLabel === "Whole subject" ? 0 : 1) - (right.partLabel === "Whole subject" ? 0 : 1)
     || left.partLabel.localeCompare(right.partLabel)
   ));
+}
+
+function kindSummary(card: Card | null | undefined, key: string) {
+  return (card?.by_exam_kind || []).find((item) => (item.exam_kind || "") === key) || null;
+}
+
+function AcademicStats({
+  performance,
+  subjects,
+  subjectName,
+}: {
+  performance: PerformanceSummary | null | undefined;
+  subjects?: SubjectSummary[];
+  subjectName: (id?: string | null) => string;
+}) {
+  const ordered = [...(subjects || [])].sort((left, right) => subjectName(left.subject_id).localeCompare(subjectName(right.subject_id)));
+  return (
+    <div className="academic-stats">
+      <div>
+        <span>Weighted performance</span>
+        <strong>{performance?.percentage == null ? "—" : `${formatPercent(performance.percentage)}%`}</strong>
+        {performance?.band ? <BandMark band={performance.band} name={performance.band_name} place={performance.band_place} color={performance.band_color} /> : <small>Scored marks ÷ corresponding maxima</small>}
+      </div>
+      <div>
+        <span>Scored results</span>
+        <strong>{performance?.scored ?? 0}<small> / {performance?.expected ?? 0}</small></strong>
+        <small>Latest published attempt in this report</small>
+      </div>
+      <div>
+        <span>Absent</span>
+        <strong>{(performance?.absent ?? 0) + (performance?.missing ?? 0)}</strong>
+        <small>No mark or marked absent</small>
+      </div>
+      <div>
+        <span>Subject bands</span>
+        {ordered.length === 0 ? <strong>—</strong> : (
+          <ul className="subject-band-list">
+            {ordered.map((item) => (
+              <li key={item.subject_id || "subject"}>
+                <span>{subjectName(item.subject_id)}</span>
+                {item.band ? <BandMark band={item.band} name={item.band_name} place={item.band_place} color={item.band_color} /> : <small>—</small>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function resultMark(result: Result) {
@@ -660,8 +727,17 @@ export function CardsPage({ session }: { session: Session }) {
     const requestedBatch = params.get("batch_id") || "";
     const selectedBatch = orderedMemberships.some((item) => item.batch_id === requestedBatch) ? requestedBatch : "";
     const results = selectedBatch ? allResults.filter((item) => item.batch_id === selectedBatch) : [];
-    const performance = shown && selectedBatch ? shown.performance : null;
-    const danger = [...results].filter((result) => result.band_place === "low" || (result.band_place == null && result.band === "danger")).sort((left, right) => (left.percentage ?? 0) - (right.percentage ?? 0) || (left.title || "").localeCompare(right.title || ""));
+    const attentionBands = new Set(
+      (shown?.bands || [])
+        .filter((item) => item.needs_attention ?? ["emerging", "progressing", "danger", "fifty-fifty"].includes((item.key || item.name || "").toLowerCase()))
+        .map((item) => item.key || item.name),
+    );
+    const danger = [...results].filter((result) => {
+      if (result.status !== "scored") return false;
+      if (result.needs_attention != null) return Boolean(result.needs_attention);
+      if (attentionBands.size) return Boolean(result.band && attentionBands.has(result.band));
+      return result.band_place === "low" || result.band === "danger" || result.band === "emerging" || result.band === "progressing";
+    }).sort((left, right) => (left.percentage ?? 0) - (right.percentage ?? 0) || (left.title || "").localeCompare(right.title || ""));
     const gaps = results.filter((result) => result.status === "missing" || result.status === "absent");
     const returnTo = encodeURIComponent(`/cards?${params.toString()}`);
     const subjectName = (id?: string | null) => optionLabel("subject", id) || "Subject";
@@ -683,6 +759,7 @@ export function CardsPage({ session }: { session: Session }) {
       document.title = previous;
     }
     const typeTabs = examTabs(results, examTypes);
+    const attentionTabs = examTabs(danger, examTypes);
     const cardTabs = [...typeTabs.map((tab) => examPanelId(tab.key)), "attention"];
     const activePanel = cardTabs.includes(panel) ? panel : (typeTabs[0] ? examPanelId(typeTabs[0].key) : "attention");
     return (
@@ -756,11 +833,6 @@ export function CardsPage({ session }: { session: Session }) {
         {shown && empty ? <p role="status">{empty}</p> : null}
         {shown && !empty ? (
           <>
-            <div className="academic-stats">
-              <div><span>Weighted performance</span><strong>{performance?.percentage == null ? "—" : `${formatPercent(performance.percentage)}%`}</strong>{performance?.band ? <BandMark band={performance.band} name={performance.band_name} place={performance.band_place} color={performance.band_color} /> : <small>Scored marks ÷ corresponding maxima</small>}</div>
-              <div><span>Scored results</span><strong>{performance?.scored ?? 0}<small> / {performance?.expected ?? 0}</small></strong><small>Latest published attempt in this report</small></div>
-              <div><span>Absent</span><strong>{(performance?.absent ?? 0) + (performance?.missing ?? 0)}</strong><small>No mark or marked absent</small></div>
-            </div>
             {shown.partial ? <p className="meta">{shown.coverage_note || "Authorized subjects only."} Rank and the top mark stay hidden where this card does not include the whole cohort.</p> : null}
             <nav className="page-tabs academic-panels" role="tablist" aria-label="Progress card" onKeyDown={(event) => moveTab(event, cardTabs, activePanel, setPanel)}>
               {typeTabs.map((tab) => (
@@ -770,6 +842,7 @@ export function CardsPage({ session }: { session: Session }) {
             </nav>
             {typeTabs.map((tab) => {
               const lines = examLines(results, tab.key, subjectName, paperName);
+              const summary = kindSummary(shown, tab.key);
               const subjectSpans = new Map<string, number>();
               const examSpans = new Map<string, number>();
               for (const line of lines) {
@@ -782,6 +855,7 @@ export function CardsPage({ session }: { session: Session }) {
               return (
                 <div key={examPanelId(tab.key)} className={activePanel === examPanelId(tab.key) ? "card-panel" : "card-panel is-hidden"}>
                   <h2 className="sr-only">{tab.label}</h2>
+                  <AcademicStats performance={summary?.performance} subjects={summary?.subjects} subjectName={subjectName} />
                   {lines.length === 0 ? <p>No published subjects on this enrollment.</p> : (
                     <div className="table-wrap">
                       <table className="people-table">
@@ -861,32 +935,77 @@ export function CardsPage({ session }: { session: Session }) {
             })}
             <div className={activePanel === "attention" ? "card-panel" : "card-panel is-hidden"}>
             <h2 className="sr-only">Needs attention</h2>
-            {danger.length === 0 && gaps.length === 0 ? <p>Nothing in this view is in the lowest band or absent.</p> : null}
-            {danger.length === 0 && gaps.length > 0 ? <p>No scored results in this view fall in the lowest band.</p> : null}
-            {danger.length > 0 ? (
-              <div className="table-wrap">
-                <table className="people-table">
-                  <caption className="sr-only">Results below 40% for {shown.display_name}.</caption>
-                  <thead><tr><th className="place">#</th><th>Student</th><th>Performance</th><th>Results</th><th>Band</th></tr></thead>
-                  <tbody>
-                    {danger.map((result, index) => (
-                      <tr key={result.id}>
-                        <td className="place">{index + 1}</td>
-                        <td><div className="student-cell"><span>{shown.display_name}</span><span className="meta">{shown.student_code}</span></div></td>
-                        <td><ScoreBar percentage={result.percentage} band={result.band} place={result.band_place} color={result.band_color} /></td>
-                        <td>
-                          <div className="student-cell">
-                            <span className="nowrap">{result.score ?? "—"} of {result.maximum ?? "—"}</span>
-                            {result.marksheet_id ? <Link className="result-line" to={`/marksheets/${result.marksheet_id}?returnTo=${returnTo}`}>{result.title}</Link> : <span className="meta">{result.title}</span>}
-                          </div>
-                        </td>
-                        <td><BandMark band={result.band} name={result.band_name} place={result.band_place} color={result.band_color} /></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
+            {danger.length === 0 && gaps.length === 0 ? <p>Nothing in this view needs attention or is absent.</p> : null}
+            {danger.length === 0 && gaps.length > 0 ? <p>No scored results in this view fall in a Needs attention band.</p> : null}
+            {attentionTabs.map((tab) => {
+              const lines = examLines(danger, tab.key, subjectName, paperName);
+              if (lines.length === 0) return null;
+              const subjectSpans = new Map<string, number>();
+              const examSpans = new Map<string, number>();
+              for (const line of lines) {
+                subjectSpans.set(line.subjectId, (subjectSpans.get(line.subjectId) || 0) + 1);
+                examSpans.set(line.result.id, (examSpans.get(line.result.id) || 0) + 1);
+              }
+              const seenSubjects = new Set<string>();
+              const seenExams = new Set<string>();
+              return (
+                <div key={`attention-${tab.key}`} className="attention-exam-block">
+                  <h3>{tab.label}</h3>
+                  <div className="table-wrap">
+                    <table className="people-table">
+                      <caption className="sr-only">{tab.label} results that need attention for {shown.display_name}.</caption>
+                      <thead>
+                        <tr>
+                          <th>Subject</th>
+                          <th>{tab.partHeading}</th>
+                          <th>Mark</th>
+                          <th>Percentage</th>
+                          <th>Band</th>
+                          <th>Batch Rank</th>
+                          <th>Exam Rank</th>
+                          <th>Exam Top Mark</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {lines.map((line) => {
+                          const firstSubject = !seenSubjects.has(line.subjectId);
+                          if (firstSubject) seenSubjects.add(line.subjectId);
+                          const firstExam = !seenExams.has(line.result.id);
+                          if (firstExam) seenExams.add(line.result.id);
+                          const result = line.result;
+                          const examSpan = examSpans.get(result.id) || 1;
+                          return (
+                            <tr key={`${result.id}-${line.partKey}`}>
+                              {firstSubject ? <td rowSpan={subjectSpans.get(line.subjectId) || 1}>{subjectName(line.subjectId)}</td> : null}
+                              <td>
+                                {result.marksheet_id ? (
+                                  <Link to={`/marksheets/${result.marksheet_id}?returnTo=${returnTo}`} aria-label={`${line.partLabel}, ${result.title}`}>{line.partLabel}</Link>
+                                ) : line.partLabel}
+                              </td>
+                              {firstExam ? (
+                                <>
+                                  <td rowSpan={examSpan}>
+                                    <div className="student-cell">
+                                      <span className="nowrap">{resultMark(result)}</span>
+                                      {result.attempt === "retest" ? <span className="meta">Retest</span> : null}
+                                    </div>
+                                  </td>
+                                  <td rowSpan={examSpan}><ScoreBar percentage={result.percentage} band={result.band} place={result.band_place} color={result.band_color} /></td>
+                                  <td rowSpan={examSpan}>{result.band ? <BandMark band={result.band} name={result.band_name} place={result.band_place} color={result.band_color} /> : resultMark(result)}</td>
+                                  <td rowSpan={examSpan}>{result.batch_rank ?? result.rank ?? "—"}</td>
+                                  <td rowSpan={examSpan}>{result.rank ?? "—"}</td>
+                                  <td rowSpan={examSpan} className="nowrap">{formatMark(result.top_score, result.maximum)}</td>
+                                </>
+                              ) : null}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
             {gaps.length > 0 ? (
               <div className="table-wrap">
                 <table className="people-table">
@@ -904,6 +1023,7 @@ export function CardsPage({ session }: { session: Session }) {
               </div>
             ) : null}
             </div>
+            <BandKey bands={shown.bands} />
           </>
         ) : null}
       </section>

@@ -1048,6 +1048,7 @@ class BandBody(BaseModel):
     name: str = ""
     through: float | None = None
     color: str | None = None
+    needs_attention: bool | None = None
 
 
 class CatalogPatch(BaseModel):

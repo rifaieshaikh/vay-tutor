@@ -125,6 +125,7 @@ class BandBody(BaseModel):
     name: str = ""
     through: float | None = None
     color: str | None = None
+    needs_attention: bool | None = None
 
 
 class PolicyBody(BaseModel):
@@ -828,9 +829,12 @@ async def create_policy(request: Request, body: PolicyBody) -> dict:
         publication = body.self_publication
     current_bands = public_bands(current.get("bands"))
     chosen_bands = public_bands(chosen)
+    def _band_signature(item: dict) -> tuple:
+        return (item["name"], item.get("through"), item.get("color"), bool(item.get("needs_attention")))
+
     same = (
-        [(item["name"], item.get("through"), item.get("color")) for item in current_bands]
-        == [(item["name"], item.get("through"), item.get("color")) for item in chosen_bands]
+        [_band_signature(item) for item in current_bands]
+        == [_band_signature(item) for item in chosen_bands]
         and current.get("passing_threshold") == threshold
         and publication == bool(current.get("self_publication", False))
     )
@@ -855,7 +859,12 @@ async def create_policy(request: Request, body: PolicyBody) -> dict:
     before = {
         "version": current.get("version"),
         "bands": [
-            {"name": item["name"], "through": item.get("through"), "color": item.get("color")}
+            {
+                "name": item["name"],
+                "through": item.get("through"),
+                "color": item.get("color"),
+                "needs_attention": bool(item.get("needs_attention")),
+            }
             for item in current_bands
         ],
         "passing_threshold": current.get("passing_threshold"),
@@ -864,7 +873,12 @@ async def create_policy(request: Request, body: PolicyBody) -> dict:
     after = {
         "version": version,
         "bands": [
-            {"name": item["name"], "through": item.get("through"), "color": item.get("color")}
+            {
+                "name": item["name"],
+                "through": item.get("through"),
+                "color": item.get("color"),
+                "needs_attention": bool(item.get("needs_attention")),
+            }
             for item in chosen_bands
         ],
         "passing_threshold": threshold,

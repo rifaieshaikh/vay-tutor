@@ -74,6 +74,21 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
                     "display_name": person.get("display_name") or "",
                     "student_code": person.get("student_code") or "",
                 })
+    scope = (exam or {}).get("scope") or (
+        {"kind": "paper", "item_ids": [sheet["paper_id"]]}
+        if sheet.get("paper_id")
+        else {"kind": sheet.get("exam_type") or "subject", "item_ids": []}
+    )
+    scope_names: dict[str, str] = {}
+    item_ids = list(scope.get("item_ids") or [])
+    if item_ids:
+        for paper in await db(request).papers.find({"_id": {"$in": item_ids}}).to_list(length=len(item_ids)):
+            scope_names[paper["_id"]] = paper.get("name") or ""
+        if sheet.get("subject_id"):
+            subject_row = await db(request).subjects.find_one({"_id": sheet["subject_id"]})
+            for unit in (subject_row or {}).get("units") or []:
+                if unit.get("id") in item_ids:
+                    scope_names[unit["id"]] = unit.get("name") or ""
     return {
         "id": sheet["_id"],
         "status": sheet.get("status"),
@@ -87,6 +102,8 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
         "exam_date": sheet.get("exam_date"),
         "exam_type": sheet.get("exam_type"),
         "exam_kind": (exam or {}).get("exam_kind") or sheet.get("exam_kind") or "",
+        "scope": {"kind": scope.get("kind") or "subject", "item_ids": item_ids},
+        "scope_item_names": [scope_names.get(item_id) or item_id for item_id in item_ids],
         "maximum": sheet.get("maximum"),
         "source_file": sheet.get("source_file"),
         "source_sheet": sheet.get("source_sheet"),
@@ -117,7 +134,7 @@ def _present_results(results: list, names: dict, codes: dict, sheet: dict, polic
             else None
         )
         detail = band_detail(exact, policy) if exact is not None else {
-            "band": None, "band_name": None, "band_place": None, "band_color": None,
+            "band": None, "band_name": None, "band_place": None, "band_color": None, "needs_attention": False,
         }
         rows.append(
             {
@@ -133,6 +150,7 @@ def _present_results(results: list, names: dict, codes: dict, sheet: dict, polic
                 "band_name": detail["band_name"],
                 "band_place": detail["band_place"],
                 "band_color": detail.get("band_color"),
+                "needs_attention": bool(detail.get("needs_attention")),
                 "previous_score": item.get("previous_score"),
                 "source": item.get("source"),
             }

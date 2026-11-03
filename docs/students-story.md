@@ -61,7 +61,7 @@ The requester asked for this story to be completed on 19 October 2026. These rul
 - The directory defaults to authorized non-archived students. Include archived is explicit. Clear filters restores that default.
 - Current means the applied branch, course, batch, and intake period contain an enrollment that has not ended. Historical means every enrollment in that scope has ended. No matching enrollment means the person is authorized and has no enrollment in that scope. Intake period is the batch session, not the enrollment dates. A closed batch does not by itself end an enrollment.
 - A transfer ends the selected enrollment and starts the new one on the same effective date, after a preview and a reason. Results stay on the previous batch. Repeating the same idempotency key does not create a second enrollment.
-- Merge requires a preview and explicit confirmation. It cannot be undone from the screen. Enrollments that already exist on the student who is kept stay on the archived source.
+- Merge requires a preview and explicit confirmation. It cannot be undone from the screen. Enrollments that already exist on the student who is kept stay on the archived source. On those shared batches, source results move onto the kept enrollment only when the kept student does not already have that exam; results for exams already present stay on the archived source.
 
 ## Acceptance criteria
 

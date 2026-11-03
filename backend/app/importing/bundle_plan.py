@@ -105,7 +105,10 @@ async def annotate_bundle_plan(db, plan: dict, job: dict) -> None:
     marksheets = {item["_id"]: item for item in sheet_rows}
     scored_sheets = set()
     if marksheets:
-        cursor = db.results.find({"marksheet_id": {"$in": list(marksheets)}}, {"marksheet_id": 1})
+        cursor = db.results.find(
+            {"marksheet_id": {"$in": list(marksheets)}, "status": "scored"},
+            {"marksheet_id": 1},
+        )
         async for row in cursor:
             scored_sheets.add(row["marksheet_id"])
     totals = empty_counts()

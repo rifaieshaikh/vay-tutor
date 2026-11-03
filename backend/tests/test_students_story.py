@@ -179,3 +179,144 @@ def test_enrollment_filters_archive_transfer_and_merge(client):
     assert repeated.status_code == 200, repeated.text
     assert repeated.json()["replayed"] is True
     assert database.aliases.count_documents({"student_id": elsewhere_id, "name_key": "past student"}) == 1
+
+
+def test_merge_fills_shared_batch_exam_gaps_only(client):
+    bootstrap(client)
+    database = sync_db(client)
+    institute_id = database.institutes.find_one()["_id"]
+    branch, course, batch = _place(database, institute_id, "Shared")
+    source_id, target_id = (str(ObjectId()) for _ in range(2))
+    database.students.insert_many([
+        {"_id": source_id, "institute_id": institute_id, "display_name": "SOURCE TWIN", "student_code": "IAM-000601", "name_key": "source twin"},
+        {"_id": target_id, "institute_id": institute_id, "display_name": "TARGET TWIN", "student_code": "IAM-000602", "name_key": "target twin"},
+    ])
+    source_enrollment = _enroll(database, institute_id, source_id, branch, course, batch)
+    target_enrollment = _enroll(database, institute_id, target_id, branch, course, batch)
+    shared_sheet, gap_sheet = (str(ObjectId()) for _ in range(2))
+    shared_source = str(ObjectId())
+    shared_target = str(ObjectId())
+    gap_result = str(ObjectId())
+    database.results.insert_many([
+        {
+            "_id": shared_source,
+            "institute_id": institute_id,
+            "student_id": source_id,
+            "enrollment_id": source_enrollment,
+            "batch_id": batch,
+            "marksheet_id": shared_sheet,
+            "score": 8,
+            "active": True,
+        },
+        {
+            "_id": shared_target,
+            "institute_id": institute_id,
+            "student_id": target_id,
+            "enrollment_id": target_enrollment,
+            "batch_id": batch,
+            "marksheet_id": shared_sheet,
+            "score": 15,
+            "active": True,
+        },
+        {
+            "_id": gap_result,
+            "institute_id": institute_id,
+            "student_id": source_id,
+            "enrollment_id": source_enrollment,
+            "batch_id": batch,
+            "marksheet_id": gap_sheet,
+            "score": 12,
+            "active": True,
+        },
+    ])
+
+    preview = client.post("/api/v1/students/merge-preview", json={"source_id": source_id, "target_id": target_id})
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["kept_separate"] == [source_enrollment]
+    assert body["results_filling"] == 1
+    assert body["results_kept"] == 1
+    assert body["fill"] == [{"id": gap_result, "enrollment_id": target_enrollment}]
+    assert "does not already have" in body["recovery"]
+
+    committed = client.post(
+        "/api/v1/students/merge",
+        json={"source_id": source_id, "target_id": target_id, "acknowledge": True},
+    )
+    assert committed.status_code == 200, committed.text
+    assert committed.json()["filled"] == 1
+    assert database.students.find_one({"_id": source_id})["merged_into"] == target_id
+    assert database.enrollments.find_one({"_id": source_enrollment})["student_id"] == source_id
+    moved = database.results.find_one({"_id": gap_result})
+    assert moved["student_id"] == target_id
+    assert moved["enrollment_id"] == target_enrollment
+    stayed = database.results.find_one({"_id": shared_source})
+    assert stayed["student_id"] == source_id
+    assert stayed["enrollment_id"] == source_enrollment
+    assert stayed["score"] == 8
+    kept = database.results.find_one({"_id": shared_target})
+    assert kept["student_id"] == target_id
+    assert kept["score"] == 15
+
+
+def test_merge_replaces_target_absent_with_source_present(client):
+    bootstrap(client)
+    database = sync_db(client)
+    institute_id = database.institutes.find_one()["_id"]
+    branch, course, batch = _place(database, institute_id, "Absent fill")
+    source_id, target_id = (str(ObjectId()) for _ in range(2))
+    database.students.insert_many([
+        {"_id": source_id, "institute_id": institute_id, "display_name": "SOURCE PRESENT", "student_code": "IAM-000701", "name_key": "source present"},
+        {"_id": target_id, "institute_id": institute_id, "display_name": "TARGET ABSENT", "student_code": "IAM-000702", "name_key": "target absent"},
+    ])
+    source_enrollment = _enroll(database, institute_id, source_id, branch, course, batch)
+    target_enrollment = _enroll(database, institute_id, target_id, branch, course, batch)
+    sheet = str(ObjectId())
+    source_result, target_absent = (str(ObjectId()) for _ in range(2))
+    database.results.insert_many([
+        {
+            "_id": source_result,
+            "institute_id": institute_id,
+            "student_id": source_id,
+            "enrollment_id": source_enrollment,
+            "batch_id": batch,
+            "marksheet_id": sheet,
+            "status": "scored",
+            "score": 17,
+            "maximum": 20,
+            "active": True,
+        },
+        {
+            "_id": target_absent,
+            "institute_id": institute_id,
+            "student_id": target_id,
+            "enrollment_id": target_enrollment,
+            "batch_id": batch,
+            "marksheet_id": sheet,
+            "status": "absent",
+            "score": None,
+            "maximum": 20,
+            "active": True,
+        },
+    ])
+
+    preview = client.post("/api/v1/students/merge-preview", json={"source_id": source_id, "target_id": target_id})
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["results_filling"] == 1
+    assert body["results_kept"] == 0
+    assert body["fill"] == [{"id": source_result, "enrollment_id": target_enrollment, "replace_id": target_absent}]
+    assert "replaces an absent" in body["recovery"]
+
+    committed = client.post(
+        "/api/v1/students/merge",
+        json={"source_id": source_id, "target_id": target_id, "acknowledge": True},
+    )
+    assert committed.status_code == 200, committed.text
+    assert committed.json()["filled"] == 1
+    moved = database.results.find_one({"_id": source_result})
+    assert moved["student_id"] == target_id
+    assert moved["enrollment_id"] == target_enrollment
+    assert moved["status"] == "scored"
+    assert moved["score"] == 17
+    assert database.results.find_one({"_id": target_absent}) is None

@@ -285,7 +285,7 @@ async def student_card(
         if allows(user["grants"], "progress_card.view", enrollment_resource(item), resource_fields_only=True)
     ]
     results = await db(request).results.find({"student_id": student_id, "active": {"$ne": False}}).to_list(length=500)
-    from app.calculating import aggregate, public_bands
+    from app.calculating import aggregate, aggregates_by_exam_kind, public_bands
     from app.reporting import (
         attach_parts,
         comparisons,
@@ -383,6 +383,7 @@ async def student_card(
         {"subject_id": key[0] or None, "paper_id": key[1] or None, **aggregate(rows, policy)}
         for key, rows in grouped.items()
     ]
+    by_exam_kind = aggregates_by_exam_kind(selected, policy)
     outside = []
     if empty_reason != "enrollment" and (start or end):
         undated = {key: value for key, value in card_filters.items() if key not in {"exam_date_from", "exam_date_to"}}
@@ -401,6 +402,7 @@ async def student_card(
         "bands": public_bands(policy.get("bands")),
         "performance": summary,
         "subjects": subjects,
+        "by_exam_kind": by_exam_kind,
         "retests": comparisons(selected, outside),
         "filters": card_filters,
         "result_count": len(presented),

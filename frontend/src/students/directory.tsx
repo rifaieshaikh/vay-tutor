@@ -19,6 +19,8 @@ type Preview = {
   moves?: StudentEnrollment[];
   kept?: StudentEnrollment[];
   alias: string;
+  results_filling?: number;
+  results_kept?: number;
   recovery?: string;
 };
 
@@ -229,6 +231,8 @@ function MergeDialog({ catalog, onClose, onMerged }: { catalog: Catalog; onClose
           <p>{preview.source_code || "Source"} {preview.source} will be archived into {preview.target_code || "the remaining student"} {preview.target}.</p>
           <p>Enrollments that move: {(preview.moves || []).length === 0 ? "none." : (preview.moves || []).map((item) => [item.branch_name, item.course_name, item.batch_name].filter(Boolean).join(" · ")).join("; ")}</p>
           <p>Enrollments that stay separate because that batch is already on the remaining student: {(preview.kept || []).length === 0 ? "none." : (preview.kept || []).map((item) => [item.branch_name, item.course_name, item.batch_name].filter(Boolean).join(" · ")).join("; ")}</p>
+          <p>Results that fill gaps on shared batches (including replacing an absent mark with a present one): {preview.results_filling ?? 0}.</p>
+          <p>Results that stay on the archived source because the kept student already has that exam: {preview.results_kept ?? 0}.</p>
           <p>The source name is kept as a previous name.</p>
           <p>{preview.recovery || "This merge cannot be undone. The source student is archived and linked to the student you keep."}</p>
           <label><input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} /> I have reviewed this impact.</label>

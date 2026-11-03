@@ -2,12 +2,13 @@ import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { notify } from "../notify";
-import { CONTEXT_FIELDS, Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
+import { CONTEXT_FIELDS, Option, clearIncompatible, optionFits } from "../filters";
 import { Band, BandFields, BandMark, bandsPayload, bandsReady, draftsFrom } from "../bands";
 import { useUnsaved } from "../guard";
 import { Icon, moveTab, StudentDialog } from "../ui";
 import { FilterActions, ListToolbar, Pager } from "../academics/lists";
-import { useExamTypes } from "../academics/kinds";
+import { kindLabel, useCurriculumKinds, useExamTypes } from "../academics/kinds";
+import { ExamMetadataCreateForm, ExamMetadataEditForm } from "./examMetadata";
 
 type Marksheet = {
   id: string;
@@ -47,7 +48,15 @@ type Result = {
   previous_score: number | null;
   source?: { row?: number };
 };
-type Detail = Marksheet & { attempt_kind?: string; available_students?: Person[]; results: Result[]; bands?: Band[] | null; course_bands?: Band[] | null };
+type Detail = Marksheet & {
+  attempt_kind?: string;
+  available_students?: Person[];
+  results: Result[];
+  bands?: Band[] | null;
+  course_bands?: Band[] | null;
+  scope?: { kind: string; item_ids: string[] };
+  scope_item_names?: string[];
+};
 type Draft = { score: string; status: string };
 
 const FILTER_KEYS = ["q", "status", "exam_type", "branch_id", "course_id", "batch_id", "subject_id", "paper_id", "exam_date_from", "exam_date_to", "sort", "page"];
@@ -185,7 +194,6 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
   const navigate = useNavigate();
   const [panel, setPanel] = useState<"choose" | "add" | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [draftSheet, setDraftSheet] = useState<Record<string, string>>({ attempt: "original", exam_type: "unit" });
   const filters = readFilters(params);
   const [items, setItems] = useState<Marksheet[]>([]);
   const [total, setTotal] = useState(0);
@@ -488,7 +496,7 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
           <div className="choice-list">
             <button type="button" className="choice" onClick={() => setPanel("add")}>
               <strong>Enter here</strong>
-              <span>Create a draft, then add students who are already enrolled.</span>
+              <span>Create a draft with the batch roster, then enter marks.</span>
             </button>
             <button type="button" className="choice" onClick={() => navigate("/ecr")}>
               <strong>Upload from ECR</strong>
@@ -499,74 +507,10 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
       ) : null}
       {panel === "add" ? (
         <Dialog title="New draft marksheet" onClose={() => setPanel(null)}>
-          <form onSubmit={async (event) => {
-            event.preventDefault();
-            setError("");
-            const form = new FormData(event.currentTarget);
-            try {
-              const created = await api<{ id: string }>("/api/v1/marksheets", {
-                method: "POST",
-                body: JSON.stringify({
-                  title: form.get("title"),
-                  branch_id: draftSheet.branch_id,
-                  course_id: draftSheet.course_id,
-                  batch_id: draftSheet.batch_id,
-                  subject_id: draftSheet.subject_id,
-                  paper_id: draftSheet.paper_id,
-                  exam_type: draftSheet.exam_type,
-                  attempt: draftSheet.attempt,
-                  maximum: Number(form.get("maximum")),
-                  exam_date: form.get("exam_date") || null,
-                }),
-              });
-              navigate(`/marksheets/${created.id}`);
-            } catch (reasonText) {
-              if (reasonText instanceof ApiError && reasonText.code === "marksheet.exists" && reasonText.details.id) {
-                navigate(`/marksheets/${reasonText.details.id}`);
-                return;
-              }
-              setError(reasonText instanceof Error ? reasonText.message : "Could not add the marksheet.");
-            }
-          }}>
-            <div className="form-grid">
-              <label className="span-2">Title<input name="title" required placeholder="Unit exam" autoFocus /></label>
-              {CONTEXT_FIELDS.map(([key, label, dimension]) => (
-                <label key={key}>
-                  {label}
-                  <select required value={draftSheet[key] || ""} onChange={(event) => {
-                    const merged = { ...draftSheet, [key]: event.target.value };
-                    const { filters: next } = clearIncompatible(merged, options, key);
-                    setDraftSheet(next);
-                  }}>
-                    <option value="">Choose</option>
-                    {(options[dimension] || []).filter((option) => optionFits(option, draftSheet)).map((option) => (
-                      <option key={option.id} value={option.id}>{option.label}</option>
-                    ))}
-                  </select>
-                </label>
-              ))}
-              <label>
-                Exam type
-                <select value={draftSheet.exam_type} onChange={(event) => setDraftSheet((current) => ({ ...current, exam_type: event.target.value }))}>
-                  {(options.exam_type || []).map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-                </select>
-              </label>
-              <label>
-                Attempt
-                <select value={draftSheet.attempt} onChange={(event) => setDraftSheet((current) => ({ ...current, attempt: event.target.value }))}>
-                  <option value="original">Original</option>
-                  <option value="retest">Retest</option>
-                </select>
-              </label>
-              <label>Maximum<input name="maximum" type="number" min="0.01" step="0.01" required /></label>
-              <label>Exam date<input name="exam_date" type="date" /></label>
-            </div>
-            {error ? <p className="error" role="alert">{error}</p> : null}
-            <div className="dialog-actions">
-              <button type="button" className="text-button" onClick={() => setPanel("choose")}>Back</button>
-              <button type="submit">Create draft</button>
-            </div>
-          </form>
+          <ExamMetadataCreateForm
+            onClose={() => setPanel("choose")}
+            onCreated={(marksheetId) => navigate(`/marksheets/${marksheetId}`)}
+          />
         </Dialog>
       ) : null}
       {error && panel !== "add" ? <p className="error" role="alert">{error}</p> : null}
@@ -638,12 +582,14 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
   const [studentId, setStudentId] = useState("");
   const [rowStatus, setRowStatus] = useState("scored");
   const [rowScore, setRowScore] = useState("");
-  const [panel, setPanel] = useState<"student" | "withdraw" | null>(null);
+  const [panel, setPanel] = useState<"student" | "withdraw" | "metadata" | null>(null);
   const [tab, setTab] = useState<"results" | "details">("results");
   const [bandEditor, setBandEditor] = useState(false);
   const [defaults, setDefaults] = useState<Band[] | null>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [resultQuery, setResultQuery] = useState("");
   const examTypes = useExamTypes();
+  const kinds = useCurriculumKinds();
   const versionRef = useRef(0);
   const savingRef = useRef(false);
   const returned = cardReturn(params.get("returnTo"));
@@ -832,33 +778,6 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
     }
   }
 
-  async function saveExamType(sheet: Detail, examKind: string) {
-    if (!sheet.exam_id || !examKind) return;
-    setError("");
-    try {
-      await api(`/api/v1/exams/${sheet.exam_id}`, { method: "PATCH", body: JSON.stringify({ exam_kind: examKind }) });
-      await reload();
-    } catch (reasonText) {
-      setError(reasonText instanceof Error ? reasonText.message : "Could not save the exam type.");
-    }
-  }
-
-  async function saveDate(event: FormEvent<HTMLFormElement>, sheet: Detail) {
-    event.preventDefault();
-    setError("");
-    const examDate = String(new FormData(event.currentTarget).get("exam_date") || "");
-    try {
-      if (sheet.exam_id) {
-        await api(`/api/v1/exams/${sheet.exam_id}`, { method: "PATCH", body: JSON.stringify({ exam_date: examDate }) });
-      } else {
-        await api(`/api/v1/marksheets/${sheet.id}`, { method: "PATCH", body: JSON.stringify({ exam_date: examDate }) });
-      }
-      await reload();
-    } catch (reasonText) {
-      setError(reasonText instanceof Error ? reasonText.message : "Could not save the date.");
-    }
-  }
-
   async function withdraw(event: FormEvent<HTMLFormElement>, sheet: Detail) {
     event.preventDefault();
     setError("");
@@ -919,6 +838,13 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
       return status === "absent" || status === "missing";
     }).length || 0,
   };
+  const needle = resultQuery.trim().toLowerCase();
+  const visibleResults = !detail ? [] : !needle
+    ? detail.results
+    : detail.results.filter((result) => {
+      const haystack = `${result.display_name || ""} ${result.student_code || ""}`.toLowerCase();
+      return haystack.includes(needle);
+    });
   if (!detail) {
     return (
       <section className="panel wide">
@@ -929,15 +855,25 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
   }
 
   const canAddStudent = detail.status === "draft" || detail.status === "submitted";
+  const scopeKind = detail.scope?.kind || detail.exam_type || "subject";
+  const subPartType = scopeKind === "subject" ? "Whole subject" : kindLabel(kinds, scopeKind);
+  const subPartLabel = scopeKind === "subject" ? "" : kindLabel(kinds, scopeKind);
+  const subPartValues = (detail.scope_item_names || []).filter(Boolean).join(", ")
+    || (detail.paper_id ? optionLabel("paper", detail.paper_id) : "");
+  const examTypeLabel = examTypes.find((item) => item.key === detail.exam_kind)?.label || detail.exam_kind || "—";
+  const canEditMaximum = !detail.results.some((result) => result.status === "scored");
   const facts = [
     ["Branch", optionLabel("branch", detail.branch_id) || "—"],
     ["Course", optionLabel("course", detail.course_id) || "—"],
     ["Batch", (detail.batch_ids || []).map((id) => optionLabel("batch", id)).filter(Boolean).join(", ") || "—"],
     ["Subject", optionLabel("subject", detail.subject_id) || "—"],
-    ["Paper", optionLabel("paper", detail.paper_id) || "—"],
-    ["Type", optionLabel("exam_type", detail.exam_type) || detail.exam_type || "—"],
+    ["Sub part type", subPartType],
+    ["Exam Type", examTypeLabel],
+    ...(scopeKind !== "subject" ? [[subPartLabel || "Sub Part", subPartValues || "—"] as [string, string]] : []),
+    ["Exam Name", detail.title || "—"],
+    ["Exam Date", formatDate(detail.exam_date)],
+    ["Total Mark", detail.maximum ?? "—"],
     ["Attempt", detail.attempt_kind === "retest" ? "Retest" : "Original"],
-    ["Maximum", detail.maximum ?? "—"],
     ["Revision", detail.revision ?? "—"],
     ["Source", detail.source_file || detail.source_sheet || "Entered here"],
   ];
@@ -968,6 +904,12 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
       {error ? <p className="error" role="alert">{error}</p> : null}
       {tab === "details" ? (
       <>
+      <div className="title-row">
+        <h2>Metadata</h2>
+        {!editing ? (
+          <button type="button" className="text-button" onClick={() => setPanel("metadata")}>Edit metadata</button>
+        ) : null}
+      </div>
       <dl className="facts">
         {facts.map(([label, value]) => (
           <div key={label}>
@@ -978,28 +920,6 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
         <div>
           <dt>Status</dt>
           <dd><span className={statusClass(detail.status)}>{statusLabel}</span></dd>
-        </div>
-        <div>
-          <dt>Exam type</dt>
-          <dd>
-            {detail.exam_id ? (
-              <select aria-label="Exam type" value={detail.exam_kind || ""} onChange={(event) => void saveExamType(detail, event.target.value)}>
-                <option value="">Choose an exam type</option>
-                {examTypes.filter((item) => !item.archived || item.key === detail.exam_kind).map((item) => (
-                  <option key={item.key} value={item.key}>{item.label}</option>
-                ))}
-              </select>
-            ) : (examTypes.find((item) => item.key === detail.exam_kind)?.label || "—")}
-          </dd>
-        </div>
-        <div className="span-2">
-          <dt>Exam date</dt>
-          <dd>
-            <form className="inline-date" onSubmit={(event) => saveDate(event, detail)}>
-              <input name="exam_date" type="date" aria-label="Exam date" defaultValue={detail.exam_date || ""} required key={`${detail.id}:${detail.exam_date || ""}`} />
-              <button type="submit">Save</button>
-            </form>
-          </dd>
         </div>
       </dl>
       <div className="title-row">
@@ -1042,6 +962,14 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
         <span><strong>{counts.scored}</strong> Scored</span>
         <span><strong>{counts.absent}</strong> Absent</span>
       </div>
+      <label className="result-search">Search students
+        <input
+          aria-label="Search students"
+          value={resultQuery}
+          placeholder="Name or ID"
+          onChange={(event) => setResultQuery(event.target.value)}
+        />
+      </label>
       {editing && detail.status === "published" ? (
         <label>Reason for this revision<input value={reason} onChange={(event) => setReason(event.target.value)} required /></label>
       ) : null}
@@ -1063,12 +991,13 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
         </div>
       ) : null}
       {detail.results.length === 0 ? <p>No students are on this marksheet yet.</p> : null}
+      {detail.results.length > 0 && visibleResults.length === 0 ? <p>No students match this search.</p> : null}
       <div className="table-wrap">
         <table>
           <caption className="sr-only">Results on {detail.title}. Maximum {detail.maximum ?? "—"}, revision {detail.revision}.</caption>
           <thead><tr><th>Student</th><th>ID</th><th>Row</th><th>Status</th><th>Score</th><th>Previous</th><th>%</th><th>Band</th><th>Rank</th></tr></thead>
               <tbody>
-                {detail.results.map((result) => (
+                {visibleResults.map((result) => (
                   <tr key={result.id}>
                     <td>{result.display_name || "Student"}</td>
                     <td>{result.student_code || "—"}</td>
@@ -1104,6 +1033,35 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
           </div>
       </>
       )}
+      {panel === "metadata" ? (
+        <Dialog title="Edit metadata" onClose={() => setPanel(null)}>
+          <ExamMetadataEditForm
+            examId={detail.exam_id || undefined}
+            marksheetId={detail.id}
+            initial={{
+              title: detail.title || "",
+              examDate: detail.exam_date || "",
+              maximum: detail.maximum == null ? "" : String(detail.maximum),
+              examKind: detail.exam_kind || "",
+            }}
+            locked={{
+              branch: optionLabel("branch", detail.branch_id) || undefined,
+              course: optionLabel("course", detail.course_id) || undefined,
+              batch: (detail.batch_ids || []).map((id) => optionLabel("batch", id)).filter(Boolean).join(", ") || undefined,
+              subject: optionLabel("subject", detail.subject_id) || undefined,
+              scopeKind: subPartType,
+              scopeItems: scopeKind !== "subject" ? `${subPartLabel}: ${subPartValues || "—"}` : undefined,
+            }}
+            canEditMaximum={canEditMaximum}
+            onClose={() => setPanel(null)}
+            onSaved={async () => {
+              setPanel(null);
+              notify("Metadata saved.");
+              await reload();
+            }}
+          />
+        </Dialog>
+      ) : null}
       {panel === "student" ? (
         <Dialog title="Add a student" onClose={() => setPanel(null)}>
           <form onSubmit={async (event) => { if (await addStudent(event)) setPanel(null); }}>

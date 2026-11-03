@@ -609,7 +609,7 @@ function PolicyForm({ policy, onClose, onSaved }: { policy: Policy; onClose: () 
   return (
     <StudentDialog title="Edit settings" onClose={onClose}>
       <form className="form-grid" onSubmit={save}>
-        <p className="meta span-2">Saving starts policy version {policy.version + 1}. Courses and marksheets can set their own bands; otherwise these apply. Totals that mix courses still use these. The line belongs to the band below it, except the lowest band, which stays below its line.</p>
+        <p className="meta span-2">Saving starts policy version {policy.version + 1}. Courses and marksheets can set their own bands; otherwise these apply. Totals that mix courses still use these. The line belongs to the band below it, except the lowest band, which stays below its line. Tick Needs attention on bands that should appear on progress cards (Emerging and Progressing by default).</p>
         <BandFields rows={rows} onChange={setRows} />
         <label>Passing threshold
           <input type="number" min={0} max={100} step="0.01" value={threshold} aria-label="Passing threshold" placeholder="Not set" onChange={(event) => setThreshold(event.target.value)} />
