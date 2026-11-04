@@ -1,7 +1,7 @@
 {
   "name": "vay-tutor-host",
   "private": true,
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Full installation. MongoDB, the API, and the institute UI on this computer.",
   "author": "Vay Tutor",
   "main": "src/main.js",

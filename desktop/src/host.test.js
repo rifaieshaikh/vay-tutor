@@ -63,10 +63,10 @@ test("check sends the client version and accepts a standby worker", async () => 
       }
       return json({ status: "compatible", message: "This client can use this server." });
     },
-    "0.2.0",
+    "1.0.0",
   );
   assert.equal(seen[0].headers["X-Client-Version"], "1.0.0");
-  assert.equal(seen[0].headers["User-Agent"], "VayTutorClient/0.2.0");
+  assert.equal(seen[0].headers["User-Agent"], "VayTutorClient/1.0.0");
   assert.equal(seen[1].url, "https://host:8443/api/v1/compatibility?client=1.0.0");
 });
 
@@ -75,7 +75,7 @@ test("check reports a certificate failure from the connection", async () => {
     () =>
       checkHost("https://host:8443", async () => {
         throw new Error("ERR_CERT_AUTHORITY_INVALID");
-      }, "0.2.0"),
+      }, "1.0.0"),
     /Cannot reach the host/,
   );
 });
@@ -89,7 +89,7 @@ test("check rejects a non-json host", async () => {
         json: async () => {
           throw new Error("not json");
         },
-      }), "0.2.0"),
+      }), "1.0.0"),
     /did not return a Vay Tutor status/,
   );
 });

@@ -80,10 +80,10 @@ Installers are written to `desktop/release`:
 
 | File | Installation |
 | --- | --- |
-| `VayTutorClient-Setup-0.2.0.exe` | Client-only, Windows |
-| `VayTutorClient-0.2.0.dmg` | Client-only, macOS |
-| `VayTutor-Setup-0.2.0.exe` | Full installation, Windows |
-| `VayTutor-0.2.0.dmg` | Full installation, Apple Silicon macOS |
+| `VayTutorClient-Setup-1.0.0.exe` | Client-only, Windows |
+| `VayTutorClient-1.0.0.dmg` | Client-only, macOS |
+| `VayTutor-Setup-1.0.0.exe` | Full installation, Windows |
+| `VayTutor-1.0.0.dmg` | Full installation, Apple Silicon macOS |
 
 The workflow publishes full builds as `vay-tutor-full-windows` and `vay-tutor-full-macos`. The installers are unsigned, so Windows SmartScreen and Gatekeeper ask for confirmation.
 

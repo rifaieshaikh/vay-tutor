@@ -2,7 +2,7 @@ import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, api } from "../api";
 import { notify } from "../notify";
-import { CONTEXT_FIELDS, Option, clearIncompatible, optionFits } from "../filters";
+import { CONTEXT_FIELDS, Option, clearDescendants, clearIncompatible, optionFits } from "../filters";
 import { Band, BandFields, BandMark, bandsPayload, bandsReady, draftsFrom } from "../bands";
 import { useUnsaved } from "../guard";
 import { Icon, moveTab, StudentDialog } from "../ui";

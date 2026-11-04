@@ -11,7 +11,7 @@ class Settings:
     deployment_mode: str
     cookie_secure: bool
     worker_enabled: bool
-    server_version: str = "0.2.0"
+    server_version: str = "1.0.0"
     api_version: str = "1"
 
 

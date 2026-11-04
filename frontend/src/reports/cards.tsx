@@ -767,7 +767,6 @@ export function CardsPage({ session }: { session: Session }) {
     const paperName = (id?: string | null) => optionLabel("paper", id) || "Paper";
     const empty = shown?.empty_reason ? EMPTY_REASONS[shown.empty_reason] || "Nothing matches this report." : "";
     const selectedEnrollment = orderedMemberships.find((item) => item.batch_id === selectedBatch) || orderedMemberships[0];
-    const branchName = optionLabel("branch", selectedEnrollment?.branch_id);
     const courseName = optionLabel("course", selectedEnrollment?.course_id);
     const batchName = optionLabel("batch", selectedEnrollment?.batch_id);
     const studentName = shown?.display_name || (heading?.id === studentId ? heading.name : "");
