@@ -369,7 +369,7 @@ function ExamTypes({ canEdit }: { canEdit: boolean }) {
       <div className="title-row">
         <div>
           <h2>Exam types</h2>
-          <p className="meta">An exam type names the sitting, such as a test series or a module exam. It does not divide the subject—sub part types do that. A lower weight is shown first on the progress card. The part heading is the column name on that exam type's progress tab.</p>
+          <p className="meta">An exam type names the sitting, such as a test series or a module exam. It does not divide the subject—sub part types do that. A lower weight is shown first on the progress card. The column on that exam type's tab uses the sub part type from its exams; the part heading is a fallback when that is not clear.</p>
         </div>
         {canEdit ? <button type="button" onClick={() => setAdding(true)}>Add exam type</button> : null}
       </div>

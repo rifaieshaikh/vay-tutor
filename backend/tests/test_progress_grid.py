@@ -1,4 +1,4 @@
-from app.reporting import _exam_rows, describe_part, describe_parts, exam_columns
+from app.reporting import _exam_rows, _part_heading_for_rows, describe_part, describe_parts, exam_columns
 
 
 def test_part_label_names_the_partition():
@@ -46,7 +46,7 @@ def test_exam_columns_follow_weight_for_every_type_on_the_results():
     assert exam_columns([{"exam_kind": "late"}], types) == [("late", "Late")]
 
 
-def test_exam_rows_repeat_the_result_for_each_curriculum_item():
+def test_exam_rows_stack_combined_sub_parts_on_one_result_row():
     rows = [
         {
             "id": "result-1",
@@ -61,12 +61,24 @@ def test_exam_rows_repeat_the_result_for_each_curriculum_item():
         }
     ]
     table = _exam_rows(rows, {"subject": {"acct": "Accountancy"}}, {"bands": {"danger_below": 40, "safe_above": 60}})
-    assert [row[0] for row in table] == ["Accountancy", ""]
-    assert [row[1] for row in table] == ["Costing", "Ledgers"]
+    assert len(table) == 1
+    assert table[0][0] == "Accountancy"
+    assert table[0][1] == "Costing\nLedgers"
     assert table[0][2] == "40 of 50"
-    assert table[1][2] == ""
     assert table[0][3] == "80.00%"
-    assert table[1][3] == ""
     assert table[0][5] == "-"
     assert table[0][6] == "-"
     assert table[0][7] == "-"
+
+
+def test_part_heading_uses_the_sub_part_type_for_the_exam_type():
+    rows = [
+        {"part_kind": "module", "part_kind_label": "Module"},
+        {"part_kind": "module", "part_kind_label": "Module"},
+    ]
+    assert _part_heading_for_rows(rows, "Part") == "Module"
+    assert _part_heading_for_rows([{"part_kind": "subject", "part_kind_label": ""}], "Part") == "Part"
+    assert _part_heading_for_rows(
+        [{"part_kind": "module", "part_kind_label": "Module"}, {"part_kind": "chapter", "part_kind_label": "Chapter"}],
+        "Unit",
+    ) == "Unit"

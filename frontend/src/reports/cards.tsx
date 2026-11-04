@@ -65,6 +65,8 @@ type Result = {
   exam_kind?: string;
   part_key?: string;
   part_label?: string;
+  part_kind?: string;
+  part_kind_label?: string;
   part_items?: { key: string; label: string }[];
   marksheet_id?: string | null;
   included_in_total?: boolean;
@@ -160,14 +162,33 @@ function reportSort(value: string) {
   return value === "percentage" || value === "exam_date" ? value : "name";
 }
 
+function partHeadingForKind(rows: Result[], key: string, fallback: string) {
+  const labels = [
+    ...new Set(
+      rows
+        .filter((row) => (row.exam_kind || "") === key && row.part_kind && row.part_kind !== "subject")
+        .map((row) => (row.part_kind_label || "").trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (labels.length === 1) return labels[0];
+  return fallback;
+}
+
 function examTabs(rows: Result[], types: ExamType[]) {
   const weight = new Map(types.map((item) => [item.key, item.weight ?? 99]));
   const label = new Map(types.map((item) => [item.key, item.label]));
   const heading = new Map(types.map((item) => [item.key, (item.part_heading || "Part").trim() || "Part"]));
   const keys = [...new Set(rows.map((row) => row.exam_kind || "").filter(Boolean))];
   keys.sort((left, right) => (weight.get(left) ?? 99) - (weight.get(right) ?? 99) || (label.get(left) || left).localeCompare(label.get(right) || right));
-  const tabs = keys.map((key) => ({ key, label: label.get(key) || key, partHeading: heading.get(key) || "Part" }));
-  if (rows.some((row) => !row.exam_kind)) tabs.push({ key: "", label: "Exam", partHeading: "Part" });
+  const tabs = keys.map((key) => ({
+    key,
+    label: label.get(key) || key,
+    partHeading: partHeadingForKind(rows, key, heading.get(key) || "Part"),
+  }));
+  if (rows.some((row) => !row.exam_kind)) {
+    tabs.push({ key: "", label: "Exam", partHeading: partHeadingForKind(rows, "", heading.get("") || "Part") });
+  }
   return tabs;
 }
 
@@ -217,23 +238,25 @@ function AcademicStats({
 }) {
   const ordered = [...(subjects || [])].sort((left, right) => subjectName(left.subject_id).localeCompare(subjectName(right.subject_id)));
   return (
-    <div className="academic-stats">
-      <div>
-        <span>Weighted performance</span>
-        <strong>{performance?.percentage == null ? "—" : `${formatPercent(performance.percentage)}%`}</strong>
-        {performance?.band ? <BandMark band={performance.band} name={performance.band_name} place={performance.band_place} color={performance.band_color} /> : <small>Scored marks ÷ corresponding maxima</small>}
+    <div className="academic-summary">
+      <div className="academic-stats">
+        <div>
+          <span>Weighted performance</span>
+          <strong>{performance?.percentage == null ? "—" : `${formatPercent(performance.percentage)}%`}</strong>
+          {performance?.band ? <BandMark band={performance.band} name={performance.band_name} place={performance.band_place} color={performance.band_color} /> : <small>Scored marks ÷ corresponding maxima</small>}
+        </div>
+        <div>
+          <span>Scored results</span>
+          <strong>{performance?.scored ?? 0}<small> / {performance?.expected ?? 0}</small></strong>
+          <small>Latest published attempt in this report</small>
+        </div>
+        <div>
+          <span>Absent</span>
+          <strong>{(performance?.absent ?? 0) + (performance?.missing ?? 0)}</strong>
+          <small>No mark or marked absent</small>
+        </div>
       </div>
-      <div>
-        <span>Scored results</span>
-        <strong>{performance?.scored ?? 0}<small> / {performance?.expected ?? 0}</small></strong>
-        <small>Latest published attempt in this report</small>
-      </div>
-      <div>
-        <span>Absent</span>
-        <strong>{(performance?.absent ?? 0) + (performance?.missing ?? 0)}</strong>
-        <small>No mark or marked absent</small>
-      </div>
-      <div>
+      <div className="subject-bands-panel">
         <span>Subject bands</span>
         {ordered.length === 0 ? <strong>—</strong> : (
           <ul className="subject-band-list">
@@ -775,7 +798,6 @@ export function CardsPage({ session }: { session: Session }) {
             <h1>{studentName || "Progress card"}</h1>
             <dl className="card-identity">
               {studentCode ? <div><dt>Student code</dt><dd>{studentCode}</dd></div> : null}
-              {branchName ? <div><dt>Branch</dt><dd>{branchName}</dd></div> : null}
               {courseName ? <div><dt>Course</dt><dd>{courseName}</dd></div> : null}
               {orderedMemberships.length > 1 ? (
                 <div>
@@ -804,7 +826,7 @@ export function CardsPage({ session }: { session: Session }) {
             {session.actions.includes("student.lookup") ? <Link to={studentRecordHref(studentId, listReturn || "/students", { q: "", branch_id: selectedEnrollment?.branch_id || "", course_id: selectedEnrollment?.course_id || "", batch_id: selectedEnrollment?.batch_id || "" })}>View student</Link> : null}
           </div>
         </div>
-        <p className="print-context">{[`Student code ${studentCode}`, branchName ? `Branch ${branchName}` : "", courseName ? `Course ${courseName}` : "", batchName ? `Batch ${batchName}` : ""].filter(Boolean).join(". ")}</p>
+        <p className="print-context">{[`Student code ${studentCode}`, courseName ? `Course ${courseName}` : "", batchName ? `Batch ${batchName}` : ""].filter(Boolean).join(". ")}</p>
         {exportJob ? (
           <Dialog title={exportJob.format === "pdf" ? "PDF progress card" : "Spreadsheet progress card"} onClose={() => setExportJob(null)}>
             {exportJob.state === "queued" || exportJob.state === "running" ? <p role="status">Preparing the progress card…</p> : null}

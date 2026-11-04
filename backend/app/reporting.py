@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -191,15 +192,22 @@ async def attach_parts(db, rows: list[dict]) -> None:
         subject = subjects.get(row.get("subject_id") or exam.get("subject_id") or "") or {}
         units = {unit.get("id"): unit.get("name") or "" for unit in subject.get("units") or [] if unit.get("id")}
         paper_id = row.get("paper_id") or exam.get("paper_id") or ""
+        scope = exam.get("scope") or {}
         parts = describe_parts(
             row.get("subject_id") or "",
             row.get("exam_type") or "",
             paper_id,
-            exam.get("scope") or {},
+            scope,
             paper_names,
             units,
             kind_labels,
         )
+        kind = str(scope.get("kind") or row.get("exam_type") or "subject")
+        row["part_kind"] = kind
+        if kind == "subject":
+            row["part_kind_label"] = ""
+        else:
+            row["part_kind_label"] = kind_labels.get(kind) or kind.replace("-", " ").title()
         row["part_items"] = [{"key": key, "label": label} for key, label in parts]
         row["part_key"] = parts[0][0]
         row["part_label"] = parts[0][1]
@@ -254,6 +262,8 @@ def present(
         "exam_kind": row.get("exam_kind") or "",
         "part_key": row.get("part_key") or "",
         "part_label": row.get("part_label") or "",
+        "part_kind": row.get("part_kind") or "",
+        "part_kind_label": row.get("part_kind_label") or "",
         "part_items": row.get("part_items") or [{"key": row.get("part_key") or "", "label": row.get("part_label") or "Whole subject"}],
         "attempt": row.get("attempt_kind") or "original",
         "assessment_id": row.get("assessment_id"),
@@ -544,6 +554,8 @@ def attention(rows: list[dict], policy: dict) -> list[dict]:
                 "paper_id": row.get("paper_id"),
                 "part_key": row.get("part_key") or "",
                 "part_label": row.get("part_label") or "",
+                "part_kind": row.get("part_kind") or "",
+                "part_kind_label": row.get("part_kind_label") or "",
                 "part_items": row.get("part_items") or [],
                 "exam_date": row.get("exam_date"),
                 "marksheet_id": row.get("marksheet_id"),
@@ -826,23 +838,31 @@ async def progress_document(
     band_key = []
     for item in public_bands(policy.get("bands")):
         description = item.get("description") or band_description(item.get("key")) or band_description(item.get("name"))
+        band_key.append(
+            {
+                "key": item.get("key"),
+                "name": item["name"],
+                "phrase": item.get("phrase"),
+                "description": description or "",
+                "color": item.get("color"),
+            }
+        )
         if description:
-            band_key.append(
-                {
-                    "key": item.get("key"),
-                    "name": item["name"],
-                    "phrase": item.get("phrase"),
-                    "description": description,
-                    "color": item.get("color"),
-                }
-            )
             notes.append(f"{item['name']} — {description}")
-        else:
+        elif item.get("phrase"):
             notes.append(f"{item['name']}: {item['phrase']}.")
+    # Header prefers the branch (e.g. IAM-Tirur) over the short institute code.
+    header_name = ""
+    if focus and focus.get("branch"):
+        header_name = focus["branch"]
+    elif scope.get("branch_id"):
+        header_name = names["branch"].get(scope["branch_id"]) or ""
+    if not header_name:
+        header_name = (institute or {}).get("name") or ""
     return {
         "filename": filename,
         "title": "Progress card" if single and focus else "Progress cards",
-        "institute": (institute or {}).get("name") or "",
+        "institute": header_name,
         "generated": _format_date(now.isoformat()),
         "single": bool(single and focus),
         "period": period,
@@ -851,11 +871,38 @@ async def progress_document(
         "band_key": band_key,
         "students": students,
         "subject_headers": list(_FLAT_SUBJECT_HEADERS),
+        "footer_motto": "Learn, Grow and Succeed...it's your Choice",
     }
 
 
+def _part_heading_for_rows(rows: list[dict], configured: str | None = None) -> str:
+    """Column name is the sub part type used by this exam type (one kind per type)."""
+    labels = []
+    for row in rows:
+        label = (row.get("part_kind_label") or "").strip()
+        kind = row.get("part_kind") or ""
+        if label and kind and kind != "subject":
+            labels.append(label)
+    unique = list(dict.fromkeys(labels))
+    if len(unique) == 1:
+        return unique[0]
+    return (configured or "").strip() or "Part"
+
+
+def _display_part_label(part_label: str, title: str) -> str:
+    label = (part_label or "Whole subject").strip() or "Whole subject"
+    title = (title or "").strip()
+    if title and label.casefold() != title.casefold() and label.casefold() != "whole subject":
+        return label
+    return title or label
+
+
 def _exam_rows(rows: list[dict], names: dict, policy: dict) -> list[list[str]]:
-    """One line per curriculum item, repeating the exam's result on each line."""
+    """Match the progress-card UI table: Subject, sub part type, Mark, Percentage, Band, ranks.
+
+    Combined sub parts stay on one exam row (stacked labels) so the shared mark sits
+    beside the middle of that list instead of leaving blank or dashed continuation rows.
+    """
     ordered = sorted(
         rows,
         key=lambda row: (
@@ -879,22 +926,23 @@ def _exam_rows(rows: list[dict], names: dict, policy: dict) -> list[list[str]]:
         mark = _mark_text(shown)
         if row.get("previous_score") is not None:
             mark = f"{mark} (previous {_plain_number(row.get('previous_score'))})"
-        for index, item in enumerate(items):
-            show_subject = "" if subject_id == seen_subject else subject_name
-            seen_subject = subject_id
-            shared = index == 0
-            table.append(
-                [
-                    show_subject,
-                    item.get("label") or "Whole subject",
-                    mark if shared else "",
-                    percentage if shared else "",
-                    (shown.get("band_name") or _status_label(shown.get("status"))) if shared else "",
-                    _batch_rank_text(shown) if shared else "",
-                    _exam_rank_text(shown) if shared else "",
-                    _exam_top_text(shown) if shared else "",
-                ]
-            )
+        title = (row.get("title") or "").strip()
+        labels = [_display_part_label(item.get("label") or "Whole subject", title) for item in items]
+        display_part = "\n".join(dict.fromkeys(labels)) if labels else (title or "Whole subject")
+        show_subject = "" if subject_id == seen_subject else subject_name
+        seen_subject = subject_id
+        table.append(
+            [
+                show_subject,
+                display_part,
+                mark,
+                percentage,
+                shown.get("band_name") or _status_label(shown.get("status")),
+                _batch_rank_text(shown),
+                _exam_rank_text(shown),
+                _exam_top_text(shown),
+            ]
+        )
     return table
 
 
@@ -939,27 +987,25 @@ def _student_block(
             mark = f"{mark} (previous {_plain_number(row.get('previous_score'))})"
         title = shown.get("title") or "Result"
         subject = names["subject"].get(shown.get("subject_id") or "")
-        if subject and subject not in title:
-            title = f"{title} - {subject}"
         part = shown.get("part_label") or ""
-        if part and part not in title:
-            title = f"{title} - {part}"
         kind = exam_labels.get(shown.get("exam_kind") or "")
-        if kind and kind not in title:
-            title = f"{title} - {kind}"
+        detail_bits = [bit for bit in (subject, part, kind) if bit and bit.casefold() not in title.casefold()]
         if shown.get("attempt") == "retest":
-            title = f"{title} - Retest"
+            detail_bits.append("Retest")
         if shown.get("included_in_total") is False:
-            title = f"{title} - kept out"
+            detail_bits.append("kept out")
+        display_title = title if not detail_bits else f"{title}\n{' · '.join(detail_bits)}"
+        flat_title = " - ".join([title, *detail_bits]) if detail_bits else title
         if row.get("previous_score") is not None:
-            corrections.append(f"{title}: previous score {_plain_number(row.get('previous_score'))}")
+            corrections.append(f"{flat_title}: previous score {_plain_number(row.get('previous_score'))}")
         exams.append(
             {
                 "date": str(shown.get("exam_date") or ""),
-                "title": title,
+                "title": flat_title,
+                "display_title": display_title,
                 "cells": [
                     _format_date(shown.get("exam_date")),
-                    title,
+                    flat_title,
                     _percent(shown["percentage"]) if shown.get("status") == "scored" else _status_label(shown.get("status")),
                     mark,
                     shown.get("band_name") or _status_label(shown.get("status")),
@@ -975,7 +1021,7 @@ def _student_block(
     exams.sort(key=lambda item: item["title"].casefold())
     exams.sort(key=lambda item: item["date"] or "0000", reverse=True)
     gaps = [
-        [item["title"], "Absent"]
+        [item.get("display_title") or item["title"], "Absent"]
         for item in exams
         if item["status"] in {"missing", "absent"}
     ]
@@ -1023,7 +1069,7 @@ def _student_block(
             )
         subject_band_rows.sort(key=lambda item: (item[0] or "").casefold())
         section_rows = _exam_rows(subset, names, policy)
-        heading = part_headings.get(key) or "Part"
+        heading = _part_heading_for_rows(subset, part_headings.get(key))
         headers = _section_headers(heading)
         if section_rows:
             exam_sections.append(
@@ -1096,7 +1142,7 @@ def export_bytes(kind: str, report: dict) -> tuple[bytes, str]:
 _PAGE_W = 595
 _PAGE_H = 842
 _MARGIN_X = 40
-_MARGIN_TOP = 46
+_MARGIN_TOP = 78
 _MARGIN_BOTTOM = 40
 _CONTENT_W = _PAGE_W - _MARGIN_X * 2
 _TEAL = (0.059, 0.431, 0.420)
@@ -1104,9 +1150,27 @@ _INK = (0.110, 0.141, 0.188)
 _MUTED = (0.322, 0.400, 0.369)
 _WHITE = (1, 1, 1)
 _ZEBRA = (0.957, 0.969, 0.965)
+_BAND_ORDER = ("emerging", "progressing", "developing", "proficient", "outstanding")
 _SECTION_VALUE_HEADERS = ["Mark", "Percentage", "Band", "Batch Rank", "Exam Rank", "Exam Top Mark"]
 _FLAT_SUBJECT_HEADERS = ["Exam type", "Subject", "Part", *_SECTION_VALUE_HEADERS]
 _SUBJECT_HEADERS = ["Subject", "Paper", "Performance", "Results", "Band"]
+_HEADER_BREAKS = {
+    "Percentage": ["%"],
+    "Batch Rank": ["Batch", "Rank"],
+    "Exam Rank": ["Exam", "Rank"],
+    "Exam Top Mark": ["Exam", "Top"],
+}
+# Shared band palette (same hex family as UI DEFAULT_BANDS / PALETTE).
+_BAND_HEX = {
+    "emerging": "#d6453d",
+    "progressing": "#e07a2f",
+    "developing": "#e6b325",
+    "proficient": "#8fce6a",
+    "outstanding": "#1b7f4a",
+    "danger": "#d6453d",
+    "fifty-fifty": "#e07a2f",
+    "safe": "#1b7f4a",
+}
 
 
 def _section_headers(part_heading: str) -> list[str]:
@@ -1117,22 +1181,137 @@ _SUBJECT_WIDTHS = [150, 110, 85, 80, 90]
 
 
 def _section_widths(headers: list[str]) -> list[int]:
+    """Portrait UI-matching table: keep Part wide enough for ~50 wrapped characters."""
+    part_min = 155
+    subject_min = 62
     minimums = {
-        "Mark": 52,
-        "Percentage": 58,
-        "Band": 68,
-        "Batch Rank": 54,
-        "Exam Rank": 50,
-        "Exam Top Mark": 64,
+        "Mark": 54,
+        "Percentage": 40,
+        "Band": 66,
+        "Batch Rank": 34,
+        "Exam Rank": 32,
+        "Exam Top Mark": 48,
     }
     if len(headers) <= 2:
         return _grid_widths(len(headers))
-    values = [minimums.get(header, 48) for header in headers[2:]]
+    values = [minimums.get(header, 40) for header in headers[2:]]
     remaining = _CONTENT_W - sum(values)
-    if remaining < 120:
-        return _grid_widths(len(headers))
-    subject = max(70, int(remaining * 0.45))
-    return [subject, remaining - subject, *values]
+    if remaining < subject_min + part_min:
+        overflow = subject_min + part_min - remaining
+        shrinkable = list(range(len(values)))
+        while overflow > 0 and shrinkable:
+            index = shrinkable.pop(0)
+            floor = 28
+            cut = min(overflow, max(0, values[index] - floor))
+            values[index] -= cut
+            overflow -= cut
+        remaining = _CONTENT_W - sum(values)
+    part = min(max(part_min, int(remaining * 0.7)), remaining - subject_min)
+    subject = remaining - part
+    return [subject, part, *values]
+
+
+def _hex_rgb(value: str) -> tuple[float, float, float] | None:
+    text = str(value or "").strip()
+    if not text.startswith("#") or len(text) != 7:
+        return None
+    try:
+        return (
+            int(text[1:3], 16) / 255.0,
+            int(text[3:5], 16) / 255.0,
+            int(text[5:7], 16) / 255.0,
+        )
+    except ValueError:
+        return None
+
+
+def _band_hex(label: str | None, configured: str | None = None, colors: dict[str, str] | None = None) -> str | None:
+    """Prefer configured course/policy color, then name lookup, then default palette."""
+    if configured and _hex_rgb(configured):
+        return configured
+    folded = " ".join(str(label or "").casefold().split())
+    if not folded:
+        return None
+    if colors:
+        for key in (folded, folded.replace(" ", "-"), str(label or "").strip()):
+            value = colors.get(key) if key else None
+            if value and _hex_rgb(value):
+                return value
+    return _BAND_HEX.get(folded) or _BAND_HEX.get(folded.replace(" ", "-"))
+
+
+def _band_colors_from_items(items: list | None) -> dict[str, str]:
+    """Map band key/name → configured hex from policy/course band rows."""
+    mapping: dict[str, str] = {}
+    for item in items or []:
+        color = item.get("color") if isinstance(item, dict) else None
+        if not color or not _hex_rgb(str(color)):
+            continue
+        hex_color = str(color)
+        for raw in (item.get("key"), item.get("name")):
+            text = " ".join(str(raw or "").casefold().split())
+            if text:
+                mapping[text] = hex_color
+                mapping[text.replace(" ", "-")] = hex_color
+    return mapping
+
+
+def _band_color(
+    label: str | None,
+    configured: str | None = None,
+    colors: dict[str, str] | None = None,
+) -> tuple[float, float, float] | None:
+    return _hex_rgb(_band_hex(label, configured, colors) or "")
+
+
+def _band_chip_colors(
+    label: str | None,
+    configured: str | None = None,
+    colors: dict[str, str] | None = None,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    """Soft tint background + ink from configured band color (course/policy), else defaults."""
+    base = _band_color(label, configured, colors)
+    if not base:
+        return None
+    fill = tuple(min(1.0, channel + (1.0 - channel) * 0.78) for channel in base)
+    return fill, base
+
+
+def _band_chip_width(label: str, max_width: float, size: int = 8) -> float:
+    """Wide enough for the full band name — do not truncate Progressing/Outstanding."""
+    text = " ".join(str(label or "").split()) or "-"
+    needed = len(text) * size * 0.55 + 14
+    return min(max_width, max(needed, 48))
+
+
+def _pdf_band_chip(
+    x: float,
+    y: float,
+    label: str,
+    max_width: float,
+    bold: bool = False,
+    configured: str | None = None,
+    colors: dict[str, str] | None = None,
+) -> list[str]:
+    """Draw a band pill with the full label using configured colors when present."""
+    chip = _band_chip_colors(label, configured, colors)
+    if not chip:
+        return [_pdf_text(x, y + 3, label, "F2" if bold else "F1", 8, _TEAL)]
+    fill, ink = chip
+    text = " ".join(str(label or "").split()) or "-"
+    chip_w = _band_chip_width(text, max_width)
+    font = "F2" if bold else "F1"
+    return [
+        _pdf_rect(x, y, chip_w, 14, fill),
+        _pdf_text(x + 6, y + 3, text, font, 8, ink),
+    ]
+
+
+def _header_lines(header: str, width: float) -> list[str]:
+    preset = _HEADER_BREAKS.get(header)
+    if preset:
+        return preset
+    return _wrap_lines(header, width - 8, size=8, max_lines=2) or [header]
 
 
 def _wrap_lines(value, width: float, size: int = 9, max_lines: int = 8) -> list[str]:
@@ -1179,7 +1358,7 @@ _EXAM_WIDTHS = [68, 125, 64, 70, 60, 48, 80]
 _RETEST_HEADERS = ["Assessment", "Original", "Latest", "Change", "Basis"]
 _RETEST_WIDTHS = [155, 80, 80, 70, 130]
 _GAP_HEADERS = ["Assessment", "Status"]
-_GAP_WIDTHS = [360, 155]
+_GAP_WIDTHS = [430, 85]
 _INDEX_HEADERS = ["Student", "Code", "Performance", "Results", "Band"]
 _INDEX_WIDTHS = [180, 100, 80, 80, 75]
 
@@ -1198,6 +1377,7 @@ def _pdf_columns(headers: list[str], widths: list[int], rows: list[list[str]]) -
 def _pdf_escape(value) -> str:
     text = "" if value is None else str(value)
     text = text.replace("—", "-").replace("–", "-").replace("·", "|")
+    text = text.replace("…", "...").replace("’", "'").replace("‘", "'")
     text = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
     return text.encode("latin-1", "replace").decode("latin-1")
 
@@ -1208,7 +1388,9 @@ def _fit(value, width: float, size: int = 9) -> str:
 
 
 def _char_limit(width: float, size: int) -> int:
-    return max(int(width / (size * 0.5)) - 1, 4)
+    # Helvetica capitals run wider than 0.5em; stay conservative so wrapped
+    # Assessment text cannot spill into the Status column.
+    return max(int(width / (size * 0.55)) - 1, 4)
 
 
 def _wrap_text(value, width: float, size: int = 9, max_lines: int = 2) -> list[str]:
@@ -1255,6 +1437,122 @@ def _pdf_box(x: float, y: float, width: float, height: float, color: tuple[float
     return f"{_pdf_color(color)} RG 0.7 w {x:.2f} {y:.2f} {width:.2f} {height:.2f} re S"
 
 
+def _brand_caps(value: str | None) -> str:
+    text = " ".join(str(value or "").replace("-", " ").replace("_", " ").split()).upper()
+    return text or "IAM TIRUR"
+
+
+def _text_width(text: str, size: float) -> float:
+    return len(text) * size * 0.52
+
+
+def _centered_text(text: str, y: float, font: str, size: int, color: tuple[float, float, float]) -> str:
+    x = max(_MARGIN_X, (_PAGE_W - _text_width(text, size)) / 2)
+    return _pdf_text(x, y, text, font, size, color)
+
+
+def _pdf_stroke(color: tuple[float, float, float], width: float = 1.2) -> str:
+    return f"{_pdf_color(color)} RG {width:.2f} w"
+
+
+def _band_icon_key(item: dict) -> str:
+    raw = " ".join(str(item.get("key") or item.get("name") or "").casefold().split())
+    if raw in _BAND_ORDER:
+        return raw
+    compact = raw.replace(" ", "-")
+    if compact in _BAND_ORDER:
+        return compact
+    for key in _BAND_ORDER:
+        if key in raw:
+            return key
+    return ""
+
+
+def _band_icon_color(item: dict, colors: dict[str, str] | None = None) -> tuple[float, float, float]:
+    """Number badge and icon use the configured band color (course/policy)."""
+    label = item.get("name") or item.get("key") or _band_icon_key(item)
+    return _band_color(label, item.get("color"), colors) or _TEAL
+
+
+def _pdf_circle_path(cx: float, cy: float, radius: float) -> str:
+    """Approximate a circle with four cubic Beziers."""
+    k = 0.5522847498 * radius
+    return (
+        f"{cx + radius:.2f} {cy:.2f} m "
+        f"{cx + radius:.2f} {cy + k:.2f} {cx + k:.2f} {cy + radius:.2f} {cx:.2f} {cy + radius:.2f} c "
+        f"{cx - k:.2f} {cy + radius:.2f} {cx - radius:.2f} {cy + k:.2f} {cx - radius:.2f} {cy:.2f} c "
+        f"{cx - radius:.2f} {cy - k:.2f} {cx - k:.2f} {cy - radius:.2f} {cx:.2f} {cy - radius:.2f} c "
+        f"{cx + k:.2f} {cy - radius:.2f} {cx + radius:.2f} {cy - k:.2f} {cx + radius:.2f} {cy:.2f} c"
+    )
+
+
+def _pdf_band_icon(kind: str, x: float, y: float, color: tuple[float, float, float]) -> list[str]:
+    """Cleaner progression icons: seedling, book, gear+pencil, target, lightbulb."""
+    stroke = _pdf_stroke(color, 1.25)
+    commands = [stroke]
+    cx, cy = x + 11, y + 10
+    if kind == "emerging":
+        # Seedling: ground, stem, two leaves.
+        commands.append(f"{cx - 8:.2f} {cy - 7:.2f} m {cx + 8:.2f} {cy - 7:.2f} l S")
+        commands.append(f"{cx:.2f} {cy - 7:.2f} m {cx:.2f} {cy + 2:.2f} l S")
+        commands.append(
+            f"{cx:.2f} {cy - 1:.2f} m {cx - 2:.2f} {cy + 4:.2f} {cx - 7:.2f} {cy + 5:.2f} {cx - 8:.2f} {cy + 1:.2f} c "
+            f"{cx - 5:.2f} {cy + 2:.2f} {cx - 1:.2f} {cy + 1:.2f} {cx:.2f} {cy - 1:.2f} c S"
+        )
+        commands.append(
+            f"{cx:.2f} {cy:.2f} m {cx + 2:.2f} {cy + 5:.2f} {cx + 7:.2f} {cy + 6:.2f} {cx + 8:.2f} {cy + 2:.2f} c "
+            f"{cx + 5:.2f} {cy + 3:.2f} {cx + 1:.2f} {cy + 2:.2f} {cx:.2f} {cy:.2f} c S"
+        )
+    elif kind == "progressing":
+        # Open book + check.
+        commands.append(
+            f"{cx - 9:.2f} {cy - 6:.2f} m {cx - 1:.2f} {cy - 4:.2f} l {cx - 1:.2f} {cy + 7:.2f} l "
+            f"{cx - 9:.2f} {cy + 5:.2f} l h S"
+        )
+        commands.append(
+            f"{cx + 1:.2f} {cy - 4:.2f} m {cx + 9:.2f} {cy - 6:.2f} l {cx + 9:.2f} {cy + 5:.2f} l "
+            f"{cx + 1:.2f} {cy + 7:.2f} l h S"
+        )
+        commands.append(f"{cx + 2.5:.2f} {cy + 0.5:.2f} m {cx + 4:.2f} {cy - 1.5:.2f} l {cx + 7:.2f} {cy + 3:.2f} l S")
+    elif kind == "developing":
+        # Gear hub + pencil.
+        commands.append(f"{_pdf_circle_path(cx - 2, cy + 1, 4.5)} S")
+        commands.append(f"{_pdf_circle_path(cx - 2, cy + 1, 1.8)} S")
+        for angle in (0, 45, 90, 135):
+            rad = math.radians(angle)
+            dx, dy = math.cos(rad) * 6.2, math.sin(rad) * 6.2
+            commands.append(
+                f"{cx - 2 + dx * 0.72:.2f} {cy + 1 + dy * 0.72:.2f} m "
+                f"{cx - 2 + dx:.2f} {cy + 1 + dy:.2f} l S"
+            )
+        commands.append(f"{cx + 4:.2f} {cy - 7:.2f} m {cx + 8:.2f} {cy + 5:.2f} l S")
+        commands.append(f"{cx + 6:.2f} {cy + 4:.2f} m {cx + 9:.2f} {cy + 6:.2f} l {cx + 7:.2f} {cy + 2:.2f} l S")
+    elif kind == "proficient":
+        # Target + arrow.
+        commands.append(f"{_pdf_circle_path(cx + 1, cy + 1, 7)} S")
+        commands.append(f"{_pdf_circle_path(cx + 1, cy + 1, 4)} S")
+        commands.append(f"{_pdf_circle_path(cx + 1, cy + 1, 1.5)} S")
+        commands.append(f"{cx - 9:.2f} {cy - 7:.2f} m {cx - 1:.2f} {cy - 1:.2f} l S")
+        commands.append(f"{cx - 3:.2f} {cy - 2:.2f} m {cx - 1:.2f} {cy - 1:.2f} l {cx - 2.5:.2f} {cy + 1:.2f} l S")
+    elif kind == "outstanding":
+        # Lightbulb + rays.
+        commands.append(f"{_pdf_circle_path(cx, cy + 2, 5.5)} S")
+        commands.append(f"{cx - 2.5:.2f} {cy - 4:.2f} 5 3.5 re S")
+        commands.append(f"{cx - 2:.2f} {cy - 1:.2f} m {cx + 2:.2f} {cy - 1:.2f} l S")
+        for dx, dy in ((0, 10), (7, 7), (-7, 7), (9, 1), (-9, 1)):
+            commands.append(f"{cx + dx * 0.45:.2f} {cy + 2 + dy * 0.45:.2f} m {cx + dx:.2f} {cy + 2 + dy:.2f} l S")
+    else:
+        commands.append(f"{_pdf_circle_path(cx, cy, 6)} S")
+    return commands
+
+
+def _pdf_level_badge(number: int, x: float, y: float, color: tuple[float, float, float]) -> list[str]:
+    return [
+        f"{_pdf_color(color)} rg {_pdf_circle_path(x + 8, y + 8, 8)} f",
+        _pdf_text(x + (5 if number < 10 else 3), y + 4, str(number), "F2", 9, _WHITE),
+    ]
+
+
 class _PdfCard:
     def __init__(self, report: dict):
         self.report = report
@@ -1262,6 +1560,7 @@ class _PdfCard:
         self.commands: list[str] = []
         self.y = _PAGE_H - _MARGIN_TOP
         self.running = report.get("title") or "Progress card"
+        self.band_colors = _band_colors_from_items(report.get("band_key"))
 
     def build(self) -> list[list[str]]:
         report = self.report
@@ -1296,13 +1595,20 @@ class _PdfCard:
         if self.commands:
             self.pages.append(self.commands)
         self.commands = []
-        title = self.running if running else (self.report.get("title") or "Progress card")
-        self.commands.append(_pdf_rect(0, _PAGE_H - 36, _PAGE_W, 36, _TEAL))
-        self.commands.append(_pdf_text(_MARGIN_X, _PAGE_H - 23, _fit(title, 300, 13), "F2", 13, _WHITE))
-        institute = self.report.get("institute") or ""
-        if institute:
-            self.commands.append(_pdf_text(340, _PAGE_H - 22, _fit(institute, 200, 9), "F1", 9, _WHITE))
-        self.y = _PAGE_H - 52
+        brand = _brand_caps(self.report.get("institute"))
+        # Teal brand bar: IAM TIRUR centered in bold capitals.
+        self.commands.append(_pdf_rect(0, _PAGE_H - 34, _PAGE_W, 34, _TEAL))
+        self.commands.append(_centered_text(brand, _PAGE_H - 22, "F2", 16, _WHITE))
+        # White band under the brand with the Progress card heading.
+        heading = "Progress card"
+        if running and self.running and self.running.casefold() != heading.casefold():
+            heading = _fit(f"Progress card · {self.running}", _CONTENT_W - 20, 12)
+        self.commands.append(_pdf_rect(0, _PAGE_H - 64, _PAGE_W, 30, _WHITE))
+        self.commands.append(_centered_text(heading, _PAGE_H - 52, "F2", 13, _TEAL))
+        self.commands.append(
+            f"0.863 0.898 0.882 RG 0.6 w {_MARGIN_X:.2f} {_PAGE_H - 64:.2f} m {_PAGE_W - _MARGIN_X:.2f} {_PAGE_H - 64:.2f} l S"
+        )
+        self.y = _PAGE_H - _MARGIN_TOP
 
     def _need(self, height: float):
         if self.y - height < _MARGIN_BOTTOM:
@@ -1314,8 +1620,6 @@ class _PdfCard:
     def _banner(self):
         report = self.report
         lines = []
-        if report.get("generated"):
-            lines.append(f"Generated {report['generated']}")
         if report.get("period"):
             lines.append(f"Reporting period {report['period']}")
         lines.extend(report.get("context") or [])
@@ -1340,7 +1644,6 @@ class _PdfCard:
     def _identity(self, student: dict):
         facts = [
             ("Student code", student.get("code") or ""),
-            ("Branch", student.get("branch") or ""),
             ("Course", student.get("course") or ""),
             ("Batch", student.get("batch") or ""),
         ]
@@ -1364,75 +1667,127 @@ class _PdfCard:
         band = student.get("band") or ""
         performance_note = band if band and band != "-" else ""
         cards = [
-            ("Weighted performance", student.get("performance") or "-", performance_note, None),
-            ("Scored results", student.get("scored") or "-", "Latest published attempt", None),
-            ("Absent", str(int(student.get("absent") or 0) + int(student.get("missing") or 0)), "No mark or marked absent", None),
+            ("Weighted performance", student.get("performance") or "-", performance_note),
+            ("Scored results", student.get("scored") or "-", "Latest published attempt"),
+            ("Absent", str(int(student.get("absent") or 0) + int(student.get("missing") or 0)), "No mark or marked absent"),
         ]
-        if "subject_bands" in student:
-            subject_bands = student.get("subject_bands") or []
-            subject_lines = [
-                f"{(item[0] if isinstance(item, (list, tuple)) else item.get('name')) or 'Subject'} · "
-                f"{(item[1] if isinstance(item, (list, tuple)) else item.get('band')) or '-'}"
-                for item in subject_bands
-            ]
-            cards.append(
-                (
-                    "Subject bands",
-                    subject_lines[0] if len(subject_lines) == 1 else (str(len(subject_lines)) if subject_lines else "-"),
-                    "" if subject_lines else "No subject bands",
-                    subject_lines if len(subject_lines) > 1 else None,
-                )
-            )
         gap = 8
-        columns = 2 if len(cards) > 2 else max(len(cards), 1)
+        columns = 3
         width = (_CONTENT_W - gap * (columns - 1)) / columns
         fill = (0.973, 0.980, 0.976)
         edge = (0.863, 0.898, 0.882)
+        height = 48
+        self._need(height + 8)
+        top = self.y
+        for index, (label, value, note) in enumerate(cards):
+            x = _MARGIN_X + index * (width + gap)
+            self.commands.append(_pdf_rect(x, top - height, width, height, fill))
+            self.commands.append(_pdf_box(x, top - height, width, height, edge))
+            self.commands.append(_pdf_text(x + 6, top - 12, _fit(label, width - 12, 7), "F1", 7, _MUTED))
+            self.commands.append(_pdf_text(x + 6, top - 28, _fit(value, width - 12, 12), "F2", 12, _TEAL))
+            if note:
+                self.commands.append(_pdf_text(x + 6, top - 41, _fit(note, width - 12, 7), "F1", 7, _MUTED))
+        self.y = top - height - 8
+        if "subject_bands" in student:
+            self._subject_bands_panel(student.get("subject_bands") or [])
 
-        def card_height(entry) -> float:
-            lines = entry[3] or []
-            if lines:
-                return max(48, 22 + min(len(lines), 6) * 11 + (11 if len(lines) > 6 else 0))
-            return 48
-
-        for start in range(0, len(cards), columns):
-            row = cards[start : start + columns]
-            height = max(card_height(item) for item in row)
-            self._need(height + 8)
-            top = self.y
-            for index, (label, value, note, lines) in enumerate(row):
-                x = _MARGIN_X + index * (width + gap)
-                self.commands.append(_pdf_rect(x, top - height, width, height, fill))
-                self.commands.append(_pdf_box(x, top - height, width, height, edge))
-                self.commands.append(_pdf_text(x + 6, top - 12, _fit(label, width - 12, 7), "F1", 7, _MUTED))
-                if lines:
-                    cursor = top - 24
-                    for line in lines[:6]:
-                        self.commands.append(_pdf_text(x + 6, cursor, _fit(line, width - 12, 8), "F2", 8, _TEAL))
-                        cursor -= 11
-                    if len(lines) > 6:
-                        self.commands.append(_pdf_text(x + 6, cursor, _fit(f"+{len(lines) - 6} more", width - 12, 7), "F1", 7, _MUTED))
-                else:
-                    self.commands.append(_pdf_text(x + 6, top - 28, _fit(value, width - 12, 12), "F2", 12, _TEAL))
-                    if note:
-                        self.commands.append(_pdf_text(x + 6, top - 41, _fit(note, width - 12, 7), "F1", 7, _MUTED))
+    def _subject_bands_panel(self, items: list):
+        """Full-width strip: subject name + band chip, matching the results table."""
+        rows = []
+        for item in items:
+            if isinstance(item, (list, tuple)):
+                name = item[0] if item else "Subject"
+                band = item[1] if len(item) > 1 else "-"
+            else:
+                name = (item or {}).get("name") or "Subject"
+                band = (item or {}).get("band") or "-"
+            rows.append((str(name or "Subject"), str(band or "-")))
+        fill = (0.973, 0.980, 0.976)
+        edge = (0.863, 0.898, 0.882)
+        line_h = 20
+        height = 26 + max(len(rows), 1) * line_h + 8
+        self._need(height + 8)
+        top = self.y
+        self.commands.append(_pdf_rect(_MARGIN_X, top - height, _CONTENT_W, height, fill))
+        self.commands.append(_pdf_box(_MARGIN_X, top - height, _CONTENT_W, height, edge))
+        self.commands.append(_pdf_text(_MARGIN_X + 8, top - 14, "Subject bands", "F1", 7, _MUTED))
+        if not rows:
+            self.commands.append(_pdf_text(_MARGIN_X + 8, top - 36, "—", "F2", 11, _TEAL))
             self.y = top - height - 8
+            return
+        name_w = min(220, _CONTENT_W * 0.42)
+        cursor = top - 32
+        for name, band in rows:
+            self.commands.append(_pdf_text(_MARGIN_X + 8, cursor, _fit(name, name_w - 4, 9), "F2", 9, _INK))
+            chip_x = _MARGIN_X + 8 + name_w
+            if band and band not in {"-", "Absent", "Exempt", "Missing"}:
+                self.commands.extend(
+                    _pdf_band_chip(chip_x, cursor - 3, band, _CONTENT_W - name_w - 24, colors=self.band_colors)
+                )
+            else:
+                self.commands.append(_pdf_text(chip_x, cursor, band or "—", "F1", 8, _MUTED))
+            cursor -= line_h
+        self.y = top - height - 8
 
     def _band_key(self, rows: list[dict]):
         if not rows:
             return
-        self._heading("Band key")
-        for item in rows:
+        ordered = sorted(
+            rows,
+            key=lambda item: (
+                _BAND_ORDER.index(_band_icon_key(item)) if _band_icon_key(item) in _BAND_ORDER else 99,
+                (item.get("name") or "").casefold(),
+            ),
+        )
+        self._heading("Student learning progression")
+        self._need(12)
+        self.commands.append(
+            _pdf_text(_MARGIN_X, self.y - 8, "5 levels from Emerging to Outstanding", "F1", 8, _MUTED)
+        )
+        self.y -= 16
+        text_x = _MARGIN_X + 60
+        text_w = _CONTENT_W - 68
+        for index, item in enumerate(ordered, start=1):
             name = item.get("name") or "Band"
+            kind = _band_icon_key(item)
+            color = _band_icon_color(item, self.band_colors)
+            chip = _band_chip_colors(name, item.get("color"), self.band_colors)
             description = item.get("description") or item.get("phrase") or ""
-            body = _wrap_lines(description, _CONTENT_W - 4, size=8, max_lines=4)
-            self._need(16 + max(len(body), 1) * 11)
-            self.commands.append(_pdf_text(_MARGIN_X, self.y - 9, _fit(name, _CONTENT_W, 9), "F2", 9, _TEAL))
-            self.y -= 12
+            body = _wrap_lines(description, text_w - 4, size=8, max_lines=3) if description else []
+            row_h = max(36, 22 + max(len(body), 1) * 11)
+            self._need(row_h + 4)
+            top = self.y
+            self.commands.append(_pdf_rect(_MARGIN_X, top - row_h, _CONTENT_W, row_h, (0.973, 0.980, 0.976)))
+            self.commands.append(_pdf_box(_MARGIN_X, top - row_h, _CONTENT_W, row_h, (0.863, 0.898, 0.882)))
+            icon_y = top - row_h / 2 - 10
+            self.commands.extend(_pdf_level_badge(index, _MARGIN_X + 8, icon_y + 2, color))
+            self.commands.extend(_pdf_band_icon(kind, _MARGIN_X + 30, icon_y, color))
+            cursor = top - 16
+            if chip:
+                self.commands.extend(
+                    _pdf_band_chip(
+                        text_x,
+                        cursor - 3,
+                        name,
+                        min(160, text_w),
+                        bold=True,
+                        configured=item.get("color"),
+                        colors=self.band_colors,
+                    )
+                )
+            else:
+                self.commands.append(_pdf_text(text_x, cursor, name, "F2", 9, _TEAL))
+            cursor -= 16
             for line in body:
-                self.commands.append(_pdf_text(_MARGIN_X, self.y - 8, line, "F1", 8, _MUTED))
-                self.y -= 11
-            self.y -= 4
+                self.commands.append(_pdf_text(text_x, cursor, line, "F1", 8, _MUTED))
+                cursor -= 11
+            self.y = top - row_h - 4
+        names = [item.get("name") or "Band" for item in ordered[:5]]
+        if len(names) >= 2:
+            self._need(22)
+            flow = "  ->  ".join(names)
+            self.commands.append(_centered_text(_fit(flow, _CONTENT_W - 8, 8), self.y - 12, "F1", 8, _MUTED))
+            self.y -= 20
 
     def _student(self, student: dict, heading: bool):
         if heading:
@@ -1477,7 +1832,13 @@ class _PdfCard:
                 self._heading(section.get("label") or "Exam")
                 if section.get("performance") is not None or section.get("scored") is not None:
                     self._stats(section)
-                self._table(headers, _section_widths(headers), section.get("rows") or [], "No published subjects match this report.", drop_band=False)
+                self._table(
+                    headers,
+                    _section_widths(headers),
+                    section.get("rows") or [],
+                    "No published subjects match this report.",
+                    drop_band=False,
+                )
                 if section.get("retests"):
                     self._heading("Original and retest")
                     self._table(_RETEST_HEADERS, _RETEST_WIDTHS, section["retests"], "")
@@ -1496,48 +1857,115 @@ class _PdfCard:
             return
         self._header_row(headers, widths)
         for index, row in enumerate(rows):
-            height = self._row_height(row, widths)
+            height = self._row_height(row, widths, headers)
             if self.y - height < _MARGIN_BOTTOM:
                 self._open_page(running=True)
                 self._header_row(headers, widths)
             self._body_row(row, widths, shaded=index % 2 == 1, headers=headers)
         self.y -= 6
 
-    def _row_height(self, row: list[str], widths: list[int]) -> float:
+    def _cell_lines(self, value: str, width: float, header: str) -> list[str]:
+        # Match the UI: wrap Part/Subject; keep mark metrics on one line.
+        # Explicit newlines keep combined sub parts stacked in one cell.
+        if value == "":
+            return [""]
+        compact = {
+            "Mark", "Percentage", "Band", "Batch Rank", "Exam Rank", "Exam Top Mark",
+            "Performance", "Results", "Rank", "Top mark", "Original", "Latest", "Change",
+            "Status",
+        }
+        lines: list[str] = []
+        chunks = str(value).split("\n") if "\n" in str(value) else [str(value)]
+        for chunk in chunks:
+            if header in compact:
+                fitted = _fit(chunk, width - 8, size=8)
+                lines.append(fitted if fitted else "-")
+            else:
+                # Assessment/title cells: wrap tightly inside the column.
+                lines.extend(_wrap_lines(chunk, width - 10, size=8, max_lines=4) or (["-"] if not chunk else []))
+        return lines or ["-"]
+
+    def _row_height(self, row: list[str], widths: list[int], headers: list[str] | None = None) -> float:
+        headers = headers or [""] * len(row)
         lines = 1
-        for value, width in zip(row, widths):
-            lines = max(lines, len(_wrap_text(value, width - 8)))
+        for value, width, header in zip(row, widths, headers):
+            lines = max(lines, len(self._cell_lines(value, width, header)))
         return 10 + lines * 11
 
     def _header_row(self, headers: list[str], widths: list[int]):
-        if self.y - 18 < _MARGIN_BOTTOM:
+        wrapped = [_header_lines(header, width) for header, width in zip(headers, widths)]
+        height = 10 + max(len(parts) for parts in wrapped) * 10
+        if self.y - height < _MARGIN_BOTTOM:
             self._open_page(running=True)
         top = self.y
-        self.commands.append(_pdf_rect(_MARGIN_X, top - 18, _CONTENT_W, 18, _TEAL))
+        self.commands.append(_pdf_rect(_MARGIN_X, top - height, _CONTENT_W, height, _TEAL))
         x = _MARGIN_X
-        for header, width in zip(headers, widths):
-            label = _fit(header, width - 8)
-            self.commands.append(_pdf_text(self._align_x(x, width, label, header), top - 13, label, "F2", 9, _WHITE))
+        for parts, width, header in zip(wrapped, widths, headers):
+            for index, part in enumerate(parts):
+                self.commands.append(
+                    _pdf_text(self._align_x(x, width, part, header), top - 11 - index * 10, part, "F2", 8, _WHITE)
+                )
             x += width
-        self.y = top - 18
+        self.y = top - height
 
     def _body_row(self, row: list[str], widths: list[int], shaded: bool, headers: list[str]):
-        wrapped = [_wrap_text(value, width - 8) for value, width in zip(row, widths)]
+        wrapped = [self._cell_lines(value, width, header) for value, width, header in zip(row, widths, headers)]
         height = 10 + max(len(parts) for parts in wrapped) * 11
         top = self.y
         if shaded:
             self.commands.append(_pdf_rect(_MARGIN_X, top - height, _CONTENT_W, height, _ZEBRA))
         rule = top - height
         self.commands.append(f"0.863 0.898 0.882 RG 0.4 w {_MARGIN_X:.2f} {rule:.2f} m {_MARGIN_X + _CONTENT_W:.2f} {rule:.2f} l S")
+        metric = {
+            "Mark", "Percentage", "Band", "Batch Rank", "Exam Rank", "Exam Top Mark",
+            "Performance", "Results", "Rank", "Top mark", "Original", "Latest", "Change",
+            "Status",
+        }
         x = _MARGIN_X
         for parts, width, header in zip(wrapped, widths, headers):
+            ink = _INK
+            block = max(len(parts), 1) * 11
+            # Center shared marks beside stacked sub parts; keep labels top-aligned.
+            text_top = top - (height - block) / 2 - 2 if header in metric else top - 13
+            if header == "Status" and parts and parts[0] not in {"", "-"}:
+                label = parts[0]
+                if label == "Absent":
+                    fill, ink = (0.957, 0.910, 0.910), (0.553, 0.184, 0.184)
+                    chip_w = _band_chip_width(label, width - 6)
+                    chip_x = x + max(3, (width - chip_w) / 2)
+                    self.commands.append(_pdf_rect(chip_x, text_top - 3, chip_w, 14, fill))
+                    self.commands.append(_pdf_text(chip_x + 6, text_top, label, "F1", 8, ink))
+                    x += width
+                    continue
+                if _band_chip_colors(label, colors=self.band_colors):
+                    chip_w = _band_chip_width(label, width - 6)
+                    chip_x = x + max(3, (width - chip_w) / 2)
+                    self.commands.extend(
+                        _pdf_band_chip(chip_x, text_top - 3, label, width - 6, colors=self.band_colors)
+                    )
+                    x += width
+                    continue
+            if header == "Band" and parts and parts[0] not in {"-", "Absent", "Exempt", "Missing", ""}:
+                label = parts[0]
+                if _band_chip_colors(label, colors=self.band_colors):
+                    chip_w = _band_chip_width(label, width - 4)
+                    chip_x = x + max(2, (width - chip_w) / 2)
+                    self.commands.extend(
+                        _pdf_band_chip(chip_x, text_top - 3, label, width - 4, colors=self.band_colors)
+                    )
+                    x += width
+                    continue
             for index, part in enumerate(parts):
-                self.commands.append(_pdf_text(self._align_x(x, width, part, header), top - 13 - index * 11, part, "F1", 9, _INK))
+                if not part:
+                    continue
+                self.commands.append(
+                    _pdf_text(self._align_x(x, width, part, header), text_top - index * 11, part, "F1", 8, ink)
+                )
             x += width
         self.y = top - height
 
     def _align_x(self, x: float, width: float, text: str, header: str) -> float:
-        if header not in {"Performance", "Results", "Mark", "Percentage", "Band", "Rank", "Batch Rank", "Exam Rank", "Top mark", "Exam Top Mark", "Original", "Latest", "Change"}:
+        if header not in {"Performance", "Results", "Mark", "Percentage", "Band", "Rank", "Batch Rank", "Exam Rank", "Top mark", "Exam Top Mark", "Original", "Latest", "Change", "Status"}:
             return x + 4
         used = len(text) * 4.5
         return max(x + 4, x + width - used - 6)
@@ -1553,7 +1981,9 @@ def _pdf_document(report: dict) -> bytes:
         b"<< /Type /Catalog /Pages 2 0 R >>",
         f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>".encode(),
     ]
-    generated = _pdf_escape(f"Generated {report.get('generated') or ''}".strip())
+    motto = _pdf_escape(report.get("footer_motto") or "Learn, Grow and Succeed...it's your Choice")
+    motto_width = min(len(motto) * 4.2, 320)
+    motto_x = _PAGE_W - _MARGIN_X - motto_width
     for index, commands in enumerate(pages):
         content_id = 4 + index * 2
         page = (
@@ -1561,8 +1991,8 @@ def _pdf_document(report: dict) -> bytes:
             f"/Contents {content_id} 0 R /Resources << /Font << /F1 {font_regular} 0 R /F2 {font_bold} 0 R >> >> >>"
         )
         footer = [
-            _pdf_text(_MARGIN_X, 24, f"Page {index + 1} of {len(pages)}", "F1", 8, _MUTED),
-            _pdf_text(360, 24, generated, "F1", 8, _MUTED),
+            _pdf_text(_MARGIN_X, 22, f"Page {index + 1} of {len(pages)}", "F1", 8, _MUTED),
+            _pdf_text(motto_x, 22, motto, "F1", 8, _MUTED),
         ]
         objects.append(page.encode())
         objects.append(_pdf_stream_bytes(commands + footer))
@@ -1619,7 +2049,9 @@ def _write_row(sheet, row: int, values: list, font=None, fill=None, border=None)
 
 def _write_table(sheet, row: int, headers: list[str], rows: list[list]) -> int:
     row = _write_row(sheet, row, headers, font=_HEADER_FONT, fill=_HEADER_FILL, border=_THIN)
+    metric = {"Mark", "Percentage", "Band", "Batch Rank", "Exam Rank", "Exam Top Mark"}
     for index, values in enumerate(rows):
+        start = row
         row = _write_row(
             sheet,
             row,
@@ -1628,6 +2060,15 @@ def _write_table(sheet, row: int, headers: list[str], rows: list[list]) -> int:
             fill=_ZEBRA_FILL if index % 2 else None,
             border=_THIN,
         )
+        part_lines = max(str(values[1]).count("\n") + 1 if len(values) > 1 else 1, 1)
+        if part_lines > 1:
+            sheet.row_dimensions[start].height = max(18, 14 * part_lines)
+        for column, header in enumerate(headers, start=1):
+            cell = sheet.cell(start, column)
+            if header in metric:
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            else:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
     return row + 1
 
 
@@ -1653,8 +2094,8 @@ def _sheet_page(sheet, report: dict, landscape: bool = False):
     sheet.page_margins.footer = 0.28
     sheet.oddHeader.left.text = report.get("institute") or ""
     sheet.oddHeader.right.text = report.get("title") or "Progress card"
-    sheet.oddFooter.left.text = f"Generated {report.get('generated') or ''}".strip()
-    sheet.oddFooter.right.text = "Page &P of &N"
+    sheet.oddFooter.left.text = "Page &P of &N"
+    sheet.oddFooter.right.text = report.get("footer_motto") or "Learn, Grow and Succeed...it's your Choice"
     sheet.sheet_view.showGridLines = False
     sheet.page_setup.horizontalCentered = True
     sheet.print_options.horizontalCentered = True
@@ -1667,7 +2108,6 @@ def _write_student_sheet(sheet, row: int, student: dict, named: bool) -> int:
         row = _write_row(sheet, row, [student.get("name") or "Student"], font=_NAME_FONT)
     facts = [
         ("Student code", student.get("code") or "-"),
-        ("Branch", student.get("branch") or "-"),
         ("Course", student.get("course") or "-"),
         ("Batch", student.get("batch") or "-"),
     ]
@@ -1696,22 +2136,24 @@ def _write_student_sheet(sheet, row: int, student: dict, named: bool) -> int:
         for section in sections:
             row = _write_row(sheet, row, [section.get("label") or "Exam"], font=_SECTION_FONT)
             if section.get("performance") is not None or section.get("scored") is not None:
-                labels = ["Weighted performance", "Scored results", "Absent", "Subject bands"]
-                subject_bands = section.get("subject_bands") or []
-                subject_text = "; ".join(
-                    f"{(item[0] if isinstance(item, (list, tuple)) else item.get('name')) or 'Subject'} · "
-                    f"{(item[1] if isinstance(item, (list, tuple)) else item.get('band')) or '-'}"
-                    for item in subject_bands
-                ) or "-"
+                labels = ["Weighted performance", "Scored results", "Absent"]
                 values = [
                     f"{section.get('performance') or '-'}  {section.get('band') or ''}".strip(),
                     section.get("scored") or "-",
                     str(int(section.get("absent") or 0) + int(section.get("missing") or 0)),
-                    subject_text,
                 ]
                 row = _write_row(sheet, row, labels, font=_LABEL_FONT, fill=_STAT_FILL)
                 sheet.row_dimensions[row].height = 24
                 row = _write_row(sheet, row, values, font=_STAT_FONT, fill=_STAT_FILL)
+                subject_bands = section.get("subject_bands") or []
+                row = _write_row(sheet, row, ["Subject bands"], font=_LABEL_FONT, fill=_STAT_FILL)
+                if subject_bands:
+                    for item in subject_bands:
+                        name = (item[0] if isinstance(item, (list, tuple)) else item.get("name")) or "Subject"
+                        band = (item[1] if isinstance(item, (list, tuple)) else item.get("band")) or "-"
+                        row = _write_row(sheet, row, [name, band], font=_BODY_FONT, fill=_STAT_FILL)
+                else:
+                    row = _write_row(sheet, row, ["—"], font=_BODY_FONT, fill=_STAT_FILL)
                 row += 1
             rows = section.get("rows") or []
             headers = section.get("headers") or _section_headers("Part")
@@ -1787,7 +2229,6 @@ def _workbook(report: dict) -> bytes:
     if report.get("institute"):
         sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
         row = _write_row(sheet, row, [report["institute"]], font=Font(bold=True, name="Calibri", size=12, color="143F3D"))
-    row = _write_row(sheet, row, [f"Generated {report.get('generated') or '-'}"], font=_LABEL_FONT)
     if report.get("period"):
         row = _write_row(sheet, row, [f"Reporting period {report['period']}"])
     for line in report.get("context") or []:

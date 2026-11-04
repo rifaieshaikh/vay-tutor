@@ -137,9 +137,8 @@ export function BandMark({ band, name, place, color }: { band?: string | null; n
 }
 
 export function BandKey({ bands }: { bands?: Band[] | null }) {
-  const rows = (bands && bands.length ? bands : DEFAULT_BANDS)
-    .map((item) => ({ ...item, description: bandDescription(item) }))
-    .filter((item) => item.description);
+  // Descriptions stay on the PDF progress card only — UI shows chips alone.
+  const rows = bands && bands.length ? bands : DEFAULT_BANDS;
   if (rows.length === 0) return null;
   return (
     <section className="band-key" aria-label="Band key">
@@ -148,7 +147,6 @@ export function BandKey({ bands }: { bands?: Band[] | null }) {
         {rows.map((item) => (
           <li key={item.key || item.name}>
             <BandMark band={item.key || item.name} name={item.name} color={item.color} />
-            <p>{item.description}</p>
           </li>
         ))}
       </ul>

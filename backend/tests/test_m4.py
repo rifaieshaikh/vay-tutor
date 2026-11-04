@@ -52,6 +52,42 @@ def test_weighted_aggregate_bands_and_dense_rank():
     assert ranks == {"one": 1, "two": 1, "three": 2}
 
 
+def test_progress_pdf_table_matches_ui_and_keeps_units_identifiable():
+    from app.reporting import _CONTENT_W, _exam_rows, _header_lines, _section_headers, _section_widths
+
+    rows = [
+        {
+            "id": "combo",
+            "subject_id": "acc",
+            "title": "PART EXAM-1 COMPANY ACCOUNTS -UNIT -1&2",
+            "exam_date": "2026-10-01",
+            "status": "scored",
+            "score": 31,
+            "maximum": 40,
+            "part_items": [
+                {"key": "u1", "label": "Chapter 10 : Company Accounts - Unit 1: Testing"},
+                {"key": "u2", "label": "Chapter 10: Company Accounts - Unit 2: Testing"},
+            ],
+            "rank": 3,
+            "batch_rank": 3,
+            "top_score": 37,
+        },
+    ]
+    table = _exam_rows(rows, {"subject": {"acc": "ACCOUNTANCY"}}, {})
+    assert len(table) == 1
+    assert table[0][0] == "ACCOUNTANCY"
+    assert "Unit 1" in table[0][1]
+    assert "Unit 2" in table[0][1]
+    assert "\n" in table[0][1]
+    assert table[0][2] == "31 of 40"
+    headers = _section_headers("Part")
+    widths = _section_widths(headers)
+    assert headers == ["Subject", "Part", "Mark", "Percentage", "Band", "Batch Rank", "Exam Rank", "Exam Top Mark"]
+    assert sum(widths) == _CONTENT_W
+    assert widths[1] >= 150
+    assert _header_lines("Batch Rank", 36) == ["Batch", "Rank"]
+
+
 def test_public_bands_include_pedagogical_descriptions():
     from app.calculating import band_description, public_bands
 
@@ -233,7 +269,9 @@ def test_pdf_report_spans_pages_and_names_the_policy():
     assert b"Page 2 of 2" in payload
     assert b"Amina Khan" in payload
     assert b"Policy version" not in payload
-    assert b"Band key" in payload
+    assert b"Student learning progression" in payload
+    assert b"IAM TIRUR" in payload
+    assert b"Emerging" in payload and b"Outstanding" in payload
     assert b"one to one guidance" in payload
     assert b"Subjects and papers" in payload
     sheet_report = {**report, "filename": "Amina Khan STU-1042 September 2026 progress card.xlsx"}
@@ -422,12 +460,12 @@ def test_progress_card_reports_the_exam_top_mark(client):
     assert queued.status_code == 200, queued.text
     assert client.post(f"/api/v1/jobs/{queued.json()['id']}/run").json()["state"] == "succeeded"
     contents = open(database.files.find_one({"job_id": queued.json()["id"]})["path"], "rb").read()
-    assert b"Exam Top Mark" in contents
+    # Portrait headers wrap: Exam Top Mark → Exam / Top; Batch Rank → Batch / Rank.
+    assert b"Exam" in contents and b"Top" in contents
     assert b"18 of 20" in contents
     assert b"Needs attention" in contents
     assert b"Subject" in contents
-    assert b"Batch Rank" in contents
-    assert b"Exam Rank" in contents
+    assert b"Batch" in contents and b"Rank" in contents
     assert b"60.00%" in contents
     assert b"Progressing" in contents or b"Progres" in contents
 
