@@ -309,6 +309,14 @@ def test_correction_and_restricted_outputs_stay_on_the_active_revision(client):
         },
     )
     assert corrected.status_code == 200, corrected.text
+    pending = client.get(f"/api/v1/marksheets/{dated['id']}").json()
+    assert pending["status"] == "submitted"
+    assert pending["awaiting_approval"] is True
+    proposed = next(item for item in pending["results"] if item["score"] == 1)
+    assert proposed["previous_score"] == scored["score"]
+    card_before = client.get(f"/api/v1/students/{scored['student_id']}/card").json()
+    assert next(item for item in card_before["results"] if item["id"] == scored["id"])["score"] == scored["score"]
+    assert client.post(f"/api/v1/marksheets/{dated['id']}/publish").status_code == 200
     card = client.get(f"/api/v1/students/{scored['student_id']}/card").json()
     current = next(item for item in card["results"] if item["score"] == 1)
     assert current["percentage"] == display_percentage(percentage(1, detail["maximum"]))
@@ -373,6 +381,83 @@ def test_correction_and_restricted_outputs_stay_on_the_active_revision(client):
     assert b"Law secret" not in contents
     assert b"QA" not in contents or b"Policy version" in contents
     assert b"previous" in contents
+
+
+def test_published_correction_awaits_approval_and_supports_joined_after_exam(client):
+    bootstrap(client)
+    database = sync_db(client)
+    institute_id = database.institutes.find_one()["_id"]
+    branch, course, batch, subject, paper, student, late = (str(ObjectId()) for _ in range(7))
+    database.branches.insert_one({"_id": branch, "institute_id": institute_id, "name": "IAM Tirur"})
+    database.courses.insert_one({"_id": course, "institute_id": institute_id, "name": "CA Foundation"})
+    database.offerings.insert_one({"_id": str(ObjectId()), "institute_id": institute_id, "branch_id": branch, "course_id": course})
+    database.batches.insert_one({"_id": batch, "institute_id": institute_id, "branch_id": branch, "course_id": course, "name": "September 2026"})
+    database.subjects.insert_one({"_id": subject, "institute_id": institute_id, "course_id": course, "name": "Accounting"})
+    database.papers.insert_one({"_id": paper, "institute_id": institute_id, "subject_id": subject, "number": 1, "name": "Paper 1"})
+    database.students.insert_one({"_id": student, "institute_id": institute_id, "display_name": "SHANHA", "student_code": "IAM-000099", "name_key": "shanha"})
+    database.students.insert_one({"_id": late, "institute_id": institute_id, "display_name": "LATE JOIN", "student_code": "IAM-000100", "name_key": "late join"})
+    database.enrollments.insert_one({"_id": str(ObjectId()), "institute_id": institute_id, "student_id": student, "branch_id": branch, "course_id": course, "batch_id": batch})
+    database.enrollments.insert_one({"_id": str(ObjectId()), "institute_id": institute_id, "student_id": late, "branch_id": branch, "course_id": course, "batch_id": batch})
+    created = client.post(
+        "/api/v1/marksheets",
+        json={
+            "title": "FE paper",
+            "branch_id": branch,
+            "course_id": course,
+            "batch_id": batch,
+            "subject_id": subject,
+            "paper_id": paper,
+            "exam_type": "unit",
+            "maximum": 20,
+            "exam_date": "2026-10-08",
+            "attempt": "original",
+        },
+    )
+    assert created.status_code == 200, created.text
+    sheet_id = created.json()["id"]
+    assert client.post(f"/api/v1/marksheets/{sheet_id}/results", json={"student_id": student, "status": "scored", "score": 18}).status_code == 200
+    assert client.post(f"/api/v1/marksheets/{sheet_id}/publish").status_code == 200
+    detail = client.get(f"/api/v1/marksheets/{sheet_id}").json()
+    scored = detail["results"][0]
+    corrected = client.post(
+        f"/api/v1/marksheets/{sheet_id}/correct",
+        json={
+            "reason": "Late admission and score check",
+            "edit_version": detail["edit_version"],
+            "changes": [{"result_id": scored["id"], "status": "absent", "score": None}],
+            "inserts": [{"student_id": late, "status": "exempt"}],
+        },
+    )
+    assert corrected.status_code == 200, corrected.text
+    pending = client.get(f"/api/v1/marksheets/{sheet_id}").json()
+    assert pending["awaiting_approval"] is True
+    assert pending["status"] == "submitted"
+    assert {item["student_id"]: item["status"] for item in pending["results"]} == {student: "absent", late: "exempt"}
+    assert client.get(f"/api/v1/students/{student}/card").json()["performance"]["percentage"] == 90
+    rejected = client.post(f"/api/v1/marksheets/{sheet_id}/reject")
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["status"] == "published"
+    restored = client.get(f"/api/v1/marksheets/{sheet_id}").json()
+    assert restored["status"] == "published"
+    assert restored["awaiting_approval"] is False
+    assert len(restored["results"]) == 1
+    assert restored["results"][0]["score"] == 18
+    again = client.get(f"/api/v1/marksheets/{sheet_id}").json()
+    proposed = client.post(
+        f"/api/v1/marksheets/{sheet_id}/correct",
+        json={
+            "reason": "Mark late join",
+            "edit_version": again["edit_version"],
+            "changes": [],
+            "inserts": [{"student_id": late, "status": "exempt"}],
+        },
+    )
+    assert proposed.status_code == 200, proposed.text
+    assert client.post(f"/api/v1/marksheets/{sheet_id}/publish").status_code == 200
+    live = client.get(f"/api/v1/marksheets/{sheet_id}").json()
+    assert live["status"] == "published"
+    assert {item["student_id"]: item["status"] for item in live["results"]}[late] == "exempt"
+    assert next(item for item in live["results"] if item["student_id"] == late)["score"] is None
 
 
 def test_added_marksheet_stays_draft_until_published(client):

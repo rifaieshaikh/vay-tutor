@@ -371,6 +371,7 @@ def test_published_score_can_be_corrected_from_the_preview_or_a_file(client):
         json={"reason": "Temporary change", "edit_version": detail["edit_version"], "changes": [{"result_id": target["id"], "score": 1}]},
     )
     assert corrected.status_code == 200, corrected.text
+    assert client.post(f"/api/v1/marksheets/{brs['id']}/publish").status_code == 200
     again = client.post(
         "/api/v1/imports",
         files={"file": ("ACCOUNTANCY  RANK LIST.xlsx", workbook("ACCOUNTANCY  RANK LIST.xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
@@ -403,6 +404,10 @@ def test_published_score_can_be_corrected_from_the_preview_or_a_file(client):
     assert fixed["totals"]["updates"] >= 1
     finished = client.post(f"/api/v1/imports/{again.json()['id']}/commit", json={"confirm_updates": True})
     assert finished.status_code == 200, finished.text
+    pending = client.get(f"/api/v1/marksheets/{brs['id']}").json()
+    assert pending["awaiting_approval"] is True
+    assert next(item for item in pending["results"] if item["display_name"] == target["display_name"])["score"] == original
+    assert client.post(f"/api/v1/marksheets/{brs['id']}/publish").status_code == 200
     restored = client.get(f"/api/v1/marksheets/{brs['id']}").json()
     assert next(item for item in restored["results"] if item["display_name"] == target["display_name"])["score"] == original
 

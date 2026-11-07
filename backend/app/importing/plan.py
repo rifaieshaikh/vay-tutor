@@ -276,14 +276,20 @@ def _apply_correction(item: dict, group: dict, corrections: dict) -> None:
     if action == "keep":
         item["correction"] = "keep"
         return
-    if "score" not in override and override.get("status") not in {"absent", "missing", "scored"}:
+    if "score" not in override and override.get("status") not in {"absent", "missing", "scored", "exempt"}:
         return
     status = override.get("status")
     score = override.get("score")
-    if status in {"absent", "missing"} or score in {"A", "AB", "a", "ab"}:
+    token = str(score).strip().upper() if isinstance(score, str) else ""
+    if status in {"absent", "missing"} or token in {"A", "AB"}:
         item["status"] = "absent"
         item["score"] = None
         item["percentage"] = None
+    elif status == "exempt" or token in {"JAE", "EXEMPT"}:
+        item["status"] = "exempt"
+        item["score"] = None
+        item["percentage"] = None
+        item["reason_code"] = "joined_after_exam"
     elif score is not None and score != "":
         item["status"] = "scored"
         item["score"] = float(score)

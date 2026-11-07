@@ -137,6 +137,7 @@ function columnLetter(index: number) {
 
 function markText(student: Student) {
   if (student.status === "absent") return "AB";
+  if (student.status === "exempt") return "JAE";
   if (student.status === "missing" || student.score == null) return "";
   return String(student.score);
 }
@@ -255,6 +256,8 @@ function ScoreCell({ student, bad, skipped, title, onCommit }: { student: Studen
     let correction: Record<string, unknown> | null = null;
     if (upper === "A" || upper === "AB") {
       if (student.status !== "absent") correction = { action: "replace", status: "absent", score: null, reason: nextReason };
+    } else if (upper === "JAE" || upper === "EXEMPT") {
+      if (student.status !== "exempt") correction = { action: "replace", status: "exempt", score: null, reason: nextReason };
     } else if (cleaned === "") {
       if (student.status !== "missing") correction = { action: "replace", status: "missing", score: null, reason: nextReason };
     } else {
@@ -925,7 +928,7 @@ export function ImportPage({ canUpload = true, examId = "" }: { canUpload?: bool
                       <div className="actions">
                         <button type="button" className="secondary" onClick={() => navigator.clipboard.readText().then(applyPaste).catch(() => setError("The clipboard could not be read. Paste into the grid instead."))}>Paste from Excel</button>
                       </div>
-                      <p>Paste replaces the grid. Columns are enrollment number, name, and score. Type absent for a student who was not present. Leave a score blank to skip that student.</p>
+                      <p>Paste replaces the grid. Columns are enrollment number, name, and score. Type A or AB for absent, JAE for joined after exam. Leave a score blank to skip that student.</p>
                       <div className="table-wrap" onPaste={(event) => {
                         const text = event.clipboardData.getData("text");
                         if (text.includes("\t") || text.includes("\n")) {
@@ -1092,7 +1095,7 @@ export function ImportPage({ canUpload = true, examId = "" }: { canUpload?: bool
               <>
                 <h3>Confirm import</h3>
                 <CountGrid counts={preview.totals.planned} />
-                <p>{examId ? "Marks are written onto this exam. Students, admissions, and enrollments are not created. A published score changes only when you entered a reason." : "New rows become drafts. A published score changes only when you entered a reason. A score you keep stays as it is."}</p>
+                <p>{examId ? "Marks are written onto this exam. Students, admissions, and enrollments are not created. A published score change needs a reason and awaits approval before progress cards update. Use JAE for joined after exam." : "New rows become drafts. A published score change needs a reason and awaits approval before progress cards update. Use JAE for joined after exam. A score you keep stays as it is."}</p>
                 {updates > 0 ? (
                   <label>
                     <input type="checkbox" checked={confirmUpdates} onChange={(event) => setConfirmUpdates(event.target.checked)} />

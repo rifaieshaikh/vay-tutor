@@ -74,7 +74,23 @@ export function App() {
         <Route path="/ecr/exams/:examId/import" element={<Navigate to="/ecr/import" replace />} />
         <Route path="/ecr/:batchId" element={can("marksheet.view") ? <ExamRegisterPage canAdd={can("marksheet.upload")} /> : <Navigate to="/" replace />} />
         <Route path="/marksheets" element={can("marksheet.view") ? <MarksheetsPage canAdd={can("marksheet.upload")} /> : <Navigate to="/" replace />} />
-        <Route path="/marksheets/:marksheetId" element={can("marksheet.view") ? <MarksheetPage canSetBands={can("marksheet.edit_draft") || can("marksheet.correct")} /> : <Navigate to="/" replace />} />
+        <Route
+          path="/marksheets/:marksheetId"
+          element={
+            can("marksheet.view") ? (
+              <MarksheetPage
+                canSetBands={can("marksheet.edit_draft") || can("marksheet.correct")}
+                canEditDraft={can("marksheet.edit_draft")}
+                canSubmit={can("marksheet.submit")}
+                canCorrect={can("marksheet.correct")}
+                canPublish={can("marksheet.publish")}
+                canWithdraw={can("marksheet.withdraw")}
+              />
+            ) : (
+              <Navigate to="/" replace />
+            )
+          }
+        />
         <Route path="/cards" element={can("progress_card.view") ? <CardsPage session={session} /> : <Navigate to="/" replace />} />
         <Route path="/views" element={can("dashboard.view") ? <ViewsPage /> : <Navigate to="/" replace />} />
         <Route path="/students" element={can("student.lookup") ? <StudentsPage session={session} /> : <Navigate to="/" replace />} />

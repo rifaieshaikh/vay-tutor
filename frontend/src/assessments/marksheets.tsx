@@ -14,6 +14,7 @@ type Marksheet = {
   id: string;
   title: string;
   status: string;
+  awaiting_approval?: boolean;
   branch_id?: string | null;
   course_id?: string | null;
   subject_id?: string | null;
@@ -28,6 +29,7 @@ type Marksheet = {
   file_id: string | null;
   maximum: number | null;
   revision: number | null;
+  active_revision?: number | null;
   edit_version: number;
   uploader_name?: string;
   reviewer_name?: string;
@@ -56,7 +58,24 @@ type Detail = Marksheet & {
   course_bands?: Band[] | null;
   scope?: { kind: string; item_ids: string[] };
   scope_item_names?: string[];
+  correction_reason?: string;
 };
+
+const RESULT_STATUS_LABELS: Record<string, string> = {
+  scored: "Scored",
+  absent: "Absent",
+  missing: "Absent",
+  exempt: "Joined after exam",
+};
+
+function sheetStatusLabel(sheet: { status: string; awaiting_approval?: boolean }) {
+  if (sheet.awaiting_approval) return "Updated — awaiting approval";
+  return STATUS_OPTIONS.find((option) => option.id === sheet.status)?.label || sheet.status;
+}
+
+function resultStatusLabel(status: string) {
+  return RESULT_STATUS_LABELS[status] || status;
+}
 type Draft = { score: string; status: string };
 
 const FILTER_KEYS = ["q", "status", "exam_type", "branch_id", "course_id", "batch_id", "subject_id", "paper_id", "exam_date_from", "exam_date_to", "sort", "page"];
@@ -175,13 +194,17 @@ function cardReturn(value: string | null) {
 function scoreProblem(draft: Draft | undefined, maximum: number | null) {
   if (!draft || draft.status !== "scored") return "";
   const text = draft.score.trim();
-  if (!text) return "Enter a score, or mark the row absent.";
+  if (!text) return "Enter a score, or mark the row absent or joined after exam.";
   const score = Number(text);
   if (!Number.isFinite(score)) return "Enter a number.";
   if (score < 0 || (maximum != null && score > maximum)) {
     return `Use a score from 0 through ${maximum ?? "the maximum"}.`;
   }
   return "";
+}
+
+function draftStatus(status: string) {
+  return status === "missing" ? "absent" : status;
 }
 
 function storedScore(value: string) {
@@ -550,7 +573,7 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
                   <td>{contextFor(sheet) || "—"}</td>
                   <td>{optionLabel("exam_type", sheet.exam_type) || sheet.exam_type || "—"}</td>
                   <td>{formatDate(sheet.exam_date)}</td>
-                  <td><span className={statusClass(sheet.status)}>{STATUS_OPTIONS.find((option) => option.id === sheet.status)?.label || sheet.status}</span></td>
+                  <td><span className={statusClass(sheet.status)}>{sheetStatusLabel(sheet)}</span></td>
                   <td>{sheet.maximum ?? "—"}</td>
                   <td>
                     <span className="source-file">{sheet.source_file || "—"}</span>
@@ -570,7 +593,21 @@ export function MarksheetsPage({ canAdd = false }: { canAdd?: boolean }) {
   );
 }
 
-export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }) {
+export function MarksheetPage({
+  canSetBands = false,
+  canEditDraft = false,
+  canSubmit = false,
+  canCorrect = false,
+  canPublish = false,
+  canWithdraw = false,
+}: {
+  canSetBands?: boolean;
+  canEditDraft?: boolean;
+  canSubmit?: boolean;
+  canCorrect?: boolean;
+  canPublish?: boolean;
+  canWithdraw?: boolean;
+}) {
   const { marksheetId = "" } = useParams();
   const [params] = useSearchParams();
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -646,8 +683,11 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
 
   function startEdit() {
     if (!detail) return;
-    setDrafts(Object.fromEntries(detail.results.map((result) => [result.id, { score: result.score == null ? "" : String(result.score), status: result.status }])));
-    setReason("");
+    setDrafts(Object.fromEntries(detail.results.map((result) => [result.id, {
+      score: result.score == null ? "" : String(result.score),
+      status: draftStatus(result.status),
+    }])));
+    setReason(detail.awaiting_approval ? (detail.correction_reason || "") : "");
     setError("");
     setSaveState("idle");
     setTab("results");
@@ -723,7 +763,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
           setError(`Nothing in this save was stored. Your edits are still on this page. ${why} This page is on the latest version, so you can save again.`);
           return;
         }
-        notify("Saved. A new revision is active. The previous scores are kept.");
+        notify("Saved. The update awaits approval. Progress cards still show the published scores.");
         setSaveState("saved");
         setEditing(false);
         setDrafts({});
@@ -771,10 +811,32 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
     setError("");
     try {
       await api(`/api/v1/marksheets/${sheet.id}/publish`, { method: "POST" });
-      notify(`${sheet.title} is published.`);
+      notify(sheet.awaiting_approval ? `${sheet.title} is published. Progress cards now use this update.` : `${sheet.title} is published.`);
       await reload();
     } catch (reasonText) {
       setError(reasonText instanceof Error ? reasonText.message : "Could not publish.");
+    }
+  }
+
+  async function submit(sheet: Detail) {
+    setError("");
+    try {
+      await api(`/api/v1/marksheets/${sheet.id}/submit`, { method: "POST" });
+      notify(`${sheet.title} was submitted for approval.`);
+      await reload();
+    } catch (reasonText) {
+      setError(reasonText instanceof Error ? reasonText.message : "Could not submit.");
+    }
+  }
+
+  async function reject(sheet: Detail) {
+    setError("");
+    try {
+      await api(`/api/v1/marksheets/${sheet.id}/reject`, { method: "POST" });
+      notify(sheet.awaiting_approval ? "The update was rejected. The published scores stay live." : "Returned to draft.");
+      await reload();
+    } catch (reasonText) {
+      setError(reasonText instanceof Error ? reasonText.message : "Could not reject.");
     }
   }
 
@@ -799,18 +861,41 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
     event.preventDefault();
     if (!detail) return false;
     setError("");
+    const score = rowStatus === "scored" ? Number(rowScore) : null;
     try {
+      if (detail.status === "published") {
+        const why = reason.trim();
+        if (!why) {
+          setError("A published correction needs a reason.");
+          return false;
+        }
+        await api(`/api/v1/marksheets/${detail.id}/correct`, {
+          method: "POST",
+          body: JSON.stringify({
+            reason: why,
+            edit_version: detail.edit_version,
+            changes: [],
+            inserts: [{ student_id: studentId, status: rowStatus, score }],
+          }),
+        });
+        setStudentId("");
+        setRowScore("");
+        setReason("");
+        notify("Student added. The update awaits approval.");
+        await reload();
+        return true;
+      }
       await api(`/api/v1/marksheets/${detail.id}/results`, {
         method: "POST",
         body: JSON.stringify({
           student_id: studentId,
           status: rowStatus,
-          score: rowStatus === "scored" ? Number(rowScore) : null,
+          score,
         }),
       });
       setStudentId("");
       setRowScore("");
-      notify("Student added to this draft.");
+      notify(detail.awaiting_approval ? "Student added to the pending update." : "Student added to this draft.");
       await reload();
       return true;
     } catch (reasonText) {
@@ -826,9 +911,9 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
 
   const changed = detail?.results.filter((result) => {
     const draft = drafts[result.id];
-    return draft && (draft.score !== (result.score == null ? "" : String(result.score)) || draft.status !== result.status);
+    return draft && (draft.score !== (result.score == null ? "" : String(result.score)) || draft.status !== draftStatus(result.status));
   }) || [];
-  const statusLabel = STATUS_OPTIONS.find((option) => option.id === detail?.status)?.label || detail?.status;
+  const statusLabel = detail ? sheetStatusLabel(detail) : "";
   const viewStatus = (result: Result) => (editing && drafts[result.id] ? drafts[result.id].status : result.status);
   const counts = {
     scored: detail?.results.filter((result) => viewStatus(result) === "scored").length || 0,
@@ -837,6 +922,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
       const status = viewStatus(result);
       return status === "absent" || status === "missing";
     }).length || 0,
+    exempt: detail?.results.filter((result) => viewStatus(result) === "exempt").length || 0,
   };
   const needle = resultQuery.trim().toLowerCase();
   const visibleResults = !detail ? [] : !needle
@@ -854,7 +940,21 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
     );
   }
 
-  const canAddStudent = detail.status === "draft" || detail.status === "submitted";
+  const canAddStudent = (detail.status === "draft" && canEditDraft)
+    || (detail.awaiting_approval && canEditDraft)
+    || (detail.status === "published" && canCorrect);
+  const canEditScores = (detail.status === "draft" && canEditDraft)
+    || (detail.awaiting_approval && canEditDraft)
+    || (detail.status === "published" && canCorrect);
+  const pageLead = detail.awaiting_approval
+    ? "This update awaits approval. Progress cards still show the published scores."
+    : detail.status === "draft"
+      ? "Enter the scores, then submit or publish. A draft stays off progress cards."
+      : detail.status === "submitted"
+        ? "Publish when the scores are ready, or reject to return it to draft."
+        : detail.status === "published"
+          ? "These scores are on progress cards. Edit to propose an update for approval, or withdraw."
+          : "Correct the scores before publishing again.";
   const scopeKind = detail.scope?.kind || detail.exam_type || "subject";
   const subPartType = scopeKind === "subject" ? "Whole subject" : kindLabel(kinds, scopeKind);
   const subPartLabel = scopeKind === "subject" ? "" : kindLabel(kinds, scopeKind);
@@ -883,18 +983,21 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
       <div className="title-row">
         <div>
           <h1>{detail.title}</h1>
-          <p className="page-lead">{detail.status === "draft" ? "Enter the scores, then publish. A draft stays off progress cards." : detail.status === "submitted" ? "Publish when the scores are ready." : detail.status === "published" ? "These scores are on progress cards. Withdraw them to correct a published sheet." : "Correct the scores before publishing again."}</p>
+          <p className="page-lead">{pageLead}</p>
         </div>
         <div className="actions">
           {!editing && detail.exam_id ? <Link to={`/ecr/import?branch_id=${detail.branch_id || ""}&course_id=${detail.course_id || ""}&batch_id=${detail.batch_ids?.[0] || ""}`}>Import</Link> : null}
           {!editing && canAddStudent ? (
-            <button type="button" onClick={() => setPanel("student")}>Add a student</button>
+            <button type="button" onClick={() => { setReason(""); setPanel("student"); }}>Add a student</button>
           ) : null}
-          {!editing && (detail.status === "draft" || detail.status === "published") ? <button type="button" className="text-button" onClick={startEdit}>Edit scores</button> : null}
+          {!editing && canEditScores ? <button type="button" className="text-button" onClick={startEdit}>Edit scores</button> : null}
           {editing ? <button type="button" onClick={saveEdits} disabled={saveState === "saving"}>{saveState === "saving" ? "Saving…" : "Save"}</button> : null}
           {editing ? <button type="button" className="text-button" onClick={cancelEdit}>Cancel</button> : null}
-          {!editing && detail.status !== "published" && detail.status !== "withdrawn" ? <button type="button" className="text-button" onClick={() => publish(detail)}>Publish</button> : null}
-          {!editing && detail.status === "published" ? <button type="button" className="text-button" onClick={() => setPanel("withdraw")}>Withdraw</button> : null}
+          {!editing && detail.status === "draft" && canSubmit ? <button type="button" className="text-button" onClick={() => submit(detail)}>Submit</button> : null}
+          {!editing && detail.status === "submitted" && canPublish ? <button type="button" className="text-button" onClick={() => publish(detail)}>{detail.awaiting_approval ? "Approve & publish" : "Publish"}</button> : null}
+          {!editing && detail.status === "submitted" && canPublish ? <button type="button" className="text-button" onClick={() => reject(detail)}>Reject</button> : null}
+          {!editing && detail.status === "draft" && canPublish ? <button type="button" className="text-button" onClick={() => publish(detail)}>Publish</button> : null}
+          {!editing && detail.status === "published" && canWithdraw ? <button type="button" className="text-button" onClick={() => setPanel("withdraw")}>Withdraw</button> : null}
         </div>
       </div>
       <div className="page-tabs" role="tablist" aria-label="Marksheet sections" onKeyDown={(event) => moveTab(event, ["results", "details"] as const, tab, setTab)}>
@@ -961,6 +1064,7 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
         <span><strong>{detail.results.length}</strong> Students</span>
         <span><strong>{counts.scored}</strong> Scored</span>
         <span><strong>{counts.absent}</strong> Absent</span>
+        <span><strong>{counts.exempt}</strong> Joined after exam</span>
       </div>
       <label className="result-search">Search students
         <input
@@ -982,8 +1086,8 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
               {changed.map((result) => (
                 <tr key={result.id}>
                   <td>{result.display_name || "Student"}</td>
-                  <td>{result.score ?? "—"} · {({ scored: "Scored", absent: "Absent", missing: "Absent" }[result.status] || result.status)}</td>
-                  <td>{drafts[result.id].status === "scored" ? drafts[result.id].score || "—" : "—"} · {({ scored: "Scored", absent: "Absent", missing: "Absent" }[drafts[result.id].status] || drafts[result.id].status)}</td>
+                  <td>{result.score ?? "—"} · {resultStatusLabel(result.status)}</td>
+                  <td>{drafts[result.id].status === "scored" ? drafts[result.id].score || "—" : "—"} · {resultStatusLabel(drafts[result.id].status)}</td>
                 </tr>
               ))}
             </tbody>
@@ -1004,14 +1108,15 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
                     <td>{result.source?.row ?? "—"}</td>
                     <td>
                       {editing ? (
-                        <select aria-label={`Status for ${result.display_name || "student"}`} value={(drafts[result.id]?.status || result.status) === "missing" ? "absent" : (drafts[result.id]?.status || result.status)} onChange={(event) => updateDraft(result, { status: event.target.value })}>
+                        <select aria-label={`Status for ${result.display_name || "student"}`} value={draftStatus(drafts[result.id]?.status || result.status)} onChange={(event) => updateDraft(result, { status: event.target.value })}>
                           <option value="scored">Scored</option>
                           <option value="absent">Absent</option>
+                          <option value="exempt">Joined after exam</option>
                         </select>
-                      ) : ({ scored: "Scored", absent: "Absent", missing: "Absent" }[result.status] || result.status)}
+                      ) : resultStatusLabel(result.status)}
                     </td>
                     <td>
-                      {editing && (drafts[result.id]?.status || result.status) === "scored" ? (
+                      {editing && draftStatus(drafts[result.id]?.status || result.status) === "scored" ? (
                         <input
                           aria-label={`Score for ${result.display_name || "student"}`}
                           aria-invalid={Boolean(scoreProblem(drafts[result.id], detail.maximum))}
@@ -1081,9 +1186,13 @@ export function MarksheetPage({ canSetBands = false }: { canSetBands?: boolean }
                   <select value={rowStatus} onChange={(event) => setRowStatus(event.target.value)}>
                     <option value="scored">Scored</option>
                     <option value="absent">Absent</option>
+                    <option value="exempt">Joined after exam</option>
                   </select>
                 </label>
                 {rowStatus === "scored" ? <label>Score<input value={rowScore} onChange={(event) => setRowScore(event.target.value)} type="number" min="0" max={detail.maximum ?? undefined} step="0.01" required /></label> : null}
+                {detail.status === "published" ? (
+                  <label className="span-2">Reason for this revision<input value={reason} onChange={(event) => setReason(event.target.value)} required /></label>
+                ) : null}
               </div>
             )}
             {error ? <p className="error" role="alert">{error}</p> : null}

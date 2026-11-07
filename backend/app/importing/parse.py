@@ -328,6 +328,8 @@ def _mark(raw, maximum: int | None) -> tuple[str, float | None]:
         return "absent", None
     if isinstance(raw, str) and raw.strip().upper() in {"A", "AB"}:
         return "absent", None
+    if isinstance(raw, str) and raw.strip().upper() in {"JAE", "EXEMPT"}:
+        return "exempt", None
     if isinstance(raw, str):
         return "invalid", None
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):

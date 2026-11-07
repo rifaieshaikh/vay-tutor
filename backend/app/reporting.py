@@ -654,7 +654,7 @@ def _plain_number(value) -> str:
 
 
 def _status_label(status: str | None) -> str:
-    labels = {"missing": "Absent", "absent": "Absent", "exempt": "Exempt", "scored": "Scored"}
+    labels = {"missing": "Absent", "absent": "Absent", "exempt": "Joined after exam", "scored": "Scored"}
     return labels.get(status or "", status or "-")
 
 

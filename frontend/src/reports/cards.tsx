@@ -276,7 +276,7 @@ function AcademicStats({
 
 function resultMark(result: Result) {
   if (result.status === "absent" || result.status === "missing") return "Absent";
-  if (result.status === "exempt") return "Exempt";
+  if (result.status === "exempt") return "Joined after exam";
   if (result.score == null) return "—";
   return `${result.score} of ${result.maximum ?? "—"}`;
 }

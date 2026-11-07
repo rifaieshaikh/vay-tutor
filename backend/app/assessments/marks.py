@@ -22,7 +22,7 @@ async def band_policy_for_sheet(database, sheet: dict) -> dict | None:
 async def refresh_sheet_marks(database, sheet: dict) -> None:
     from app.calculating import band, dense_ranks, display_percentage, percentage
 
-    revision = sheet.get("active_revision") or sheet.get("revision") or 1
+    revision = sheet.get("revision") or sheet.get("active_revision") or 1
     rows = await database.results.find({"marksheet_id": sheet["_id"], "revision": revision}).to_list(length=500)
     policy = await band_policy_for_sheet(database, sheet)
     ranked = dense_ranks(

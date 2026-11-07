@@ -326,7 +326,8 @@ def test_every_staff_flow(client):
     must(client.post(f"/api/v1/marksheets/{sheet['id']}/results", json={
         "student_id": aisha, "status": "scored", "score": 18,
     }))
-    draft_card = must(client.get(f"/api/v1/students/{aisha}/card"))
+    morning_card = {"batch_id": batches["Morning"]}
+    draft_card = must(client.get(f"/api/v1/students/{aisha}/card", params=morning_card))
     assert draft_card["empty_reason"] == "unpublished"
     assert draft_card["performance"]["scored"] == 0
     must(client.post(f"/api/v1/marksheets/{sheet['id']}/submit"))
@@ -335,7 +336,7 @@ def test_every_staff_flow(client):
     assert must(client.get(f"/api/v1/marksheets/{sheet['id']}"))["status"] == "draft"
     assert board_item(must(client.get("/api/v1/dashboard")), "marksheets")["count"] == 0
     must(client.post(f"/api/v1/marksheets/{sheet['id']}/publish"))
-    published = must(client.get(f"/api/v1/students/{aisha}/card"))
+    published = must(client.get(f"/api/v1/students/{aisha}/card", params=morning_card))
     assert published["performance"]["percentage"] == 90
     assert published["performance"]["scored"] == 1
     assert must(client.get("/api/v1/views/institute", params={"batch_id": batches["Morning"]}))["performance"]["scored"] == 1
@@ -347,13 +348,19 @@ def test_every_staff_flow(client):
         "edit_version": detail["edit_version"],
         "changes": [{"result_id": scored["id"], "score": 16}],
     }))
-    assert must(client.get(f"/api/v1/students/{aisha}/card"))["performance"]["percentage"] == 80
+    pending = must(client.get(f"/api/v1/marksheets/{sheet['id']}"))
+    assert pending["status"] == "submitted"
+    assert pending["awaiting_approval"] is True
+    assert next(item for item in pending["results"] if item["student_id"] == aisha)["score"] == 16
+    assert must(client.get(f"/api/v1/students/{aisha}/card", params=morning_card))["performance"]["percentage"] == 90
+    must(client.post(f"/api/v1/marksheets/{sheet['id']}/publish"))
+    assert must(client.get(f"/api/v1/students/{aisha}/card", params=morning_card))["performance"]["percentage"] == 80
     refreshed = must(client.get(f"/api/v1/marksheets/{sheet['id']}"))
     must(client.post(f"/api/v1/marksheets/{sheet['id']}/withdraw", json={
         "reason": "The paper was set aside",
         "edit_version": refreshed["edit_version"],
     }))
-    withdrawn = must(client.get(f"/api/v1/students/{aisha}/card"))
+    withdrawn = must(client.get(f"/api/v1/students/{aisha}/card", params=morning_card))
     assert withdrawn["empty_reason"] == "unpublished"
     assert withdrawn["performance"]["scored"] == 0
     stored = sync_db(client).results.find_one({"marksheet_id": sheet["id"], "student_id": aisha})

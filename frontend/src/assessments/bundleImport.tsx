@@ -1083,10 +1083,12 @@ function sheetPayload(sheet: Sheet, draft: Draft, marks: Record<string, { name: 
       const edited = marks[`roster:${sheet.id}:${student.student_id}`];
       if (!edited) continue;
       const token = edited.score.trim();
-      const absent = token === "" || token.toUpperCase() === "AB" || token.toUpperCase() === "A";
+      const upper = token.toUpperCase();
+      const absent = token === "" || upper === "AB" || upper === "A";
+      const exempt = upper === "JAE" || upper === "EXEMPT";
       rosterMarks[student.student_id] = {
-        score: absent ? "" : token,
-        status: absent ? "absent" : "scored",
+        score: absent || exempt ? "" : token,
+        status: exempt ? "exempt" : absent ? "absent" : "scored",
         batch_id: edited.batchId || "",
         reason: edited.reason || "",
       };
@@ -1098,11 +1100,14 @@ function sheetPayload(sheet: Sheet, draft: Draft, marks: Record<string, { name: 
     if (edited.batchId) rowBatchIds[String(student.row)] = edited.batchId;
     if (edited.score !== undefined && edited.score !== shownScore(student)) {
       const token = edited.score.trim();
+      const upper = token.toUpperCase();
       corrections[`${group?.id}:${student.row}`] = token === ""
         ? { status: "missing", action: "replace", reason: edited.reason }
-        : token.toUpperCase() === "AB" || token.toUpperCase() === "A"
+        : upper === "AB" || upper === "A"
           ? { status: "absent", action: "replace", reason: edited.reason }
-          : { score: token, status: "scored", action: "replace", reason: edited.reason };
+          : upper === "JAE" || upper === "EXEMPT"
+            ? { status: "exempt", action: "replace", reason: edited.reason }
+            : { score: token, status: "scored", action: "replace", reason: edited.reason };
     }
   }
   const groups = Object.fromEntries(sheet.groups.map((item) => [
@@ -1133,6 +1138,7 @@ function sheetPayload(sheet: Sheet, draft: Draft, marks: Record<string, { name: 
 
 function shownScore(student: Student) {
   if (student.status === "absent") return "AB";
+  if (student.status === "exempt") return "JAE";
   if (student.score == null) return "";
   return String(student.score);
 }

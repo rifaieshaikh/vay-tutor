@@ -537,9 +537,12 @@ async def _append_roster(
         }
         group["students"].append(student)
         token = mark.get("score")
-        if mark.get("status") == "scored" or (
-            token not in (None, "") and str(token).strip().upper() not in {"A", "AB"}
-        ):
+        upper = str(token).strip().upper() if token not in (None, "") else ""
+        if mark.get("status") == "exempt" or upper in {"JAE", "EXEMPT"}:
+            student["status"] = "exempt"
+            student["score"] = None
+            student["reason_code"] = "joined_after_exam"
+        elif mark.get("status") == "scored" or (upper and upper not in {"A", "AB"}):
             try:
                 student["score"] = float(token)
                 student["status"] = "scored"

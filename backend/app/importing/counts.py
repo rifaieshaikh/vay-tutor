@@ -101,7 +101,12 @@ def _result_change(context: dict, group: dict, student: dict) -> tuple[str, floa
         student["percentage"] = existing.get("percentage")
         return "unchanged", existing.get("score")
     if existing is None:
-        return ("reject", None) if marksheet.get("status") == "published" else ("insert", None)
+        if marksheet.get("status") == "published":
+            if student.get("correction") == "replace" and str(student.get("correction_reason") or "").strip():
+                student["published_insert"] = True
+                return "insert", None
+            return "reject", None
+        return "insert", None
     if _same_mark(existing, student):
         return "unchanged", existing.get("score")
     if marksheet.get("status") == "published":

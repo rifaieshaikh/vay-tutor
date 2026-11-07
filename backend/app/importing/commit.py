@@ -269,14 +269,10 @@ async def _apply_published_corrections(db, client, actor: dict, changes: list, l
             reason,
             [{"result_id": row["result_id"], "score": row["score"], "status": row["status"]} for row in updates],
             sheet.get("edit_version", 0),
+            inserts=[{"document": dict(row["document"])} for row in inserts],
         )
         for row in inserts:
-            document = dict(row["document"])
-            document["_id"] = str(ObjectId())
-            document["revision"] = corrected["revision"]
-            document["active"] = True
-            await db.results.insert_one(document)
-            _note(ledger, "results", "insert", document["_id"])
+            _note(ledger, "results", "insert", f"{marksheet_id}:{row.get('document', {}).get('student_id')}")
         for row in updates:
             _note(ledger, "results", "update", row["result_id"])
 
@@ -446,6 +442,50 @@ async def _commit_group(db, session, job, actor, sheet, group, branch, course, s
                     "status": student.get("status"),
                     "reason": student["correction_reason"],
                 })
+            elif (
+                existing is None
+                and existing_name
+                and student.get("correction") == "replace"
+                and str(student.get("correction_reason") or "").strip()
+            ):
+                person = await db.students.find_one({"_id": existing_name["student_id"]}, session=session)
+                enrollment = await db.enrollments.find_one(
+                    {"student_id": existing_name["student_id"], "batch_id": batch_id},
+                    session=session,
+                )
+                if person is None or enrollment is None:
+                    _note(ledger, "results", "reject", f"{marksheet['_id']}:{student['name_key']}:{student['row']}")
+                else:
+                    document = {
+                        "institute_id": institute_id,
+                        "marksheet_id": marksheet["_id"],
+                        "enrollment_id": enrollment["_id"],
+                        "student_id": person["_id"],
+                        "status": student.get("status") or "absent",
+                        "score": student.get("score"),
+                        "maximum": group["maximum"],
+                        "exam_date": sheet.get("exam_date"),
+                        "title": title,
+                        "assessment_id": marksheet.get("assessment_id"),
+                        "attempt_kind": marksheet.get("attempt_kind") or "original",
+                        "exam_type": sheet.get("exam_type"),
+                        "counts_in_aggregate": True,
+                        "branch_id": branch["_id"],
+                        "course_id": course["_id"],
+                        "batch_id": batch_id,
+                        "subject_id": subject["_id"],
+                        "paper_id": paper["_id"],
+                        "source": {"sheet": sheet["name"], "job_id": job["_id"]},
+                    }
+                    if document["status"] == "exempt":
+                        document["reason_code"] = "joined_after_exam"
+                        document["score"] = None
+                    queued.append({
+                        "marksheet_id": marksheet["_id"],
+                        "insert": True,
+                        "reason": student["correction_reason"],
+                        "document": document,
+                    })
             else:
                 _note(ledger, "results", "reject", f"{marksheet['_id']}:{student['name_key']}:{student['row']}")
             continue
@@ -1116,6 +1156,10 @@ async def _commit_bundle_scores(db, session, job, actor, exam, marksheet, sheet,
 
 
 def _bundle_result_document(actor, job, exam, marksheet, sheet, student, person, enrollment, batch, revision, result_id=None) -> dict:
+    status = student.get("status") or "absent"
+    score = None if status in {"absent", "missing", "exempt"} else student.get("score")
+    if status == "missing":
+        status = "absent"
     document = {
         "institute_id": actor["institute_id"],
         "marksheet_id": marksheet["_id"],
@@ -1123,12 +1167,12 @@ def _bundle_result_document(actor, job, exam, marksheet, sheet, student, person,
         "student_id": person["_id"],
         "revision": revision,
         "active": False,
-        "status": student["status"],
-        "score": student["score"],
+        "status": status,
+        "score": score,
         "maximum": exam["maximum"],
-        "percentage": student.get("percentage"),
-        "rank": student.get("rank"),
-        "band": student.get("band"),
+        "percentage": student.get("percentage") if status == "scored" else None,
+        "rank": student.get("rank") if status == "scored" else None,
+        "band": student.get("band") if status == "scored" else None,
         "exam_date": exam.get("exam_date"),
         "title": exam.get("title"),
         "assessment_id": exam["assessment_id"],
@@ -1148,6 +1192,8 @@ def _bundle_result_document(actor, job, exam, marksheet, sheet, student, person,
             "column": student.get("column"),
         },
     }
+    if status == "exempt":
+        document["reason_code"] = "joined_after_exam"
     if result_id:
         document["_id"] = result_id
     return document

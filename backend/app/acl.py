@@ -75,6 +75,7 @@ ROLE_TEMPLATES: dict[str, tuple[str, ...]] = {
         "marksheet.upload",
         "marksheet.edit_draft",
         "marksheet.submit",
+        "marksheet.correct",
         "progress_card.view",
     ),
     "viewer": (

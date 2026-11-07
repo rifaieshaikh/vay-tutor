@@ -325,7 +325,7 @@ def test_bundle_import_matches_existing_exams(client):
     assert any(item["code"] == "import.submitted" for item in submitted.json()["blockers"])
     assert client.post(f"/api/v1/imports/{submitted_id}/commit", json={"confirm_updates": True}).status_code == 422
 
-    database.marksheets.update_one({"_id": marksheet_id}, {"$set": {"status": "published"}})
+    assert client.post(f"/api/v1/marksheets/{marksheet_id}/publish").status_code == 200
     published_id = _upload(client, branch_id, course_id, [morning], _workbook([("First", [["Risha Fathima", 12]])]), "published.xlsx")
     client.patch(f"/api/v1/imports/{published_id}", json={"sheets": {"sheet-0": {"exam": _exam("Unit test", "2026-08-01", subject_id)}}})
     published = client.get(f"/api/v1/imports/{published_id}")
@@ -338,6 +338,15 @@ def test_bundle_import_matches_existing_exams(client):
     corrected = client.get(f"/api/v1/imports/{published_id}")
     assert corrected.json()["ready"] is True, corrected.text
     assert client.post(f"/api/v1/imports/{published_id}/commit", json={"confirm_updates": True}).status_code == 200
+    sheet = database.marksheets.find_one({"_id": marksheet_id})
+    assert sheet["status"] == "submitted"
+    assert sheet["active_revision"] is not None
+    assert sheet["revision"] > sheet["active_revision"]
+    live_row = database.results.find_one({"marksheet_id": marksheet_id, "student_id": risha, "active": True})
+    assert live_row["score"] == 18
+    pending_row = database.results.find_one({"marksheet_id": marksheet_id, "student_id": risha, "revision": sheet["revision"]})
+    assert pending_row["score"] == 12
+    assert client.post(f"/api/v1/marksheets/{marksheet_id}/publish").status_code == 200
     corrected_row = database.results.find_one({"marksheet_id": marksheet_id, "student_id": risha, "active": True})
     assert corrected_row["score"] == 12
 

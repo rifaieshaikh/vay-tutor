@@ -24,6 +24,8 @@ from app.importing.parse import parse_workbook, workbook_rows
 from app.importing.plan import apply_decisions, variant_suggestions
 from app.importing.publish import (
     correct_marksheet,
+    normalize_result_status,
+    pending_published_correction,
     reject_marksheet,
     require_current_version,
     submit_marksheet,
@@ -42,6 +44,7 @@ class DecisionBody(BaseModel):
 class ReasonBody(BaseModel):
     reason: str = ""
     changes: list[dict] = Field(default_factory=list)
+    inserts: list[dict] = Field(default_factory=list)
     edit_version: int | None = None
 
 
@@ -337,6 +340,9 @@ async def upload_corrections(request: Request, import_id: str, file: UploadFile 
         status = None
         if isinstance(score, str) and score.strip().upper() in {"A", "AB"}:
             status = "absent"
+            score = None
+        elif isinstance(score, str) and score.strip().upper() in {"JAE", "EXEMPT"}:
+            status = "exempt"
             score = None
         elif score in (None, ""):
             status = "absent"
@@ -776,14 +782,19 @@ async def save_marksheet_grid(request: Request, body: MarksheetGrid) -> dict:
     for row in filled:
         raw = row.score.strip()
         enrollment = by_code[row.enrollment_code.strip()]
-        if raw.casefold() in {"a", "absent"}:
+        if raw.casefold() in {"a", "ab", "absent"}:
             prepared.append((enrollment["student_id"], "absent", None))
+            continue
+        if raw.casefold() in {"jae", "exempt"}:
+            prepared.append((enrollment["student_id"], "exempt", None))
             continue
         try:
             score = float(raw)
         except ValueError as exc:
             raise AppError(
-                422, "import.invalid_mark", f"{row.enrollment_code.strip()} needs a score or absent."
+                422,
+                "import.invalid_mark",
+                f"{row.enrollment_code.strip()} needs a score, absent, or JAE.",
             ) from exc
         if score < 0 or score > body.maximum:
             raise AppError(422, "import.invalid_mark", f"{row.enrollment_code.strip()} is outside 0 through the maximum.")
@@ -826,17 +837,20 @@ async def save_marksheet_grid(request: Request, body: MarksheetGrid) -> dict:
 @router.post("/marksheets/{marksheet_id}/results")
 async def add_result(request: Request, marksheet_id: str, body: ResultCreate) -> dict:
     user, sheet = await _editable(request, marksheet_id, "marksheet.edit_draft")
+    if sheet.get("status") == "published":
+        raise AppError(
+            422,
+            "marksheet.state",
+            "Save a correction with the new student, or wait until the update is awaiting approval.",
+        )
     if sheet.get("status") not in {"draft", "submitted"}:
-        raise AppError(422, "marksheet.state", "Add students on a draft. A published sheet uses a correction.")
-    if body.status not in {"scored", "absent", "missing"}:
-        raise AppError(422, "import.invalid_mark", "Choose scored or absent.")
-    score = body.score
-    status = "absent" if body.status == "missing" else body.status
+        raise AppError(422, "marksheet.state", "Add students on a draft or an update awaiting approval.")
+    if body.status not in {"scored", "absent", "missing", "exempt"}:
+        raise AppError(422, "import.invalid_mark", "Choose scored, absent, or joined after exam.")
+    status, score = normalize_result_status(body.status, body.score)
     if status == "scored":
         if score is None or score < 0 or (sheet.get("maximum") is not None and score > sheet["maximum"]):
             raise AppError(422, "import.invalid_mark", "The score must be from 0 through the maximum.")
-    else:
-        score = None
     enrollment = await db(request).enrollments.find_one(
         {"student_id": body.student_id, "batch_id": {"$in": sheet.get("batch_ids") or []}}
     )
@@ -849,32 +863,33 @@ async def add_result(request: Request, marksheet_id: str, body: ResultCreate) ->
     if duplicate:
         raise AppError(409, "marksheet.duplicate", "That student is already on this marksheet.")
     result_id = str(ObjectId())
-    await db(request).results.insert_one(
-        {
-            "_id": result_id,
-            "institute_id": user["institute_id"],
-            "marksheet_id": sheet["_id"],
-            "enrollment_id": enrollment["_id"],
-            "student_id": body.student_id,
-            "revision": revision,
-            "active": False,
-            "status": status,
-            "score": score,
-            "maximum": sheet.get("maximum"),
-            "exam_date": sheet.get("exam_date"),
-            "title": sheet.get("title"),
-            "assessment_id": sheet.get("assessment_id"),
-            "attempt_kind": sheet.get("attempt_kind") or "original",
-            "exam_type": sheet.get("exam_type"),
-            "counts_in_aggregate": True,
-            "branch_id": sheet.get("branch_id"),
-            "course_id": sheet.get("course_id"),
-            "batch_id": enrollment["batch_id"],
-            "subject_id": sheet.get("subject_id"),
-            "paper_id": sheet.get("paper_id"),
-            "source": {"sheet": "Entered here"},
-        }
-    )
+    document = {
+        "_id": result_id,
+        "institute_id": user["institute_id"],
+        "marksheet_id": sheet["_id"],
+        "enrollment_id": enrollment["_id"],
+        "student_id": body.student_id,
+        "revision": revision,
+        "active": False,
+        "status": status,
+        "score": score,
+        "maximum": sheet.get("maximum"),
+        "exam_date": sheet.get("exam_date"),
+        "title": sheet.get("title"),
+        "assessment_id": sheet.get("assessment_id"),
+        "attempt_kind": sheet.get("attempt_kind") or "original",
+        "exam_type": sheet.get("exam_type"),
+        "counts_in_aggregate": True,
+        "branch_id": sheet.get("branch_id"),
+        "course_id": sheet.get("course_id"),
+        "batch_id": enrollment["batch_id"],
+        "subject_id": sheet.get("subject_id"),
+        "paper_id": sheet.get("paper_id"),
+        "source": {"sheet": "Entered here"},
+    }
+    if status == "exempt":
+        document["reason_code"] = "joined_after_exam"
+    await db(request).results.insert_one(document)
     version = sheet.get("edit_version", 0) + 1
     await db(request).marksheets.update_one({"_id": sheet["_id"]}, {"$set": {"edit_version": version}})
     from app.assessments.marks import refresh_sheet_marks
@@ -1007,8 +1022,53 @@ async def reject_route(request: Request, marksheet_id: str) -> dict:
 @router.post("/marksheets/{marksheet_id}/correct")
 async def correct_route(request: Request, marksheet_id: str, body: ReasonBody) -> dict:
     user, sheet = await _editable(request, marksheet_id, "marksheet.correct")
+    inserts = []
+    for row in body.inserts:
+        student_id = row.get("student_id")
+        if not student_id:
+            raise AppError(422, "marksheet.student", "Choose a student to add.")
+        enrollment = await db(request).enrollments.find_one(
+            {"student_id": student_id, "batch_id": {"$in": sheet.get("batch_ids") or []}}
+        )
+        if enrollment is None:
+            raise AppError(422, "marksheet.not_enrolled", "That student is not enrolled in this batch.")
+        status, score = normalize_result_status(row.get("status") or "absent", row.get("score"))
+        if status == "scored":
+            if score is None or score < 0 or (sheet.get("maximum") is not None and score > sheet["maximum"]):
+                raise AppError(422, "import.invalid_mark", "The score must be from 0 through the maximum.")
+        document = {
+            "institute_id": user["institute_id"],
+            "marksheet_id": sheet["_id"],
+            "enrollment_id": enrollment["_id"],
+            "student_id": student_id,
+            "status": status,
+            "score": score,
+            "maximum": sheet.get("maximum"),
+            "exam_date": sheet.get("exam_date"),
+            "title": sheet.get("title"),
+            "assessment_id": sheet.get("assessment_id"),
+            "attempt_kind": sheet.get("attempt_kind") or "original",
+            "exam_type": sheet.get("exam_type"),
+            "counts_in_aggregate": True,
+            "branch_id": sheet.get("branch_id"),
+            "course_id": sheet.get("course_id"),
+            "batch_id": enrollment["batch_id"],
+            "subject_id": sheet.get("subject_id"),
+            "paper_id": sheet.get("paper_id"),
+            "source": {"sheet": "Entered here"},
+        }
+        if status == "exempt":
+            document["reason_code"] = "joined_after_exam"
+        inserts.append({"document": document})
     return await correct_marksheet(
-        db(request), request.app.state.client, user, sheet, body.reason, body.changes, body.edit_version
+        db(request),
+        request.app.state.client,
+        user,
+        sheet,
+        body.reason,
+        body.changes,
+        body.edit_version,
+        inserts=inserts,
     )
 
 
@@ -1100,26 +1160,33 @@ async def patch_marksheet(request: Request, marksheet_id: str, body: MarksheetPa
 async def patch_result(request: Request, marksheet_id: str, result_id: str, body: ResultPatch) -> dict:
     _user, sheet = await _editable(request, marksheet_id, "marksheet.edit_draft")
     require_current_version(sheet, body.edit_version)
-    if sheet.get("status") != "draft":
-        raise AppError(422, "marksheet.state", "Only a draft result can be corrected here.")
+    if sheet.get("status") != "draft" and not pending_published_correction(sheet):
+        raise AppError(422, "marksheet.state", "Only a draft or an update awaiting approval can be edited here.")
     result = await db(request).results.find_one({"_id": result_id, "marksheet_id": sheet["_id"]})
     if result is None:
         raise AppError(404, "not_found", "That record was not found.")
+    if pending_published_correction(sheet) and result.get("revision") != sheet.get("revision"):
+        raise AppError(422, "marksheet.state", "Edit the pending update, not the live published revision.")
     updates = {"previous_score": result.get("score")}
-    if body.status in {"absent", "missing"}:
-        updates["status"] = "absent"
-        updates["score"] = None
-    elif body.status == "scored" or body.score is not None:
-        if body.score is None:
-            raise AppError(422, "import.invalid_mark", "Enter a score, or mark the row absent.")
-        if body.score < 0 or (sheet.get("maximum") is not None and body.score > sheet["maximum"]):
-            raise AppError(422, "import.invalid_mark", "The score must be from 0 through the maximum.")
-        updates["score"] = body.score
-        updates["status"] = "scored"
-    elif body.status:
-        raise AppError(422, "import.invalid_mark", "Choose scored or absent.")
+    if body.status is not None or body.score is not None:
+        status = body.status if body.status is not None else result.get("status")
+        score = body.score if body.score is not None else result.get("score")
+        status, score = normalize_result_status(
+            status,
+            score if status == "scored" else None if status in {"absent", "missing", "exempt"} else score,
+        )
+        if status == "scored":
+            if score is None or score < 0 or (sheet.get("maximum") is not None and score > sheet["maximum"]):
+                raise AppError(422, "import.invalid_mark", "The score must be from 0 through the maximum.")
+        updates["status"] = status
+        updates["score"] = score
+        if status == "exempt":
+            updates["reason_code"] = "joined_after_exam"
     version = sheet.get("edit_version", 0) + 1
-    await db(request).results.update_one({"_id": result_id}, {"$set": updates})
+    change: dict = {"$set": updates}
+    if updates.get("status") and updates["status"] != "exempt" and result.get("reason_code"):
+        change["$unset"] = {"reason_code": ""}
+    await db(request).results.update_one({"_id": result_id}, change)
     await db(request).marksheets.update_one({"_id": sheet["_id"]}, {"$set": {"edit_version": version}})
     from app.assessments.marks import refresh_sheet_marks
 
@@ -1234,10 +1301,12 @@ def _public_sheet(sheet: dict, rows: list | None = None) -> dict:
 
 
 def _marksheet_summary(sheet: dict) -> dict:
+    awaiting = pending_published_correction(sheet)
     return {
         "id": sheet["_id"],
         "title": sheet.get("title") or sheet.get("status"),
         "status": sheet.get("status"),
+        "awaiting_approval": awaiting,
         "branch_id": sheet.get("branch_id"),
         "course_id": sheet.get("course_id"),
         "subject_id": sheet.get("subject_id"),
@@ -1249,6 +1318,7 @@ def _marksheet_summary(sheet: dict) -> dict:
         "source_file": sheet.get("source_file"),
         "source_sheet": sheet.get("source_sheet"),
         "file_id": sheet.get("file_id"),
-        "revision": sheet.get("active_revision") or sheet.get("revision"),
+        "revision": sheet.get("revision") or sheet.get("active_revision"),
+        "active_revision": sheet.get("active_revision"),
         "edit_version": sheet.get("edit_version", 0),
     }

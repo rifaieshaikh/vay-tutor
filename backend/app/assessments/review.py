@@ -51,7 +51,10 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
         course = await db(request).courses.find_one(
             {"_id": sheet["course_id"], "institute_id": user["institute_id"]}
         )
-    revision = sheet.get("active_revision") or sheet.get("revision") or 1
+    from app.importing.publish import pending_published_correction
+
+    # Staff detail shows the working revision (pending update when awaiting approval).
+    revision = sheet.get("revision") or sheet.get("active_revision") or 1
     results = await db(request).results.find(
         {"marksheet_id": sheet["_id"], "revision": revision}
     ).to_list(length=500)
@@ -63,7 +66,7 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
             names[person["_id"]] = person.get("display_name") or ""
             codes[person["_id"]] = person.get("student_code") or ""
     available = []
-    if sheet.get("status") in {"draft", "submitted"}:
+    if sheet.get("status") in {"draft", "submitted", "published"}:
         batch_ids = sheet.get("batch_ids") or []
         enrolled = await db(request).enrollments.find({"batch_id": {"$in": batch_ids}}).to_list(length=500)
         waiting = [item["student_id"] for item in enrolled if item["student_id"] not in set(student_ids)]
@@ -74,6 +77,7 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
                     "display_name": person.get("display_name") or "",
                     "student_code": person.get("student_code") or "",
                 })
+    awaiting_approval = pending_published_correction(sheet)
     scope = (exam or {}).get("scope") or (
         {"kind": "paper", "item_ids": [sheet["paper_id"]]}
         if sheet.get("paper_id")
@@ -109,6 +113,9 @@ async def get_marksheet(request: Request, marksheet_id: str) -> dict:
         "source_sheet": sheet.get("source_sheet"),
         "exam_id": (exam or {}).get("_id") or "",
         "revision": revision,
+        "active_revision": sheet.get("active_revision"),
+        "awaiting_approval": awaiting_approval,
+        "correction_reason": sheet.get("correction_reason") or "",
         "edit_version": sheet.get("edit_version", 0),
         "file_id": sheet.get("file_id"),
         "uploader_id": sheet.get("uploader_id"),
