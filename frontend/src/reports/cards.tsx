@@ -257,12 +257,13 @@ function AcademicStats({
         </div>
       </div>
       <div className="subject-bands-panel">
-        <span>Subject bands</span>
+        <span>Subject performance</span>
         {ordered.length === 0 ? <strong>—</strong> : (
           <ul className="subject-band-list">
             {ordered.map((item) => (
               <li key={item.subject_id || "subject"}>
                 <span>{subjectName(item.subject_id)}</span>
+                <strong>{item.percentage == null ? "—" : `${formatPercent(item.percentage)}%`}</strong>
                 {item.band ? <BandMark band={item.band} name={item.band_name} place={item.band_place} color={item.band_color} /> : <small>—</small>}
               </li>
             ))}

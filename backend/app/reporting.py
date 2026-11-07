@@ -1064,6 +1064,7 @@ def _student_block(
             subject_band_rows.append(
                 [
                     names["subject"].get(subject_id) or "Subject",
+                    _percent(detail.get("percentage")),
                     detail.get("band_name") or "-",
                 ]
             )
@@ -1264,17 +1265,22 @@ def _band_color(
     return _hex_rgb(_band_hex(label, configured, colors) or "")
 
 
+def _band_ink(fill: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Same luminance rule as the web BandMark chips: dark ink on light fills, else white."""
+    light = 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2]
+    return _INK if light > 0.55 else (1.0, 1.0, 1.0)
+
+
 def _band_chip_colors(
     label: str | None,
     configured: str | None = None,
     colors: dict[str, str] | None = None,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
-    """Soft tint background + ink from configured band color (course/policy), else defaults."""
+    """Solid band fill + black/white ink from the same luminance threshold as the UI."""
     base = _band_color(label, configured, colors)
     if not base:
         return None
-    fill = tuple(min(1.0, channel + (1.0 - channel) * 0.78) for channel in base)
-    return fill, base
+    return base, _band_ink(base)
 
 
 def _band_chip_width(label: str, max_width: float, size: int = 8) -> float:
@@ -1692,16 +1698,23 @@ class _PdfCard:
             self._subject_bands_panel(student.get("subject_bands") or [])
 
     def _subject_bands_panel(self, items: list):
-        """Full-width strip: subject name + band chip, matching the results table."""
+        """Full-width strip: subject name + percentage + band chip, matching the results table."""
         rows = []
         for item in items:
             if isinstance(item, (list, tuple)):
                 name = item[0] if item else "Subject"
-                band = item[1] if len(item) > 1 else "-"
+                # Prefer [name, percentage, band]; keep older [name, band] readable.
+                if len(item) >= 3:
+                    percent = item[1]
+                    band = item[2]
+                else:
+                    percent = "-"
+                    band = item[1] if len(item) > 1 else "-"
             else:
                 name = (item or {}).get("name") or "Subject"
+                percent = (item or {}).get("percentage") or "-"
                 band = (item or {}).get("band") or "-"
-            rows.append((str(name or "Subject"), str(band or "-")))
+            rows.append((str(name or "Subject"), str(percent or "-"), str(band or "-")))
         fill = (0.973, 0.980, 0.976)
         edge = (0.863, 0.898, 0.882)
         line_h = 20
@@ -1710,19 +1723,22 @@ class _PdfCard:
         top = self.y
         self.commands.append(_pdf_rect(_MARGIN_X, top - height, _CONTENT_W, height, fill))
         self.commands.append(_pdf_box(_MARGIN_X, top - height, _CONTENT_W, height, edge))
-        self.commands.append(_pdf_text(_MARGIN_X + 8, top - 14, "Subject bands", "F1", 7, _MUTED))
+        self.commands.append(_pdf_text(_MARGIN_X + 8, top - 14, "Subject performance", "F1", 7, _MUTED))
         if not rows:
             self.commands.append(_pdf_text(_MARGIN_X + 8, top - 36, "—", "F2", 11, _TEAL))
             self.y = top - height - 8
             return
-        name_w = min(220, _CONTENT_W * 0.42)
+        name_w = min(200, _CONTENT_W * 0.38)
+        percent_w = 56
         cursor = top - 32
-        for name, band in rows:
+        for name, percent, band in rows:
             self.commands.append(_pdf_text(_MARGIN_X + 8, cursor, _fit(name, name_w - 4, 9), "F2", 9, _INK))
-            chip_x = _MARGIN_X + 8 + name_w
+            percent_x = _MARGIN_X + 8 + name_w
+            self.commands.append(_pdf_text(percent_x, cursor, _fit(percent, percent_w - 4, 9), "F2", 9, _TEAL))
+            chip_x = percent_x + percent_w
             if band and band not in {"-", "Absent", "Exempt", "Missing"}:
                 self.commands.extend(
-                    _pdf_band_chip(chip_x, cursor - 3, band, _CONTENT_W - name_w - 24, colors=self.band_colors)
+                    _pdf_band_chip(chip_x, cursor - 3, band, _CONTENT_W - name_w - percent_w - 24, colors=self.band_colors)
                 )
             else:
                 self.commands.append(_pdf_text(chip_x, cursor, band or "—", "F1", 8, _MUTED))
@@ -2146,12 +2162,22 @@ def _write_student_sheet(sheet, row: int, student: dict, named: bool) -> int:
                 sheet.row_dimensions[row].height = 24
                 row = _write_row(sheet, row, values, font=_STAT_FONT, fill=_STAT_FILL)
                 subject_bands = section.get("subject_bands") or []
-                row = _write_row(sheet, row, ["Subject bands"], font=_LABEL_FONT, fill=_STAT_FILL)
+                row = _write_row(sheet, row, ["Subject performance"], font=_LABEL_FONT, fill=_STAT_FILL)
                 if subject_bands:
                     for item in subject_bands:
-                        name = (item[0] if isinstance(item, (list, tuple)) else item.get("name")) or "Subject"
-                        band = (item[1] if isinstance(item, (list, tuple)) else item.get("band")) or "-"
-                        row = _write_row(sheet, row, [name, band], font=_BODY_FONT, fill=_STAT_FILL)
+                        if isinstance(item, (list, tuple)):
+                            name = item[0] if item else "Subject"
+                            if len(item) >= 3:
+                                percent = item[1]
+                                band = item[2]
+                            else:
+                                percent = "-"
+                                band = item[1] if len(item) > 1 else "-"
+                        else:
+                            name = item.get("name") or "Subject"
+                            percent = item.get("percentage") or "-"
+                            band = item.get("band") or "-"
+                        row = _write_row(sheet, row, [name or "Subject", percent or "-", band or "-"], font=_BODY_FONT, fill=_STAT_FILL)
                 else:
                     row = _write_row(sheet, row, ["—"], font=_BODY_FONT, fill=_STAT_FILL)
                 row += 1

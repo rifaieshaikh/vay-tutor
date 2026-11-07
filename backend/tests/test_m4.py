@@ -110,8 +110,10 @@ def test_aggregates_by_exam_kind_separate_performance_and_subject_bands():
     assert sections["chapter"]["performance"]["percentage"] == 40
     acc = next(item for item in sections["unit"]["subjects"] if item["subject_id"] == "acc")
     law = next(item for item in sections["unit"]["subjects"] if item["subject_id"] == "law")
+    assert acc["percentage"] == 90
     assert acc["band"] in {"safe", "proficient"}
     assert law["absent"] == 1
+    assert law["percentage"] is None
 
 
 def test_top_mark_uses_the_highest_scored_result():

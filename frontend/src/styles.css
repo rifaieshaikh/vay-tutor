@@ -945,6 +945,7 @@ table.people-table caption:not(.sr-only) { caption-side: top; text-align: left; 
 .subject-band-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0.45rem 1rem; }
 .subject-band-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.55rem; min-height: 1.6rem; }
 .subject-band-list li > span:first-child { color: #143f3d; font-size: 0.92rem; font-weight: 600; }
+.subject-band-list li > strong { color: #143f3d; font-size: 0.92rem; font-variant-numeric: tabular-nums; }
 .band-key { margin: 1.25rem 0 0; padding-top: 0.85rem; border-top: 1px solid #dce5e1; }
 .band-key h2 { margin: 0 0 0.65rem; color: #0f6e6b; font-size: 1rem; }
 .band-key ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.45rem 0.55rem; }
@@ -990,7 +991,8 @@ table.people-table.progress-grid { min-width: 0; width: 100%; table-layout: fixe
   .print-card .academic-summary { gap: 0.45rem; margin: 0.2rem 0 0.85rem; }
   .print-card .academic-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.45rem; }
   .print-card .subject-band-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .print-card .subject-band-list li > span:first-child { font-size: 0.78rem; }
+  .print-card .subject-band-list li > span:first-child,
+  .print-card .subject-band-list li > strong { font-size: 0.78rem; }
   .print-card .academic-stats > div, .print-card .subject-bands-panel { padding: 0.55rem 0.65rem; break-inside: avoid; }
   .print-card .academic-stats strong { font-size: 1.25rem; }
   .print-card .band-key { break-inside: avoid; margin-top: 0.85rem; padding-top: 0.65rem; }
