@@ -2,14 +2,19 @@
   "name": "vay-tutor-client",
   "productName": "Vay Tutor Client",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Client-only installation. Opens a Vay Tutor host in tabs.",
   "author": "Vay Tutor",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
     "test": "node --test src/host.test.js src/trust.test.js src/tabs.test.js",
-    "dist": "electron-builder"
+    "bump:major": "node scripts/bump-version.js --major",
+    "bump:minor": "node scripts/bump-version.js --minor",
+    "bump:patch": "node scripts/bump-version.js --patch",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win --x64"
   },
   "devDependencies": {
     "electron": "45.0.0",

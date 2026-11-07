@@ -7,7 +7,7 @@ import { Option, applyScopeChange, clearIncompatible, optionFits, scopeOptions }
 import { Band, BandMark, bandClass, bandStyle } from "../bands";
 import { StudentDialog, moveTab } from "../ui";
 
-type Section = { id: string; label: string; students: number; results: number; percentage: number | null; band: string | null; band_name?: string | null; band_place?: string | null; band_color?: string | null; coverage: string; missing?: number; absent?: number; marksheet_ids?: string[] };
+type Section = { id: string; label: string; students: number; results: number; percentage: number | null; band: string | null; band_name?: string | null; band_place?: string | null; band_color?: string | null; coverage: string; missing?: number; absent?: number; exempt?: number; expected?: number; scored?: number; total?: number; marksheet_ids?: string[] };
 type Standing = {
   student_id: string;
   student_name?: string;
@@ -64,6 +64,8 @@ type View = {
     participation_basis?: string;
     missing: number;
     absent: number;
+    exempt?: number;
+    total?: number;
     scored?: number;
     expected?: number;
   };
@@ -626,8 +628,9 @@ export function ViewsPage() {
             <div className="academic-stats">
               <div><span>Weighted performance</span><strong>{shown.performance.percentage == null ? "—" : `${formatPercent(shown.performance.percentage)}%`}</strong><small>Scored marks ÷ corresponding maxima</small></div>
               <div><span>Students</span><strong>{shown.students}</strong><small>{shown.enrollments} matching enrollments</small></div>
-              <div><span>Scored results</span><strong>{shown.performance.scored ?? 0}<small> / {shown.performance.expected ?? 0}</small></strong><small>Listed results, not full-roster coverage</small></div>
+              <div><span>Scored results</span><strong>{shown.performance.scored ?? 0}<small> / {shown.performance.expected ?? 0}</small></strong><small>Expected exams exclude Joined after exam</small></div>
               <div><span>Incomplete results</span><strong>{(shown.performance.missing || 0) + (shown.performance.absent || 0)}</strong><small>{shown.performance.missing} missing · {shown.performance.absent} absent</small></div>
+              <div><span>Joined after exam</span><strong>{shown.performance.exempt ?? 0}</strong><small>Not counted in expected exams</small></div>
             </div>
           )}
           {shown.performance.participation != null ? (

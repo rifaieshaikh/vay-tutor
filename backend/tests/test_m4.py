@@ -52,6 +52,24 @@ def test_weighted_aggregate_bands_and_dense_rank():
     assert ranks == {"one": 1, "two": 1, "three": 2}
 
 
+def test_aggregate_excludes_joined_after_exam_from_expected():
+    summary = aggregate(
+        [
+            {"id": "a", "student_id": "s", "assessment_id": "e1", "status": "scored", "score": 16, "maximum": 20},
+            {"id": "b", "student_id": "s", "assessment_id": "e2", "status": "absent", "score": None, "maximum": 20},
+            {"id": "c", "student_id": "s", "assessment_id": "e3", "status": "exempt", "score": None, "maximum": 20},
+            {"id": "d", "student_id": "s", "assessment_id": "e4", "status": "exempt", "score": None, "maximum": 20},
+        ]
+    )
+    assert summary["scored"] == 1
+    assert summary["absent"] == 1
+    assert summary["exempt"] == 2
+    assert summary["total"] == 4
+    assert summary["expected"] == 2
+    assert summary["expected"] == summary["total"] - summary["exempt"]
+    assert summary["percentage"] == 80
+
+
 def test_progress_pdf_table_matches_ui_and_keeps_units_identifiable():
     from app.reporting import _CONTENT_W, _exam_rows, _header_lines, _section_headers, _section_widths
 

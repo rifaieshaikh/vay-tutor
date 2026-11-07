@@ -1,4 +1,4 @@
-const CLIENT_VERSION = "1.0.0";
+const CLIENT_VERSION = require("../package.json").version;
 
 function requireHost(value) {
   let url;
@@ -53,13 +53,14 @@ function rejectionMessage(body) {
 }
 
 async function fetchJson(fetchImpl, url, version) {
+  const client = version || CLIENT_VERSION;
   let response;
   try {
     response = await fetchImpl(url, {
       headers: {
         Accept: "application/json",
-        "X-Client-Version": CLIENT_VERSION,
-        "User-Agent": `VayTutorClient/${version}`,
+        "X-Client-Version": client,
+        "User-Agent": `VayTutorClient/${client}`,
       },
     });
   } catch (error) {
@@ -77,12 +78,13 @@ async function fetchJson(fetchImpl, url, version) {
 }
 
 async function checkHost(origin, fetchImpl, version) {
-  readiness(await fetchJson(fetchImpl, `${origin}/api/v1/health`, version));
+  const client = version || CLIENT_VERSION;
+  readiness(await fetchJson(fetchImpl, `${origin}/api/v1/health`, client));
   compatibility(
     await fetchJson(
       fetchImpl,
-      `${origin}/api/v1/compatibility?client=${encodeURIComponent(CLIENT_VERSION)}`,
-      version,
+      `${origin}/api/v1/compatibility?client=${encodeURIComponent(client)}`,
+      client,
     ),
   );
 }

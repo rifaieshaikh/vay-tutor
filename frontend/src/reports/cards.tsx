@@ -13,8 +13,10 @@ type Performance = {
   percentage: number | null;
   scored: number;
   expected: number;
+  total?: number;
   missing: number;
   absent: number;
+  exempt?: number;
   band: string | null;
   band_name?: string | null;
   band_place?: string | null;
@@ -75,8 +77,10 @@ type PerformanceSummary = {
   percentage: number | null;
   scored: number;
   expected: number;
+  total?: number;
   missing: number;
   absent: number;
+  exempt?: number;
   label?: string;
   band?: string | null;
   band_name?: string | null;
@@ -89,8 +93,10 @@ type SubjectSummary = {
   percentage: number | null;
   scored: number;
   expected: number;
+  total?: number;
   missing: number;
   absent: number;
+  exempt?: number;
   band: string | null;
   band_name?: string | null;
   band_place?: string | null;
@@ -248,12 +254,21 @@ function AcademicStats({
         <div>
           <span>Scored results</span>
           <strong>{performance?.scored ?? 0}<small> / {performance?.expected ?? 0}</small></strong>
-          <small>Latest published attempt in this report</small>
+          <small>
+            {(performance?.exempt ?? 0) > 0
+              ? `${performance?.total ?? ((performance?.expected ?? 0) + (performance?.exempt ?? 0))} exams − ${performance?.exempt} Joined after exam`
+              : "Expected exams exclude Joined after exam"}
+          </small>
         </div>
         <div>
           <span>Absent</span>
           <strong>{(performance?.absent ?? 0) + (performance?.missing ?? 0)}</strong>
           <small>No mark or marked absent</small>
+        </div>
+        <div>
+          <span>Joined after exam</span>
+          <strong>{performance?.exempt ?? 0}</strong>
+          <small>Not counted in expected exams</small>
         </div>
       </div>
       <div className="subject-bands-panel">
@@ -1082,8 +1097,9 @@ export function CardsPage({ session }: { session: Session }) {
         <div className="academic-stats">
           <div><span>Weighted performance</span><strong>{summary.percentage == null ? "—" : `${formatPercent(summary.percentage)}%`}</strong>{summary.band ? <BandMark band={summary.band} name={summary.band_name} place={summary.band_place} color={summary.band_color} /> : <small>Scored marks ÷ corresponding maxima</small>}</div>
           <div><span>Students</span><strong>{summary.students}</strong><small>{summary.with_results} with published results</small></div>
-          <div><span>Scored results</span><strong>{summary.scored}<small> / {summary.expected}</small></strong><small>Latest published attempt in this report</small></div>
+          <div><span>Scored results</span><strong>{summary.scored}<small> / {summary.expected}</small></strong><small>Expected exams exclude Joined after exam</small></div>
           <div><span>Absent</span><strong>{summary.missing + summary.absent}</strong><small>No mark or marked absent</small></div>
+          <div><span>Joined after exam</span><strong>{summary.exempt ?? 0}</strong><small>Not counted in expected exams</small></div>
         </div>
       ) : null}
       {!loading && total === 0 ? <p>{filtered ? "No students match." : "No students yet."}</p> : null}

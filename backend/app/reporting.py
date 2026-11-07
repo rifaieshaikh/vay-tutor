@@ -268,7 +268,7 @@ def present(
         "attempt": row.get("attempt_kind") or "original",
         "assessment_id": row.get("assessment_id"),
         "marksheet_id": row.get("marksheet_id"),
-        "included_in_total": row.get("counts_in_aggregate") is not False,
+        "included_in_total": row.get("counts_in_aggregate") is not False and row.get("status") != "exempt",
     }
 
 
@@ -380,6 +380,10 @@ def view_sections(level: str, rows: list[dict], enrollments: list[dict], names: 
                 "coverage": f"{summary['scored']}/{summary['expected']}" if summary["expected"] else "0/0",
                 "missing": summary["missing"],
                 "absent": summary["absent"],
+                "exempt": summary["exempt"],
+                "total": summary["total"],
+                "expected": summary["expected"],
+                "scored": summary["scored"],
                 "marksheet_ids": sorted({row["marksheet_id"] for row in section_rows if row.get("marksheet_id")}),
             }
         )
@@ -953,6 +957,7 @@ def _section_stats(summary: dict) -> dict:
         "scored": f"{summary.get('scored', 0)} of {summary.get('expected', 0)}",
         "missing": str(summary.get("missing", 0)),
         "absent": str(summary.get("absent", 0)),
+        "exempt": str(summary.get("exempt", 0)),
     }
 
 
@@ -972,8 +977,10 @@ def _student_block(
         "band_name": None,
         "scored": 0,
         "expected": 0,
+        "total": 0,
         "missing": 0,
         "absent": 0,
+        "exempt": 0,
     }
     columns = columns or []
     exam_labels = exam_labels or {}
@@ -1052,8 +1059,10 @@ def _student_block(
             "band_name": None,
             "scored": 0,
             "expected": 0,
+            "total": 0,
             "missing": 0,
             "absent": 0,
+            "exempt": 0,
         }
         by_subject: dict[str, list] = {}
         for row in subset:
@@ -1122,6 +1131,7 @@ def _student_block(
         "scored": f"{summary.get('scored', 0)} of {summary.get('expected', 0)}",
         "missing": str(summary.get("missing", 0)),
         "absent": str(summary.get("absent", 0)),
+        "exempt": str(summary.get("exempt", 0)),
         "subject_headers": list(_FLAT_SUBJECT_HEADERS),
         "subjects": subjects,
         "exam_sections": exam_sections,
@@ -1674,11 +1684,12 @@ class _PdfCard:
         performance_note = band if band and band != "-" else ""
         cards = [
             ("Weighted performance", student.get("performance") or "-", performance_note),
-            ("Scored results", student.get("scored") or "-", "Latest published attempt"),
+            ("Scored results", student.get("scored") or "-", "Expected excludes Joined after exam"),
             ("Absent", str(int(student.get("absent") or 0) + int(student.get("missing") or 0)), "No mark or marked absent"),
+            ("Joined after exam", str(int(student.get("exempt") or 0)), "Not counted in expected"),
         ]
         gap = 8
-        columns = 3
+        columns = 4
         width = (_CONTENT_W - gap * (columns - 1)) / columns
         fill = (0.973, 0.980, 0.976)
         edge = (0.863, 0.898, 0.882)
@@ -2138,11 +2149,12 @@ def _write_student_sheet(sheet, row: int, student: dict, named: bool) -> int:
     row += 1
     sections = student.get("exam_sections") or []
     if not sections:
-        labels = ["Weighted performance", "Scored results", "Absent"]
+        labels = ["Weighted performance", "Scored results", "Absent", "Joined after exam"]
         values = [
             f"{student.get('performance') or '-'}  {student.get('band') or ''}".strip(),
             student.get("scored") or "-",
             str(int(student.get("absent") or 0) + int(student.get("missing") or 0)),
+            str(int(student.get("exempt") or 0)),
         ]
         row = _write_row(sheet, row, labels, font=_LABEL_FONT, fill=_STAT_FILL)
         sheet.row_dimensions[row].height = 24
@@ -2152,11 +2164,12 @@ def _write_student_sheet(sheet, row: int, student: dict, named: bool) -> int:
         for section in sections:
             row = _write_row(sheet, row, [section.get("label") or "Exam"], font=_SECTION_FONT)
             if section.get("performance") is not None or section.get("scored") is not None:
-                labels = ["Weighted performance", "Scored results", "Absent"]
+                labels = ["Weighted performance", "Scored results", "Absent", "Joined after exam"]
                 values = [
                     f"{section.get('performance') or '-'}  {section.get('band') or ''}".strip(),
                     section.get("scored") or "-",
                     str(int(section.get("absent") or 0) + int(section.get("missing") or 0)),
+                    str(int(section.get("exempt") or 0)),
                 ]
                 row = _write_row(sheet, row, labels, font=_LABEL_FONT, fill=_STAT_FILL)
                 sheet.row_dimensions[row].height = 24

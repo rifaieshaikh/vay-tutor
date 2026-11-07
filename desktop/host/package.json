@@ -1,13 +1,16 @@
 {
   "name": "vay-tutor-host",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Full installation. MongoDB, the API, and the institute UI on this computer.",
   "author": "Vay Tutor",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
     "test": "node --test src/supervisor.test.js src/tabs.test.js",
+    "bump:major": "node ../scripts/bump-version.js --major",
+    "bump:minor": "node ../scripts/bump-version.js --minor",
+    "bump:patch": "node ../scripts/bump-version.js --patch",
     "dist": "electron-builder",
     "dist:win": "electron-builder --win --x64",
     "dist:mac": "electron-builder --mac"

@@ -284,7 +284,9 @@ def aggregate(rows: list[dict], policy: dict | None = None) -> dict:
     obtained = sum((Decimal(str(row["score"])) for row in scored), Decimal(0))
     maximum = sum((Decimal(str(row["maximum"])) for row in scored), Decimal(0))
     exact = (obtained / maximum) * Decimal(100) if maximum else None
-    expected = len(scored) + len(absent)
+    # Expected exams = published attempts minus Joined after exam (late admissions).
+    total = len(scored) + len(absent) + len(exempt)
+    expected = total - len(exempt)
     threshold = (policy or {}).get("passing_threshold")
     passing = None
     if threshold is not None and scored:
@@ -303,6 +305,7 @@ def aggregate(rows: list[dict], policy: dict | None = None) -> dict:
         "missing": 0,
         "absent": len(absent),
         "exempt": len(exempt),
+        "total": total,
         "expected": expected,
         "participation": None,
         "passing": passing,

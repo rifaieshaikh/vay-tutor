@@ -61,29 +61,38 @@ On Apple Silicon Macs, the same role is a disk image. After you copy Vay Tutor i
 
 Vay Tutor Client on another computer needs only the host address. A phone or tablet browser needs `vay-tutor.cer` installed once; on Windows that file is under `C:\ProgramData\Vay Tutor`, on Mac under `~/Library/Application Support/Vay Tutor`, and `connect.txt` in that folder lists the address. MongoDB Community’s license is included beside `mongod`. Redistribution of MongoDB Community has to be confirmed by the release owner.
 
+Desktop version is semver `major.minor.patch` in both [`desktop/package.json`](desktop/package.json) and [`desktop/host/package.json`](desktop/host/package.json). Bump before a release:
+
+- `npm run bump:major` — breaking / major release (`x1` + 1, reset minor and patch)
+- `npm run bump:minor` — new features (`x2` + 1, reset patch)
+- `npm run bump:patch` — bug fixes (`x3` + 1)
+
+Then commit the two `package.json` files with the release.
+
 Build the Windows client and full installer from a checkout:
 
 ```bash
-cd desktop && npm ci && CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --x64
+cd desktop && npm ci && CSC_IDENTITY_AUTO_DISCOVERY=false npm run dist:win
 node desktop/scripts/stage-full.js --platform win32
-cd desktop/host && npm ci && CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win --x64
+cd desktop/host && npm ci && CSC_IDENTITY_AUTO_DISCOVERY=false npm run dist:win
 ```
 
 Build the Mac full disk image (Apple Silicon) from a checkout on an arm64 Mac:
 
 ```bash
+cd desktop && npm ci && CSC_IDENTITY_AUTO_DISCOVERY=false npm run dist:mac
 node desktop/scripts/stage-full.js --platform darwin
-cd desktop/host && npm ci && CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac
+cd desktop/host && npm ci && CSC_IDENTITY_AUTO_DISCOVERY=false npm run dist:mac
 ```
 
 Installers are written to `desktop/release`:
 
 | File | Installation |
 | --- | --- |
-| `VayTutorClient-Setup-1.0.0.exe` | Client-only, Windows |
-| `VayTutorClient-1.0.0.dmg` | Client-only, macOS |
-| `VayTutor-Setup-1.0.0.exe` | Full installation, Windows |
-| `VayTutor-1.0.0.dmg` | Full installation, Apple Silicon macOS |
+| `VayTutorClient-Setup-1.1.0.exe` | Client-only, Windows |
+| `VayTutorClient-1.1.0.dmg` | Client-only, macOS |
+| `VayTutor-Setup-1.1.0.exe` | Full installation, Windows |
+| `VayTutor-1.1.0.dmg` | Full installation, Apple Silicon macOS |
 
 The workflow publishes full builds as `vay-tutor-full-windows` and `vay-tutor-full-macos`. The installers are unsigned, so Windows SmartScreen and Gatekeeper ask for confirmation.
 
