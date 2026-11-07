@@ -1,7 +1,7 @@
 {
   "name": "vay-tutor-host",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Full installation. MongoDB, the API, and the institute UI on this computer.",
   "author": "Vay Tutor",
   "main": "src/main.js",
@@ -37,18 +37,43 @@
       "package.json"
     ],
     "extraResources": [
-      { "from": "resources/mongo", "to": "mongo" },
-      { "from": "resources/python", "to": "python" },
-      { "from": "resources/backend", "to": "backend" },
-      { "from": "resources/frontend", "to": "frontend" }
+      {
+        "from": "resources/mongo",
+        "to": "mongo"
+      },
+      {
+        "from": "resources/python",
+        "to": "python"
+      },
+      {
+        "from": "resources/backend",
+        "to": "backend"
+      },
+      {
+        "from": "resources/frontend",
+        "to": "frontend"
+      }
     ],
     "asar": true,
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "../build/icon.ico",
       "extraResources": [
-        { "from": "resources/redist", "to": "redist" },
-        { "from": "build/start-supervisor.cmd", "to": "start-supervisor.cmd" }
+        {
+          "from": "resources/redist",
+          "to": "redist"
+        },
+        {
+          "from": "build/start-supervisor.cmd",
+          "to": "start-supervisor.cmd"
+        }
       ]
     },
     "nsis": {
@@ -64,7 +89,9 @@
       "include": "build/installer.nsh"
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "icon": "../build/icon.icns",
       "category": "public.app-category.education",
       "identity": null
