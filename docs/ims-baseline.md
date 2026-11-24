@@ -110,7 +110,7 @@ Scope is still one complete tuple: institute, branch, course, batch, subject, pa
 - There is no transfer operation. Ending one enrollment and adding another are separate calls.
 - Dashboard counts for follow-up, admissions, marksheet review, and failed imports do not exist. Enquiry follow-up has `next_on` and interest. Admissions are `open` or `converted`. Marksheets use draft, submitted, published, and withdrawn. Import jobs use the states in M1. Those are the statuses a later dashboard may count. Do not invent a new status to make a count.
 - Directory and intake lists use page and page size. The M1 list contract is still cursor pagination for marksheets and jobs.
-- `backup.admin` has no backup route yet. That remains OPS-02.
+- Local manual backup/restore is available to `backup.admin` via `/api/v1/ops/backup`, `/api/v1/ops/backups`, and `/api/v1/ops/restores`, plus the full-install host File menu. Daily scheduled backups remain OPS-02.
 
 ### Release work this plan does not close
 

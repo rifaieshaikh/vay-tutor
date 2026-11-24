@@ -1,11 +1,15 @@
-const { app, BaseWindow, Menu, WebContentsView, ipcMain, session, shell } = require("electron");
+const { app, BaseWindow, BrowserWindow, Menu, WebContentsView, dialog, ipcMain, session, shell } = require("electron");
+const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const {
   claimSupervisor,
   dataDirectory,
+  mongoUrl,
   readinessError,
   startHost,
+  stopApi,
   stopHost,
   supervisorProfileDirectory,
   whenReady,
@@ -40,13 +44,189 @@ function resourceRoot() {
 function hostPaths() {
   const root = resourceRoot();
   const exe = process.platform === "win32" ? ".exe" : "";
+  const mongoDir = path.join(root, "mongo");
   return {
     dataDir: dataDirectory(),
-    mongoBin: path.join(root, "mongo", `mongod${exe}`),
+    mongoBin: path.join(mongoDir, `mongod${exe}`),
+    mongoToolsDir: mongoDir,
     pythonBin: path.join(root, "python", process.platform === "win32" ? "python.exe" : "python"),
     backendDir: path.join(root, "backend"),
     frontendDir: path.join(root, "frontend"),
   };
+}
+
+function mongoPortFromData(dataDir) {
+  const note = path.join(dataDir, "mongo-port.txt");
+  if (!fs.existsSync(note)) return 27017;
+  const port = Number(fs.readFileSync(note, "utf8"));
+  return port || 27017;
+}
+
+function writePassphraseFile(passphrase) {
+  const file = path.join(os.tmpdir(), `vay-backup-key-${process.pid}-${Date.now()}.txt`);
+  fs.writeFileSync(file, passphrase, { encoding: "utf8", mode: 0o600 });
+  return file;
+}
+
+function runBackupCli(paths, action, passphrase, archivePath) {
+  const passphraseFile = writePassphraseFile(passphrase);
+  const args = [
+    "-c",
+    "from app.ops_backup import cli; raise SystemExit(cli())",
+    action,
+    "--data-dir",
+    paths.dataDir,
+    "--passphrase-file",
+    passphraseFile,
+  ];
+  if (archivePath) args.push("--archive", archivePath);
+  try {
+    const result = spawnSync(paths.pythonBin, args, {
+      cwd: path.dirname(paths.pythonBin),
+      env: {
+        ...process.env,
+        PYTHONPATH: paths.backendDir,
+        PYTHONNOUSERSITE: "1",
+        DATA_DIR: paths.dataDir,
+        MONGO_URL: mongoUrl(mongoPortFromData(paths.dataDir)),
+        DB_NAME: "vay_tutor",
+        MONGO_TOOLS_DIR: paths.mongoToolsDir,
+      },
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    if (result.status === 0) {
+      try {
+        return JSON.parse(result.stdout || "{}");
+      } catch {
+        return { ok: true };
+      }
+    }
+    let message = "The backup operation failed.";
+    try {
+      const body = JSON.parse(result.stderr || "{}");
+      if (body.error?.message) message = body.error.message;
+    } catch {
+      if (result.stderr) message = result.stderr.trim();
+      else if (result.error) message = result.error.message;
+    }
+    throw new Error(message);
+  } finally {
+    try {
+      fs.unlinkSync(passphraseFile);
+    } catch {
+      // Ignore cleanup failures.
+    }
+  }
+}
+
+function askPrompt(mode) {
+  return new Promise((resolve) => {
+    const child = new BrowserWindow({
+      width: 420,
+      height: mode === "backup" ? 360 : 340,
+      parent: windowRef || undefined,
+      modal: Boolean(windowRef),
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      title: "Vay Tutor",
+      backgroundColor: "#f7f4ee",
+      webPreferences: {
+        preload: path.join(__dirname, "prompt-preload.js"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      ipcMain.removeListener("prompt-submit", onSubmit);
+      if (!child.isDestroyed()) child.close();
+      resolve(value);
+    };
+    const onSubmit = (event, payload) => {
+      if (event.sender !== child.webContents) return;
+      finish(payload || null);
+    };
+    ipcMain.on("prompt-submit", onSubmit);
+    child.on("closed", () => finish(null));
+    child.setMenu(null);
+    child.loadFile(path.join(__dirname, "../ui/prompt.html"), { query: { mode } });
+  });
+}
+
+async function runBackupNow() {
+  const paths = hostPaths();
+  const answers = await askPrompt("backup");
+  if (!answers?.passphrase) return;
+  try {
+    const result = runBackupCli(paths, "create", answers.passphrase);
+    await dialog.showMessageBox(windowRef || undefined, {
+      type: "info",
+      title: "Backup complete",
+      message: "The encrypted backup was saved.",
+      detail: result.path || path.join(paths.dataDir, "backups", "vay-tutor-backup.zip"),
+    });
+  } catch (error) {
+    await dialog.showMessageBox(windowRef || undefined, {
+      type: "error",
+      title: "Backup failed",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function runRestoreNow() {
+  const paths = hostPaths();
+  const chosen = await dialog.showOpenDialog(windowRef || undefined, {
+    title: "Restore from backup",
+    defaultPath: path.join(paths.dataDir, "backups"),
+    properties: ["openFile"],
+    filters: [{ name: "Vay Tutor backup", extensions: ["zip"] }],
+  });
+  if (chosen.canceled || !chosen.filePaths[0]) return;
+  const answers = await askPrompt("restore");
+  if (!answers?.passphrase || answers.confirm !== "RESTORE") return;
+  const confirmed = await dialog.showMessageBox(windowRef || undefined, {
+    type: "warning",
+    title: "Replace all data?",
+    message: "Restore replaces the entire institute, including users and passwords.",
+    buttons: ["Cancel", "Restore"],
+    defaultId: 0,
+    cancelId: 0,
+  });
+  if (confirmed.response !== 1) return;
+  try {
+    stopApi(paths.dataDir);
+    const result = runBackupCli(paths, "restore", answers.passphrase, chosen.filePaths[0]);
+    const started = await startHost(paths);
+    hostOrigin = started.origin;
+    ready = true;
+    if (windowRef) {
+      for (const id of [...views.keys()]) closeTab(id);
+      openTab(`${hostOrigin}/`);
+    }
+    await dialog.showMessageBox(windowRef || undefined, {
+      type: "info",
+      title: "Restore complete",
+      message: "The institute was restored. Sign in with an account from the backup.",
+      detail: result.counts ? `Users restored: ${result.counts.users ?? 0}` : undefined,
+    });
+  } catch (error) {
+    try {
+      await startHost(paths);
+    } catch {
+      // Surface the original restore error.
+    }
+    await dialog.showMessageBox(windowRef || undefined, {
+      type: "error",
+      title: "Restore failed",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 function loadingPage(message) {
@@ -145,10 +325,16 @@ function bindPageMenu(contents, { refreshActive = false, menuWindow = null } = {
           { label: "Open in New Window", click: () => openWindow(link) },
           { type: "separator" },
           { label: "Refresh", click: refresh },
+          { type: "separator" },
+          { label: "Back up now", click: () => void runBackupNow() },
+          { label: "Restore from backup…", click: () => void runRestoreNow() },
         ]
       : [
           { label: "Refresh", click: refresh },
           { label: "New Tab", click: () => openTab(`${hostOrigin}/`) },
+          { type: "separator" },
+          { label: "Back up now", click: () => void runBackupNow() },
+          { label: "Restore from backup…", click: () => void runRestoreNow() },
         ];
     Menu.buildFromTemplate(template).popup({
       window: menuWindow || windowRef || undefined,
@@ -302,7 +488,52 @@ function closeTab(id) {
 }
 
 function installMenu() {
-  Menu.setApplicationMenu(null);
+  const template = [
+    ...(process.platform === "darwin"
+      ? [{
+          label: app.name,
+          submenu: [
+            { role: "about" },
+            { type: "separator" },
+            { role: "hide" },
+            { role: "hideOthers" },
+            { role: "unhide" },
+            { type: "separator" },
+            { role: "quit" },
+          ],
+        }]
+      : []),
+    {
+      label: "File",
+      submenu: [
+        { label: "Back up now", click: () => void runBackupNow() },
+        { label: "Restore from backup…", click: () => void runRestoreNow() },
+        { type: "separator" },
+        process.platform === "darwin" ? { role: "close" } : { role: "quit" },
+      ],
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "selectAll" },
+      ],
+    },
+    {
+      label: "View",
+      submenu: [
+        { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => reloadActive() },
+        { type: "separator" },
+        { role: "togglefullscreen" },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 async function bringUpInstitute(paths) {

@@ -5,3 +5,4 @@ pymongo==4.9.2
 python-multipart==0.0.20
 pyotp==2.9.0
 openpyxl==3.1.5
+pyzipper==0.3.6

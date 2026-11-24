@@ -10,6 +10,7 @@ const resources = path.join(host, "resources");
 const cache = path.join(host, ".cache");
 const pythonVersion = "3.12.8";
 const mongoVersions = ["8.0.13", "8.0.12", "8.0.11", "8.0.10", "8.0.4"];
+const databaseToolsVersions = ["100.12.0", "100.11.0", "100.10.0", "100.9.0"];
 // python-build-standalone install_only builds for macOS Apple Silicon.
 const standalonePythonTag = "20261026";
 const standalonePythonUrl =
@@ -106,54 +107,89 @@ function clearWrongPlatform(platform) {
   }
 }
 
-async function stageMongoWindows() {
-  const target = path.join(resources, "mongo", "mongod.exe");
-  if (fs.existsSync(target)) return;
-  const urls = mongoVersions.map((version) => `https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-${version}.zip`);
-  const url = await firstAvailable(urls, "MongoDB Community for Windows");
+async function stageDatabaseTools(platform) {
+  const exe = platform === "win32" ? ".exe" : "";
+  const dump = path.join(resources, "mongo", `mongodump${exe}`);
+  const restore = path.join(resources, "mongo", `mongorestore${exe}`);
+  if (fs.existsSync(dump) && fs.existsSync(restore)) {
+    if (platform === "darwin") {
+      fs.chmodSync(dump, 0o755);
+      fs.chmodSync(restore, 0o755);
+    }
+    return;
+  }
+  const arch = platform === "darwin" ? "macos-arm64" : "windows-x86_64";
+  const urls = databaseToolsVersions.map(
+    (version) => `https://fastdl.mongodb.org/tools/db/mongodb-database-tools-${arch}-${version}.zip`,
+  );
+  const url = await firstAvailable(urls, "MongoDB Database Tools");
   const archive = await download(url, path.join(cache, path.basename(url)));
-  const extracted = path.join(cache, "mongo-win");
+  const extracted = path.join(cache, platform === "darwin" ? "mongo-tools-mac" : "mongo-tools-win");
   fs.rmSync(extracted, { recursive: true, force: true });
   extractZip(archive, extracted);
-  const binary = findFile(extracted, "mongod.exe");
-  if (!binary) throw new Error("The MongoDB archive has no mongod.exe.");
-  copyTree(path.dirname(binary), path.join(resources, "mongo"), (name) => {
-    const lower = name.toLowerCase();
-    return lower.endsWith(".pdb") || lower === "mongos.exe" || lower === "install-compass.ps1" || lower === "vc_redist.x64.exe";
-  });
-  const licenseRoot = path.dirname(path.dirname(binary));
-  for (const name of fs.readdirSync(licenseRoot)) {
-    const from = path.join(licenseRoot, name);
-    if (name.toLowerCase().includes("license") && fs.statSync(from).isFile()) {
-      fs.copyFileSync(from, path.join(resources, "mongo", name));
+  const dumpSource = findFile(extracted, `mongodump${exe}`);
+  const restoreSource = findFile(extracted, `mongorestore${exe}`);
+  if (!dumpSource || !restoreSource) throw new Error("The Database Tools archive is missing mongodump or mongorestore.");
+  fs.mkdirSync(path.join(resources, "mongo"), { recursive: true });
+  fs.copyFileSync(dumpSource, dump);
+  fs.copyFileSync(restoreSource, restore);
+  if (platform === "darwin") {
+    fs.chmodSync(dump, 0o755);
+    fs.chmodSync(restore, 0o755);
+  }
+}
+
+async function stageMongoWindows() {
+  const target = path.join(resources, "mongo", "mongod.exe");
+  if (!fs.existsSync(target)) {
+    const urls = mongoVersions.map((version) => `https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-${version}.zip`);
+    const url = await firstAvailable(urls, "MongoDB Community for Windows");
+    const archive = await download(url, path.join(cache, path.basename(url)));
+    const extracted = path.join(cache, "mongo-win");
+    fs.rmSync(extracted, { recursive: true, force: true });
+    extractZip(archive, extracted);
+    const binary = findFile(extracted, "mongod.exe");
+    if (!binary) throw new Error("The MongoDB archive has no mongod.exe.");
+    copyTree(path.dirname(binary), path.join(resources, "mongo"), (name) => {
+      const lower = name.toLowerCase();
+      return lower.endsWith(".pdb") || lower === "mongos.exe" || lower === "install-compass.ps1" || lower === "vc_redist.x64.exe";
+    });
+    const licenseRoot = path.dirname(path.dirname(binary));
+    for (const name of fs.readdirSync(licenseRoot)) {
+      const from = path.join(licenseRoot, name);
+      if (name.toLowerCase().includes("license") && fs.statSync(from).isFile()) {
+        fs.copyFileSync(from, path.join(resources, "mongo", name));
+      }
     }
   }
+  await stageDatabaseTools("win32");
 }
 
 async function stageMongoDarwin() {
   const target = path.join(resources, "mongo", "mongod");
   if (fs.existsSync(target)) {
     fs.chmodSync(target, 0o755);
-    return;
-  }
-  const urls = mongoVersions.map((version) => `https://fastdl.mongodb.org/osx/mongodb-macos-arm64-${version}.tgz`);
-  const url = await firstAvailable(urls, "MongoDB Community for macOS");
-  const archive = await download(url, path.join(cache, path.basename(url)));
-  const extracted = path.join(cache, "mongo-mac");
-  fs.rmSync(extracted, { recursive: true, force: true });
-  extractTarGz(archive, extracted);
-  const binary = findFile(extracted, "mongod");
-  if (!binary) throw new Error("The MongoDB archive has no mongod.");
-  fs.mkdirSync(path.join(resources, "mongo"), { recursive: true });
-  fs.copyFileSync(binary, target);
-  fs.chmodSync(target, 0o755);
-  const licenseRoot = path.dirname(path.dirname(binary));
-  for (const name of fs.readdirSync(licenseRoot)) {
-    const from = path.join(licenseRoot, name);
-    if (name.toLowerCase().includes("license") && fs.statSync(from).isFile()) {
-      fs.copyFileSync(from, path.join(resources, "mongo", name));
+  } else {
+    const urls = mongoVersions.map((version) => `https://fastdl.mongodb.org/osx/mongodb-macos-arm64-${version}.tgz`);
+    const url = await firstAvailable(urls, "MongoDB Community for macOS");
+    const archive = await download(url, path.join(cache, path.basename(url)));
+    const extracted = path.join(cache, "mongo-mac");
+    fs.rmSync(extracted, { recursive: true, force: true });
+    extractTarGz(archive, extracted);
+    const binary = findFile(extracted, "mongod");
+    if (!binary) throw new Error("The MongoDB archive has no mongod.");
+    fs.mkdirSync(path.join(resources, "mongo"), { recursive: true });
+    fs.copyFileSync(binary, target);
+    fs.chmodSync(target, 0o755);
+    const licenseRoot = path.dirname(path.dirname(binary));
+    for (const name of fs.readdirSync(licenseRoot)) {
+      const from = path.join(licenseRoot, name);
+      if (name.toLowerCase().includes("license") && fs.statSync(from).isFile()) {
+        fs.copyFileSync(from, path.join(resources, "mongo", name));
+      }
     }
   }
+  await stageDatabaseTools("darwin");
 }
 
 async function stagePythonWindows() {

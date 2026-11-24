@@ -135,6 +135,21 @@ async def process_due_jobs(db: AsyncIOMotorDatabase, data_dir: Path) -> int:
 
 
 async def _run(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
+    if job["kind"] == "backup":
+        await _run_backup(db, data_dir, job)
+        return
+    if job["kind"] not in {"report_pdf", "report_xlsx"}:
+        await db.jobs.update_one(
+            {"_id": job["_id"]},
+            {
+                "$set": {
+                    "state": "failed",
+                    "lease_until": None,
+                    "last_error": "That job type is not supported.",
+                }
+            },
+        )
+        return
     user = await db.users.find_one({"_id": job["actor_id"]})
     grants = await db.grants.find({"user_id": job["actor_id"]}).to_list(length=500)
     action = "export.pdf" if job["kind"] == "report_pdf" else "export.xlsx"
@@ -208,6 +223,72 @@ async def _run(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
         {"$set": {"state": "succeeded", "lease_until": None, "file_id": file_doc["_id"]}},
     )
     log.info("job %s finished", job["_id"])
+
+
+async def _run_backup(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
+    import os
+
+    from app.acl import allows as acl_allows
+    from app.ops_backup import BackupError, create_backup
+
+    user = await db.users.find_one({"_id": job["actor_id"]})
+    grants = await db.grants.find({"user_id": job["actor_id"]}).to_list(length=500)
+    if (
+        user is None
+        or not user.get("active")
+        or user.get("session_version") != job["session_version"]
+        or not acl_allows(grants, "backup.admin", {"institute_id": job["institute_id"]})
+    ):
+        await db.jobs.update_one(
+            {"_id": job["_id"]},
+            {
+                "$set": {
+                    "state": "failed",
+                    "lease_until": None,
+                    "last_error": "Access was revoked before the backup finished.",
+                }
+            },
+        )
+        return
+    passphrase = (job.get("payload") or {}).get("passphrase") or ""
+    try:
+        result = create_backup(
+            data_dir=data_dir,
+            passphrase=passphrase,
+            mongo_url=os.environ.get("MONGO_URL"),
+            db_name=os.environ.get("DB_NAME"),
+        )
+    except BackupError as exc:
+        await db.jobs.update_one(
+            {"_id": job["_id"]},
+            {"$set": {"state": "failed", "lease_until": None, "last_error": exc.message}},
+        )
+        return
+    except Exception:
+        log.exception("backup job %s failed", job["_id"])
+        await db.jobs.update_one(
+            {"_id": job["_id"]},
+            {
+                "$set": {
+                    "state": "failed",
+                    "lease_until": None,
+                    "last_error": "The backup could not be finished.",
+                }
+            },
+        )
+        return
+    await db.jobs.update_one(
+        {"_id": job["_id"]},
+        {
+            "$set": {
+                "state": "succeeded",
+                "lease_until": None,
+                "last_error": None,
+                "payload": {**(job.get("payload") or {}), "passphrase": None, "result": result},
+            }
+        },
+    )
+    log.info("backup job %s finished", job["_id"])
 
 
 async def run_actor_job(db: AsyncIOMotorDatabase, data_dir: Path, job_id: str, actor_id: str) -> dict | None:

@@ -86,6 +86,7 @@ function serviceEnvironment(paths, port, mongoPort = MONGO_PORT) {
     WORKER_ENABLED: "1",
     PYTHONPATH: paths.backendDir,
     PYTHONNOUSERSITE: "1",
+    MONGO_TOOLS_DIR: paths.mongoToolsDir || path.dirname(paths.mongoBin || ""),
     VAY_PORT: String(port),
     VAY_MONGO_PORT: String(mongoPort),
   });
@@ -151,7 +152,12 @@ function waitForPort(port, attempts = 80) {
 
 function ensureLayout(dataDir) {
   fs.mkdirSync(dataDir, { recursive: true });
-  for (const name of ["db", "logs", "files"]) fs.mkdirSync(path.join(dataDir, name), { recursive: true });
+  for (const name of ["db", "logs", "files", "backups"]) fs.mkdirSync(path.join(dataDir, name), { recursive: true });
+}
+
+function stopApi(dataDir) {
+  stopPid(readPid(dataDir, "api"));
+  clearPid(dataDir, "api");
 }
 
 function appendLog(dataDir, message) {
@@ -537,6 +543,7 @@ module.exports = {
   removeLoginAgent,
   serviceEnvironment,
   startHost,
+  stopApi,
   stopHost,
   supervisorProfileDirectory,
   whenReady,

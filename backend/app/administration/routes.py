@@ -6,7 +6,7 @@ from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, File, Form, Request, UploadFile
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
@@ -90,6 +90,11 @@ class PasswordBody(BaseModel):
 
 class FactoryResetBody(BaseModel):
     confirm: str = ""
+
+
+class BackupBody(BaseModel):
+    passphrase: str = Field(min_length=1)
+    passphrase_confirm: str = Field(min_length=1)
 
 
 class UserBody(BaseModel):
@@ -937,6 +942,97 @@ async def process_jobs(request: Request) -> dict:
     require(user, "backup.admin", institute_resource(user))
     count = await process_due_jobs(db(request), settings(request).data_dir)
     return {"processed": count}
+
+
+@router.get("/ops/backup")
+async def get_backup_status(request: Request) -> dict:
+    from app.ops_backup import backup_status
+
+    user = await current_user(request)
+    require(user, "backup.admin", institute_resource(user))
+    return backup_status(settings(request).data_dir)
+
+
+@router.post("/ops/backups")
+async def create_ops_backup(request: Request, body: BackupBody) -> dict:
+    import asyncio
+
+    from app.ops_backup import BackupError, create_backup
+
+    user = await current_user(request)
+    require(user, "backup.admin", institute_resource(user))
+    if body.passphrase != body.passphrase_confirm:
+        raise AppError(422, "backup.passphrase", "The backup keys do not match.")
+    cfg = settings(request)
+    try:
+        result = await asyncio.to_thread(
+            create_backup,
+            data_dir=cfg.data_dir,
+            passphrase=body.passphrase,
+            mongo_url=cfg.mongo_url,
+            db_name=cfg.db_name,
+        )
+    except BackupError as exc:
+        raise AppError(400, exc.code, exc.message) from exc
+    await write_audit(
+        request,
+        user,
+        "backup.create",
+        None,
+        {"path": result.get("path"), "size": result.get("size")},
+        institute_resource(user),
+    )
+    return result
+
+
+@router.post("/ops/restores")
+async def restore_ops_backup(
+    request: Request,
+    passphrase: str = Form(...),
+    confirm: str = Form(""),
+    archive: UploadFile | None = File(None),
+) -> dict:
+    import asyncio
+
+    from app.ops_backup import BACKUP_FILENAME, BackupError, backup_dir, restore_backup
+
+    user = await current_user(request)
+    require(user, "backup.admin", institute_resource(user))
+    if confirm != "RESTORE":
+        raise AppError(422, "backup.confirm", "Type RESTORE to replace all institute data.")
+    cfg = settings(request)
+    staged: Path | None = None
+    try:
+        if archive is not None and archive.filename:
+            backups = backup_dir(cfg.data_dir)
+            staged = backups / f"upload-{new_id()}.zip"
+            staged.write_bytes(await archive.read())
+            source = staged
+        else:
+            source = cfg.data_dir / "backups" / BACKUP_FILENAME
+        result = await asyncio.to_thread(
+            restore_backup,
+            data_dir=cfg.data_dir,
+            passphrase=passphrase,
+            archive=source,
+            mongo_url=cfg.mongo_url,
+            db_name=cfg.db_name,
+        )
+    except BackupError as exc:
+        status = 409 if exc.code == "backup.busy" else 400
+        raise AppError(status, exc.code, exc.message) from exc
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
+    await write_audit(
+        request,
+        user,
+        "backup.restore",
+        None,
+        {"counts": result.get("counts")},
+        institute_resource(user),
+    )
+    return result
 
 
 @router.get("/files/{file_id}")

@@ -29,6 +29,7 @@ test("the API serves the frontend over HTTPS and does not publish MongoDB", () =
     backendDir: "/backend",
     pythonBin: path.join("python", "python.exe"),
     mongoBin: path.join("mongo", "mongod.exe"),
+    mongoToolsDir: path.join("mongo"),
   };
   const env = serviceEnvironment(paths, 8443);
   assert.equal(env.STATIC_DIR, "/frontend");
@@ -36,6 +37,7 @@ test("the API serves the frontend over HTTPS and does not publish MongoDB", () =
   assert.equal(env.MONGO_URL, mongoUrl(27017));
   assert.equal(env.MONGO_URL.includes("replicaSet"), false);
   assert.equal(env.MONGO_URL.includes("0.0.0.0"), false);
+  assert.equal(env.MONGO_TOOLS_DIR, path.join("mongo"));
   const args = apiArguments(paths, 8443);
   assert.equal(args[args.indexOf("--host") + 1], "0.0.0.0");
   assert.equal(args[args.indexOf("--port") + 1], "8443");

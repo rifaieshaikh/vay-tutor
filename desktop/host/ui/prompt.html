@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Vay Tutor</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 1.25rem; background: #f7f4ee; color: #1c2430; }
+    h1 { font-size: 1.1rem; margin: 0 0 0.5rem; }
+    p { margin: 0 0 1rem; line-height: 1.4; }
+    label { display: block; margin: 0.75rem 0 0.35rem; font-size: 0.9rem; }
+    input { width: 100%; box-sizing: border-box; padding: 0.5rem 0.6rem; border: 1px solid #c5c0b6; border-radius: 4px; font: inherit; }
+    .actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1.25rem; }
+    button { font: inherit; padding: 0.45rem 0.9rem; border-radius: 4px; border: 1px solid #8a8478; background: #fff; cursor: pointer; }
+    button.primary { background: #1c2430; color: #fff; border-color: #1c2430; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    .error { color: #9b1c1c; margin-top: 0.75rem; }
+  </style>
+</head>
+<body>
+  <h1 id="title">Vay Tutor</h1>
+  <p id="message"></p>
+  <form id="form">
+    <div id="fields"></div>
+    <p class="error" id="error" hidden></p>
+    <div class="actions">
+      <button type="button" id="cancel">Cancel</button>
+      <button type="submit" class="primary" id="submit">Continue</button>
+    </div>
+  </form>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const mode = params.get("mode") || "backup";
+    const title = document.getElementById("title");
+    const message = document.getElementById("message");
+    const fields = document.getElementById("fields");
+    const error = document.getElementById("error");
+    const submit = document.getElementById("submit");
+
+    if (mode === "backup") {
+      title.textContent = "Back up now";
+      message.textContent = "Create an encrypted backup of this institute. Only the latest backup file is kept.";
+      fields.innerHTML = `
+        <label>Backup key<input id="passphrase" type="password" autocomplete="new-password" minlength="8" required /></label>
+        <label>Confirm backup key<input id="confirm" type="password" autocomplete="new-password" minlength="8" required /></label>
+      `;
+      submit.textContent = "Back up";
+    } else {
+      title.textContent = "Restore from backup";
+      message.textContent = "This replaces all institute data, including users and passwords.";
+      fields.innerHTML = `
+        <label>Backup key<input id="passphrase" type="password" autocomplete="current-password" required /></label>
+        <label>Type RESTORE<input id="confirm" type="text" autocomplete="off" required /></label>
+      `;
+      submit.textContent = "Restore";
+      submit.classList.add("destructive");
+    }
+
+    document.getElementById("cancel").onclick = () => window.close();
+    document.getElementById("form").onsubmit = (event) => {
+      event.preventDefault();
+      error.hidden = true;
+      const passphrase = document.getElementById("passphrase").value;
+      const confirm = document.getElementById("confirm").value;
+      if (mode === "backup") {
+        if (passphrase.length < 8) {
+          error.textContent = "Use at least 8 characters for the backup key.";
+          error.hidden = false;
+          return;
+        }
+        if (passphrase !== confirm) {
+          error.textContent = "The backup keys do not match.";
+          error.hidden = false;
+          return;
+        }
+        window.vayPrompt.submit({ passphrase });
+        return;
+      }
+      if (confirm !== "RESTORE") {
+        error.textContent = "Type RESTORE to replace all institute data.";
+        error.hidden = false;
+        return;
+      }
+      window.vayPrompt.submit({ passphrase, confirm });
+    };
+  </script>
+</body>
+</html>

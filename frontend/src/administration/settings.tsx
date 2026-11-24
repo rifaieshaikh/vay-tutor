@@ -34,19 +34,39 @@ function percentText(value: number) {
   return String(Math.round(value * 100) / 100);
 }
 
+type BackupStatus = {
+  exists: boolean;
+  path: string;
+  size: number;
+  modified_at: string | null;
+};
+
 export function SettingsPage({ session }: { session: Session }) {
   const [policy, setPolicy] = useState<Policy | null>(null);
   const [tab, setTab] = useState<"preferences" | "policy" | "curriculum" | "operations">("preferences");
   const [error, setError] = useState("");
   const [editing, setEditing] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [backingUp, setBackingUp] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [backup, setBackup] = useState<BackupStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const canEdit = session.actions.includes("grant.manage");
+  const canBackup = session.actions.includes("backup.admin");
   const bands = policy?.bands && policy.bands.length >= 2 ? policy.bands : null;
 
+  function loadBackup() {
+    if (!canBackup) return Promise.resolve();
+    return api<BackupStatus>("/api/v1/ops/backup")
+      .then(setBackup)
+      .catch((reason: Error) => setError(reason.message));
+  }
+
   useEffect(() => {
-    api<Policy>("/api/v1/policies/active")
-      .then(setPolicy)
+    Promise.all([
+      api<Policy>("/api/v1/policies/active").then(setPolicy),
+      loadBackup(),
+    ])
       .catch((reason: Error) => setError(reason.message))
       .finally(() => setLoading(false));
   }, []);
@@ -167,6 +187,18 @@ export function SettingsPage({ session }: { session: Session }) {
             <dt>Academic access</dt>
             <dd>These settings do not grant it</dd>
           </div>
+          {canBackup ? (
+            <>
+              <div className="span-2">
+                <dt>Local backup</dt>
+                <dd>
+                  {backup?.exists
+                    ? `${backup.path} · ${Math.max(1, Math.round(backup.size / 1024))} KB${backup.modified_at ? ` · ${new Date(backup.modified_at).toLocaleString()}` : ""}`
+                    : "No backup yet. Backups are encrypted zip files kept only as the latest copy."}
+                </dd>
+              </div>
+            </>
+          ) : null}
           {session.actions.includes("audit.view") ? (
             <div className="span-2">
               <dt>History</dt>
@@ -174,6 +206,18 @@ export function SettingsPage({ session }: { session: Session }) {
             </div>
           ) : null}
         </dl>
+      ) : null}
+      {tab === "operations" && canBackup ? (
+        <div className="title-row">
+          <div>
+            <h2>Backup and restore</h2>
+            <p>Save an encrypted zip of the database, files, and users. Restore replaces everything on this install, including accounts.</p>
+          </div>
+          <div className="icon-actions">
+            <button type="button" onClick={() => setBackingUp(true)}>Back up now</button>
+            <button type="button" className="quiet" onClick={() => setRestoring(true)}>Restore…</button>
+          </div>
+        </div>
       ) : null}
       {tab === "operations" && canEdit ? (
         <div className="title-row">
@@ -183,6 +227,23 @@ export function SettingsPage({ session }: { session: Session }) {
           </div>
           <button type="button" className="destructive" onClick={() => setResetting(true)}>Factory reset</button>
         </div>
+      ) : null}
+      {backingUp ? (
+        <BackupDialog
+          onClose={() => setBackingUp(false)}
+          onDone={async () => {
+            setBackingUp(false);
+            await loadBackup();
+          }}
+        />
+      ) : null}
+      {restoring ? (
+        <RestoreDialog
+          onClose={() => setRestoring(false)}
+          onDone={() => {
+            window.location.replace("/");
+          }}
+        />
       ) : null}
       {resetting ? <FactoryReset onClose={() => setResetting(false)} /> : null}
       {editing && policy ? (
@@ -537,6 +598,104 @@ function KindDialog({
         <div className="dialog-actions">
           <button type="button" className="quiet" onClick={onClose}>Cancel</button>
           <button type="submit" disabled={saving || !label.trim()}>{submitLabel}</button>
+        </div>
+      </form>
+    </StudentDialog>
+  );
+}
+
+function BackupDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void | Promise<void> }) {
+  const [passphrase, setPassphrase] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const result = await api<BackupStatus>("/api/v1/ops/backups", {
+        method: "POST",
+        body: JSON.stringify({ passphrase, passphrase_confirm: confirm }),
+      });
+      notify(`Backup saved${result.path ? ` at ${result.path}` : ""}.`);
+      await onDone();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The backup could not be created.");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <StudentDialog title="Back up now" onClose={onClose}>
+      <form className="form-grid" onSubmit={save}>
+        <p className="span-2">Creates an AES-encrypted zip. Only the latest backup is kept. Keep this key somewhere safe — without it the backup cannot be opened.</p>
+        <label>Backup key
+          <input type="password" autoComplete="new-password" value={passphrase} aria-label="Backup key" onChange={(event) => setPassphrase(event.target.value)} />
+        </label>
+        <label>Confirm backup key
+          <input type="password" autoComplete="new-password" value={confirm} aria-label="Confirm backup key" onChange={(event) => setConfirm(event.target.value)} />
+        </label>
+        {error ? <p className="error span-2" role="alert">{error}</p> : null}
+        <div className="dialog-actions span-2">
+          <button type="button" className="quiet" onClick={onClose}>Cancel</button>
+          <button type="submit" disabled={saving || passphrase.length < 8 || passphrase !== confirm}>{saving ? "Backing up…" : "Back up"}</button>
+        </div>
+      </form>
+    </StudentDialog>
+  );
+}
+
+function RestoreDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const [passphrase, setPassphrase] = useState("");
+  const [phrase, setPhrase] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function restore(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const body = new FormData();
+      body.set("passphrase", passphrase);
+      body.set("confirm", phrase);
+      if (file) body.set("archive", file);
+      await api("/api/v1/ops/restores", { method: "POST", body });
+      notify("Restore finished. Sign in with an account from the backup.");
+      onDone();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The backup was not restored.");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <StudentDialog title="Restore from backup" onClose={onClose}>
+      <form className="form-grid" onSubmit={restore}>
+        <p className="span-2">This replaces the entire institute database and files, including users and passwords. Prefer restoring from the host app menu for large backups.</p>
+        <label className="span-2">Backup file
+          <input
+            type="file"
+            accept=".zip,application/zip"
+            aria-label="Backup file"
+            onChange={(event) => setFile(event.target.files?.[0] || null)}
+          />
+        </label>
+        <label>Backup key
+          <input type="password" autoComplete="current-password" value={passphrase} aria-label="Backup key" onChange={(event) => setPassphrase(event.target.value)} />
+        </label>
+        <label>Type RESTORE
+          <input value={phrase} aria-label="Type RESTORE" autoComplete="off" onChange={(event) => setPhrase(event.target.value)} />
+        </label>
+        {error ? <p className="error span-2" role="alert">{error}</p> : null}
+        <div className="dialog-actions span-2">
+          <button type="button" className="quiet" onClick={onClose}>Cancel</button>
+          <button type="submit" className="destructive" disabled={saving || !passphrase || phrase !== "RESTORE"}>
+            {saving ? "Restoring…" : "Restore"}
+          </button>
         </div>
       </form>
     </StudentDialog>
