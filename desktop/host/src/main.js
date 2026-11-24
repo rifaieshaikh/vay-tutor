@@ -68,7 +68,7 @@ function writePassphraseFile(passphrase) {
   return file;
 }
 
-function runBackupCli(paths, action, passphrase, archivePath) {
+function runBackupCli(paths, action, passphrase, filePath) {
   const passphraseFile = writePassphraseFile(passphrase);
   const args = [
     "-c",
@@ -79,7 +79,8 @@ function runBackupCli(paths, action, passphrase, archivePath) {
     "--passphrase-file",
     passphraseFile,
   ];
-  if (archivePath) args.push("--archive", archivePath);
+  if (action === "create" && filePath) args.push("--destination", filePath);
+  if (action === "restore" && filePath) args.push("--archive", filePath);
   try {
     const result = spawnSync(paths.pythonBin, args, {
       cwd: path.dirname(paths.pythonBin),
@@ -162,13 +163,22 @@ async function runBackupNow() {
   const paths = hostPaths();
   const answers = await askPrompt("backup");
   if (!answers?.passphrase) return;
+  const stamp = new Date().toISOString().slice(0, 10);
+  const chosen = await dialog.showSaveDialog(windowRef || undefined, {
+    title: "Save backup",
+    defaultPath: path.join(app.getPath("documents"), `vay-tutor-backup-${stamp}.zip`),
+    filters: [{ name: "Vay Tutor backup", extensions: ["zip"] }],
+  });
+  if (chosen.canceled || !chosen.filePath) return;
+  let target = chosen.filePath;
+  if (!target.toLowerCase().endsWith(".zip")) target = `${target}.zip`;
   try {
-    const result = runBackupCli(paths, "create", answers.passphrase);
+    const result = runBackupCli(paths, "create", answers.passphrase, target);
     await dialog.showMessageBox(windowRef || undefined, {
       type: "info",
       title: "Backup complete",
       message: "The encrypted backup was saved.",
-      detail: result.path || path.join(paths.dataDir, "backups", "vay-tutor-backup.zip"),
+      detail: result.path || target,
     });
   } catch (error) {
     await dialog.showMessageBox(windowRef || undefined, {
@@ -183,7 +193,7 @@ async function runRestoreNow() {
   const paths = hostPaths();
   const chosen = await dialog.showOpenDialog(windowRef || undefined, {
     title: "Restore from backup",
-    defaultPath: path.join(paths.dataDir, "backups"),
+    defaultPath: app.getPath("documents"),
     properties: ["openFile"],
     filters: [{ name: "Vay Tutor backup", extensions: ["zip"] }],
   });
@@ -386,6 +396,7 @@ function openTab(url) {
   if (!tab) return;
   const view = new WebContentsView({
     webPreferences: {
+      preload: path.join(__dirname, "page-preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -433,6 +444,7 @@ function openWindow(url) {
   });
   const view = new WebContentsView({
     webPreferences: {
+      preload: path.join(__dirname, "page-preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -633,6 +645,25 @@ app.whenReady().then(async () => {
       if (tabs.select(id)) showActive();
     });
     ipcMain.handle("tabs-close", (_event, id) => closeTab(id));
+    ipcMain.handle("backup-pick-save", async (_event, suggestedName) => {
+      const stamp = suggestedName || `vay-tutor-backup-${new Date().toISOString().slice(0, 10)}.zip`;
+      const chosen = await dialog.showSaveDialog(windowRef || undefined, {
+        title: "Save backup",
+        defaultPath: path.join(app.getPath("documents"), stamp),
+        filters: [{ name: "Vay Tutor backup", extensions: ["zip"] }],
+      });
+      if (chosen.canceled || !chosen.filePath) return null;
+      let target = chosen.filePath;
+      if (!target.toLowerCase().endsWith(".zip")) target = `${target}.zip`;
+      return target;
+    });
+    ipcMain.handle("backup-write-file", async (_event, filePath, data) => {
+      if (!filePath || typeof filePath !== "string") throw new Error("Choose where to save the backup file.");
+      const absolute = path.resolve(filePath);
+      fs.mkdirSync(path.dirname(absolute), { recursive: true });
+      fs.writeFileSync(absolute, Buffer.from(data));
+      return absolute;
+    });
     createWindow();
     await statusView.webContents.loadURL(loadingPage("Starting MongoDB, the API, and the institute…"));
     try {

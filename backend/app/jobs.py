@@ -227,6 +227,7 @@ async def _run(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
 
 async def _run_backup(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> None:
     import os
+    from pathlib import Path
 
     from app.acl import allows as acl_allows
     from app.ops_backup import BackupError, create_backup
@@ -251,12 +252,26 @@ async def _run_backup(db: AsyncIOMotorDatabase, data_dir: Path, job: dict) -> No
         )
         return
     passphrase = (job.get("payload") or {}).get("passphrase") or ""
+    destination = (job.get("payload") or {}).get("destination")
+    if not destination:
+        await db.jobs.update_one(
+            {"_id": job["_id"]},
+            {
+                "$set": {
+                    "state": "failed",
+                    "lease_until": None,
+                    "last_error": "Choose where to save the backup file.",
+                }
+            },
+        )
+        return
     try:
         result = create_backup(
             data_dir=data_dir,
             passphrase=passphrase,
             mongo_url=os.environ.get("MONGO_URL"),
             db_name=os.environ.get("DB_NAME"),
+            destination=Path(destination),
         )
     except BackupError as exc:
         await db.jobs.update_one(

@@ -38,7 +38,7 @@
 
     if (mode === "backup") {
       title.textContent = "Back up now";
-      message.textContent = "Create an encrypted backup of this institute. Only the latest backup file is kept.";
+      message.textContent = "Create an encrypted backup of this institute. Next you will choose where to save the zip.";
       fields.innerHTML = `
         <label>Backup key<input id="passphrase" type="password" autocomplete="new-password" minlength="8" required /></label>
         <label>Confirm backup key<input id="confirm" type="password" autocomplete="new-password" minlength="8" required /></label>

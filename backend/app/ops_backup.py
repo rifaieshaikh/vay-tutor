@@ -38,15 +38,23 @@ def default_backup_path(data_dir: Path) -> Path:
 
 
 def backup_status(data_dir: Path) -> dict[str, Any]:
+    """Report whether a leftover default-path backup exists; destination is chosen per save."""
     path = default_backup_path(data_dir)
     if not path.is_file():
-        return {"exists": False, "path": str(path), "size": 0, "modified_at": None}
+        return {
+            "exists": False,
+            "path": None,
+            "size": 0,
+            "modified_at": None,
+            "hint": "Choose a folder and file name each time you back up.",
+        }
     stat = path.stat()
     return {
         "exists": True,
         "path": str(path),
         "size": stat.st_size,
         "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        "hint": "Prefer Save As when backing up so the zip is not left under the install data folder.",
     }
 
 
@@ -179,9 +187,13 @@ def create_backup(
 ) -> dict[str, Any]:
     if len(passphrase) < 8:
         raise BackupError("backup.passphrase", "Use at least 8 characters for the backup key.")
+    if destination is None:
+        raise BackupError("backup.destination", "Choose where to save the backup file.")
     url, name = mongo_url or _mongo_settings()[0], db_name or _mongo_settings()[1]
     data_dir = Path(data_dir)
-    target = Path(destination) if destination else default_backup_path(data_dir)
+    target = Path(destination)
+    if target.suffix.lower() != ".zip":
+        target = Path(f"{target}.zip")
     dump_bin = _tool("mongodump")
     with tempfile.TemporaryDirectory(prefix="vay-backup-stage-") as raw:
         stage = Path(raw)
@@ -295,16 +307,28 @@ def cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--data-dir", default=os.environ.get("DATA_DIR", ""))
     parser.add_argument("--passphrase-file", required=True)
     parser.add_argument("--archive", default="")
+    parser.add_argument("--destination", default="")
     args = parser.parse_args(argv)
     if not args.data_dir:
         raise SystemExit("DATA_DIR or --data-dir is required.")
     passphrase = Path(args.passphrase_file).read_text(encoding="utf-8").rstrip("\n")
     try:
         if args.action == "create":
-            result = create_backup(data_dir=Path(args.data_dir), passphrase=passphrase)
+            if not args.destination:
+                raise BackupError("backup.destination", "Choose where to save the backup file.")
+            result = create_backup(
+                data_dir=Path(args.data_dir),
+                passphrase=passphrase,
+                destination=Path(args.destination),
+            )
         else:
-            archive = Path(args.archive) if args.archive else None
-            result = restore_backup(data_dir=Path(args.data_dir), passphrase=passphrase, archive=archive)
+            if not args.archive:
+                raise BackupError("backup.missing", "Choose a backup zip to restore.")
+            result = restore_backup(
+                data_dir=Path(args.data_dir),
+                passphrase=passphrase,
+                archive=Path(args.archive),
+            )
         print(json.dumps(result))
         return 0
     except BackupError as exc:

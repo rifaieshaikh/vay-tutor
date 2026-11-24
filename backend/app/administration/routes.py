@@ -954,16 +954,21 @@ async def get_backup_status(request: Request) -> dict:
 
 
 @router.post("/ops/backups")
-async def create_ops_backup(request: Request, body: BackupBody) -> dict:
+async def create_ops_backup(request: Request, body: BackupBody):
     import asyncio
+    from datetime import date
 
-    from app.ops_backup import BackupError, create_backup
+    from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
+
+    from app.ops_backup import BACKUP_FILENAME, BackupError, backup_dir, create_backup
 
     user = await current_user(request)
     require(user, "backup.admin", institute_resource(user))
     if body.passphrase != body.passphrase_confirm:
         raise AppError(422, "backup.passphrase", "The backup keys do not match.")
     cfg = settings(request)
+    out = backup_dir(cfg.data_dir) / f"download-{new_id()}.zip"
     try:
         result = await asyncio.to_thread(
             create_backup,
@@ -971,18 +976,26 @@ async def create_ops_backup(request: Request, body: BackupBody) -> dict:
             passphrase=body.passphrase,
             mongo_url=cfg.mongo_url,
             db_name=cfg.db_name,
+            destination=out,
         )
     except BackupError as exc:
+        out.unlink(missing_ok=True)
         raise AppError(400, exc.code, exc.message) from exc
     await write_audit(
         request,
         user,
         "backup.create",
         None,
-        {"path": result.get("path"), "size": result.get("size")},
+        {"size": result.get("size")},
         institute_resource(user),
     )
-    return result
+    filename = f"vay-tutor-backup-{date.today().isoformat()}.zip"
+    return FileResponse(
+        out,
+        media_type="application/zip",
+        filename=filename,
+        background=BackgroundTask(lambda: out.unlink(missing_ok=True)),
+    )
 
 
 @router.post("/ops/restores")
@@ -994,27 +1007,23 @@ async def restore_ops_backup(
 ) -> dict:
     import asyncio
 
-    from app.ops_backup import BACKUP_FILENAME, BackupError, backup_dir, restore_backup
+    from app.ops_backup import BackupError, backup_dir, restore_backup
 
     user = await current_user(request)
     require(user, "backup.admin", institute_resource(user))
     if confirm != "RESTORE":
         raise AppError(422, "backup.confirm", "Type RESTORE to replace all institute data.")
+    if archive is None or not archive.filename:
+        raise AppError(422, "backup.missing", "Choose a backup zip to restore.")
     cfg = settings(request)
-    staged: Path | None = None
+    staged = backup_dir(cfg.data_dir) / f"upload-{new_id()}.zip"
     try:
-        if archive is not None and archive.filename:
-            backups = backup_dir(cfg.data_dir)
-            staged = backups / f"upload-{new_id()}.zip"
-            staged.write_bytes(await archive.read())
-            source = staged
-        else:
-            source = cfg.data_dir / "backups" / BACKUP_FILENAME
+        staged.write_bytes(await archive.read())
         result = await asyncio.to_thread(
             restore_backup,
             data_dir=cfg.data_dir,
             passphrase=passphrase,
-            archive=source,
+            archive=staged,
             mongo_url=cfg.mongo_url,
             db_name=cfg.db_name,
         )
@@ -1022,8 +1031,7 @@ async def restore_ops_backup(
         status = 409 if exc.code == "backup.busy" else 400
         raise AppError(status, exc.code, exc.message) from exc
     finally:
-        if staged is not None:
-            staged.unlink(missing_ok=True)
+        staged.unlink(missing_ok=True)
     await write_audit(
         request,
         user,

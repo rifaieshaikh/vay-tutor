@@ -36,9 +36,10 @@ function percentText(value: number) {
 
 type BackupStatus = {
   exists: boolean;
-  path: string;
+  path: string | null;
   size: number;
   modified_at: string | null;
+  hint?: string;
 };
 
 export function SettingsPage({ session }: { session: Session }) {
@@ -188,16 +189,10 @@ export function SettingsPage({ session }: { session: Session }) {
             <dd>These settings do not grant it</dd>
           </div>
           {canBackup ? (
-            <>
-              <div className="span-2">
-                <dt>Local backup</dt>
-                <dd>
-                  {backup?.exists
-                    ? `${backup.path} · ${Math.max(1, Math.round(backup.size / 1024))} KB${backup.modified_at ? ` · ${new Date(backup.modified_at).toLocaleString()}` : ""}`
-                    : "No backup yet. Backups are encrypted zip files kept only as the latest copy."}
-                </dd>
-              </div>
-            </>
+            <div className="span-2">
+              <dt>Local backup</dt>
+              <dd>{backup?.hint || "Choose a folder and file name each time you back up."}</dd>
+            </div>
           ) : null}
           {session.actions.includes("audit.view") ? (
             <div className="span-2">
@@ -211,7 +206,7 @@ export function SettingsPage({ session }: { session: Session }) {
         <div className="title-row">
           <div>
             <h2>Backup and restore</h2>
-            <p>Save an encrypted zip of the database, files, and users. Restore replaces everything on this install, including accounts.</p>
+            <p>Save an encrypted zip wherever you choose. Restore replaces everything on this install, including accounts.</p>
           </div>
           <div className="actions">
             <button type="button" onClick={() => setBackingUp(true)}>Back up now</button>
@@ -604,6 +599,59 @@ function KindDialog({
   );
 }
 
+type SaveHandle = {
+  name?: string;
+  createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+};
+
+type VayDesktop = {
+  isHost?: boolean;
+  pickBackupSavePath: (suggestedName: string) => Promise<string | null>;
+  writeBackupFile: (filePath: string, data: ArrayBuffer) => Promise<string>;
+};
+
+function desktopBridge() {
+  return (window as Window & { vayDesktop?: VayDesktop }).vayDesktop;
+}
+
+function backupSavePicker() {
+  return (window as Window & {
+    showSaveFilePicker?: (options: {
+      suggestedName?: string;
+      startIn?: string;
+      types?: { description: string; accept: Record<string, string[]> }[];
+    }) => Promise<SaveHandle>;
+  }).showSaveFilePicker;
+}
+
+function suggestedBackupName() {
+  return `vay-tutor-backup-${new Date().toISOString().slice(0, 10)}.zip`;
+}
+
+function saveBackupWithDownload(blob: Blob) {
+  const suggested = suggestedBackupName();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = suggested;
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  return suggested;
+}
+
+function backupSaveHelp() {
+  if (desktopBridge()?.pickBackupSavePath) {
+    return "A Save dialog opens so you choose the folder and file name (Electron).";
+  }
+  if (backupSavePicker()) {
+    return "A Save dialog opens so you choose the folder and file name.";
+  }
+  return "Firefox and Safari cannot open a folder picker from the page. The backup downloads next — in Firefox open Settings → General → Files and Applications and turn on “Always ask you where to save files” so you can choose the folder.";
+}
+
 function BackupDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void | Promise<void> }) {
   const [passphrase, setPassphrase] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -615,13 +663,58 @@ function BackupDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
     setSaving(true);
     setError("");
     try {
-      const result = await api<BackupStatus>("/api/v1/ops/backups", {
+      const suggested = suggestedBackupName();
+      const desktop = desktopBridge();
+      let desktopPath: string | null = null;
+      let handle: SaveHandle | null = null;
+      if (desktop?.pickBackupSavePath) {
+        desktopPath = await desktop.pickBackupSavePath(suggested);
+        if (!desktopPath) {
+          setSaving(false);
+          return;
+        }
+      } else {
+        const picker = backupSavePicker();
+        if (picker) {
+          handle = await picker({
+            suggestedName: suggested,
+            startIn: "documents",
+            types: [{ description: "Vay Tutor backup", accept: { "application/zip": [".zip"] } }],
+          });
+        }
+      }
+      const response = await fetch("/api/v1/ops/backups", {
         method: "POST",
+        headers: { "Content-Type": "application/json", "X-Client-Version": "1.0.0" },
+        credentials: "include",
+        cache: "no-store",
         body: JSON.stringify({ passphrase, passphrase_confirm: confirm }),
       });
-      notify(`Backup saved${result.path ? ` at ${result.path}` : ""}.`);
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error?.message || "The backup could not be created.");
+      }
+      const blob = await response.blob();
+      let name = suggested;
+      if (desktopPath && desktop?.writeBackupFile) {
+        const saved = await desktop.writeBackupFile(desktopPath, await blob.arrayBuffer());
+        name = saved.split(/[/\\]/).pop() || suggested;
+      } else if (handle) {
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        name = handle.name || suggested;
+      } else {
+        // Firefox/Safari web: no showSaveFilePicker (Mozilla rejected that API).
+        name = saveBackupWithDownload(blob);
+      }
+      notify(`Backup saved as ${name}.`);
       await onDone();
     } catch (reason) {
+      if (reason instanceof DOMException && reason.name === "AbortError") {
+        setSaving(false);
+        return;
+      }
       setError(reason instanceof Error ? reason.message : "The backup could not be created.");
       setSaving(false);
     }
@@ -630,7 +723,7 @@ function BackupDialog({ onClose, onDone }: { onClose: () => void; onDone: () => 
   return (
     <StudentDialog title="Back up now" onClose={onClose}>
       <form className="form-grid" onSubmit={save}>
-        <p className="span-2">Creates an AES-encrypted zip. Only the latest backup is kept. Keep this key somewhere safe — without it the backup cannot be opened.</p>
+        <p className="span-2">{backupSaveHelp()}</p>
         <label>Backup key
           <input type="password" autoComplete="new-password" value={passphrase} aria-label="Backup key" onChange={(event) => setPassphrase(event.target.value)} />
         </label>
@@ -675,12 +768,13 @@ function RestoreDialog({ onClose, onDone }: { onClose: () => void; onDone: () =>
   return (
     <StudentDialog title="Restore from backup" onClose={onClose}>
       <form className="form-grid" onSubmit={restore}>
-        <p className="span-2">This replaces the entire institute database and files, including users and passwords. Prefer restoring from the host app menu for large backups.</p>
+        <p className="span-2">This replaces the entire institute database and files, including users and passwords. Choose the backup zip you saved earlier.</p>
         <label className="span-2">Backup file
           <input
             type="file"
             accept=".zip,application/zip"
             aria-label="Backup file"
+            required
             onChange={(event) => setFile(event.target.files?.[0] || null)}
           />
         </label>
@@ -693,7 +787,7 @@ function RestoreDialog({ onClose, onDone }: { onClose: () => void; onDone: () =>
         {error ? <p className="error span-2" role="alert">{error}</p> : null}
         <div className="dialog-actions span-2">
           <button type="button" className="quiet" onClick={onClose}>Cancel</button>
-          <button type="submit" className="destructive" disabled={saving || !passphrase || phrase !== "RESTORE"}>
+          <button type="submit" className="destructive" disabled={saving || !file || !passphrase || phrase !== "RESTORE"}>
             {saving ? "Restoring…" : "Restore"}
           </button>
         </div>

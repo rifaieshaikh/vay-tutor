@@ -51,7 +51,8 @@ def test_encrypted_zip_rejects_wrong_passphrase(tmp_path):
 def test_backup_status_empty(tmp_path):
     status = backup_status(tmp_path)
     assert status["exists"] is False
-    assert status["path"].endswith("vay-tutor-backup.zip")
+    assert status["path"] is None
+    assert "folder" in (status.get("hint") or "").lower()
 
 
 def test_ops_backup_requires_admin(client):
@@ -105,13 +106,14 @@ def test_backup_restore_round_trip(client, tmp_path, monkeypatch):
     status = must(client.get("/api/v1/ops/backup"))
     assert status["exists"] is False
 
-    result = must(client.post("/api/v1/ops/backups", json={
+    created_backup = client.post("/api/v1/ops/backups", json={
         "passphrase": "correct-horse",
         "passphrase_confirm": "correct-horse",
-    }))
-    assert result["exists"] is True
-    assert Path(result["path"]).is_file()
-    assert result["counts"]["users"] >= 1
+    })
+    assert created_backup.status_code == 200, created_backup.text
+    assert created_backup.headers.get("content-type", "").startswith("application/zip")
+    archive_bytes = created_backup.content
+    assert len(archive_bytes) > 100
 
     must(client.post("/api/v1/users", json={
         "name": "After Backup",
@@ -123,12 +125,11 @@ def test_backup_restore_round_trip(client, tmp_path, monkeypatch):
     }))
     assert any(item["email"] == "after@backup.test" for item in must(client.get("/api/v1/users"))["items"])
 
-    with open(result["path"], "rb") as handle:
-        restored = client.post(
-            "/api/v1/ops/restores",
-            data={"passphrase": "correct-horse", "confirm": "RESTORE"},
-            files={"archive": ("vay-tutor-backup.zip", handle, "application/zip")},
-        )
+    restored = client.post(
+        "/api/v1/ops/restores",
+        data={"passphrase": "correct-horse", "confirm": "RESTORE"},
+        files={"archive": ("vay-tutor-backup.zip", archive_bytes, "application/zip")},
+    )
     assert restored.status_code == 200, restored.text
     assert restored.json()["ok"] is True
 
