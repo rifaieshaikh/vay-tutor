@@ -2,7 +2,7 @@
   "name": "vay-tutor-client",
   "productName": "Vay Tutor Client",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Client-only installation. Opens a Vay Tutor host in tabs.",
   "author": "Vay Tutor",
   "main": "src/main.js",

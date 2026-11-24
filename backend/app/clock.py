@@ -9,12 +9,17 @@ DEFAULT_TIMEZONE = "Asia/Kolkata"
 
 
 def coerce_timezone(value: str | None) -> str:
-    name = (value or "").strip() or DEFAULT_TIMEZONE
-    try:
-        ZoneInfo(name)
-    except ZoneInfoNotFoundError:
-        return DEFAULT_TIMEZONE
-    return name
+    """Pick a usable IANA name. Windows embeddable Python needs the tzdata package."""
+    candidates = [(value or "").strip(), DEFAULT_TIMEZONE, "UTC"]
+    for name in candidates:
+        if not name:
+            continue
+        try:
+            ZoneInfo(name)
+            return name
+        except ZoneInfoNotFoundError:
+            continue
+    return "UTC"
 
 
 def require_timezone(value: str) -> str:
@@ -27,7 +32,11 @@ def require_timezone(value: str) -> str:
 
 
 def local_today(timezone_name: str | None, now: datetime | None = None) -> str:
-    zone = ZoneInfo(coerce_timezone(timezone_name))
+    name = coerce_timezone(timezone_name)
+    try:
+        zone = ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        zone = timezone.utc
     moment = now.astimezone(zone) if now else datetime.now(zone)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc).astimezone(zone)

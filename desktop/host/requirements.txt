@@ -6,3 +6,4 @@ python-multipart==0.0.20
 pyotp==2.9.0
 openpyxl==3.1.5
 pyzipper==0.3.6
+tzdata==2025.2
