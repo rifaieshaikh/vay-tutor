@@ -33,6 +33,7 @@
       "src/supervisor.js",
       "src/tabs.js",
       "src/preload.js",
+      "src/prompt-preload.js",
       "ui/**",
       "package.json"
     ],

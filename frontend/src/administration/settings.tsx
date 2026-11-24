@@ -213,7 +213,7 @@ export function SettingsPage({ session }: { session: Session }) {
             <h2>Backup and restore</h2>
             <p>Save an encrypted zip of the database, files, and users. Restore replaces everything on this install, including accounts.</p>
           </div>
-          <div className="icon-actions">
+          <div className="actions">
             <button type="button" onClick={() => setBackingUp(true)}>Back up now</button>
             <button type="button" className="quiet" onClick={() => setRestoring(true)}>Restore…</button>
           </div>
